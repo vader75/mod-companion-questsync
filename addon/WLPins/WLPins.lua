@@ -157,57 +157,33 @@ end
 -- drawing
 --------------------------------------------------------------------------
 
--- Built-in textures only: the round badge uses the quickslot ring, the square one
--- is a plate built from WHITE8X8. Every badge gets a black outline underlay so it
--- reads against parchment, snow and dark forest alike.
-local RING_ROUND = "Interface\\Buttons\\UI-Quickslot2"
-local WHITE      = "Interface\\Buttons\\WHITE8X8"
-
+-- No textures at all: the marker is a glyph.
+--
+-- A coloured "?" or "!" with an outline is the client's own language for quests, it
+-- needs no art assets, and it cannot degenerate into a black square the way a
+-- plate-and-ring badge does at map scale. Colour says whose business it is, the glyph
+-- says what to do, the label says which quest - and nothing is boxed.
 local function NewPin(index)
     local f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
-    f:SetSize(34, 34)
+    f:SetSize(26, 26)
 
-    -- A solid coloured face on a black outline, with a dark glyph on top. The first
-    -- version layered a quickslot RING texture over a black plate, which at 30 px read
-    -- as a black square: the ring's middle is transparent, so all that showed was the
-    -- plate behind it. Colour has to be the fill, not a hairline edge.
-    f.outline = f:CreateTexture(nil, "BACKGROUND")
-    f.outline:SetPoint("CENTER")
-    f.outline:SetSize(32, 32)
-    f.outline:SetTexture(WHITE)
-    f.outline:SetVertexColor(0, 0, 0, 1)
+    -- a soft offset copy of the glyph, so it holds up over bright parchment without a
+    -- plate behind it (the OUTLINE font flag alone thins out at small sizes)
+    f.shadow = f:CreateFontString(nil, "BACKGROUND")
+    f.shadow:SetFont(STANDARD_TEXT_FONT, 25, "OUTLINE")
+    f.shadow:SetPoint("CENTER", f, "CENTER", 1, -1)
+    f.shadow:SetTextColor(0, 0, 0, 0.9)
 
-    f.shape = f:CreateTexture(nil, "ARTWORK")
-    f.shape:SetPoint("CENTER")
-    f.shape:SetSize(26, 26)
-    f.shape:SetTexture(WHITE)
+    f.glyph = f:CreateFontString(nil, "OVERLAY")
+    f.glyph:SetFont(STANDARD_TEXT_FONT, 25, "OUTLINE")
+    f.glyph:SetPoint("CENTER", f, "CENTER", 0, 0)
 
-    f.plate = f:CreateTexture(nil, "ARTWORK")
-    f.plate:SetPoint("CENTER")
-    f.plate:SetSize(26, 26)
-    f.plate:SetTexture(WHITE)
-    f.plate:SetAlpha(0)          -- kept for compatibility, unused
-
-    f.glyph = CreateFrame("Frame", nil, f)
-    f.glyph.text = f.glyph:CreateFontString(nil, "OVERLAY")
-    f.glyph.text:SetFont(STANDARD_TEXT_FONT, 16, "OUTLINE")
-    f.glyph.text:SetPoint("CENTER", f, "CENTER", 0, 0)
-
-    f.tab = CreateFrame("Frame", nil, f)
-    f.tab:SetPoint("TOP", f, "BOTTOM", 0, -3)
-    f.tab:SetHeight(17)
-    f.tab.outline = f.tab:CreateTexture(nil, "BACKGROUND")
-    f.tab.outline:SetAllPoints(f.tab)
-    f.tab.outline:SetTexture(WHITE)
-    f.tab.outline:SetVertexColor(0, 0, 0, 0.95)
-    f.tab.bg = f.tab:CreateTexture(nil, "BORDER")
-    f.tab.bg:SetPoint("TOPLEFT", 2, -2)
-    f.tab.bg:SetPoint("BOTTOMRIGHT", -2, 2)
-    f.tab.bg:SetTexture(WHITE)
-    f.tab.bg:SetVertexColor(0.07, 0.06, 0.05, 0.95)
-    f.tab.text = f.tab:CreateFontString(nil, "OVERLAY")
-    f.tab.text:SetFont(STANDARD_TEXT_FONT, 12, "OUTLINE")
-    f.tab.text:SetPoint("CENTER", f.tab, "CENTER", 0, 0)
+    -- label to the right of the marker: the terrain under it stays visible, unlike a
+    -- black bar sitting on the map
+    f.label = f:CreateFontString(nil, "OVERLAY")
+    f.label:SetFont(STANDARD_TEXT_FONT, 11, "OUTLINE")
+    f.label:SetPoint("LEFT", f, "RIGHT", 4, 0)
+    f.label:SetJustifyH("LEFT")
 
     f:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -216,7 +192,7 @@ local function NewPin(index)
             GameTooltip:AddLine(pin.quest or "companion quest", 1, 0.92, 0.6)
             GameTooltip:AddLine(string.format("%s - %s", pin.style.label,
                 (pin.zone and pin.zone ~= "" and pin.zone or "here")), 0.85, 0.85, 0.85)
-            GameTooltip:AddLine(string.format("%d, %d", pin.x, pin.y), 0.6, 0.6, 0.6)
+            GameTooltip:AddLine(string.format("map %d, %d", pin.x, pin.y), 0.6, 0.6, 0.6)
             GameTooltip:AddLine("right-click to remove", 0.5, 0.5, 0.5)
         end
         GameTooltip:Show()
@@ -236,11 +212,10 @@ function WLPins:Redraw()
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
     local now = time()
     local shown = 0
-    WLPins.placedTabs = {}
+    local placed = {}
 
-    -- Drop pins that have outlived their use instead of recolouring them. The old
-    -- "stale" tint was a dark red plate that read as a black square left behind, and
-    -- nothing ever removed it.
+    -- Drop pins that have outlived their use instead of recolouring them: the old
+    -- "stale" tint was a dark plate that read as a black square nothing ever removed.
     for i = #self.pins, 1, -1 do
         if (now - (self.pins[i].at or 0)) > PIN_LIFETIME then
             table.remove(self.pins, i)
@@ -248,10 +223,9 @@ function WLPins:Redraw()
     end
 
     for i, pin in ipairs(self.pins) do
-        -- Reuse the frame at this index. Creating a new one each redraw orphaned the
-        -- previous frame: it stayed parented to the world map and visible, so every
-        -- map open or zoom left another black-outlined badge behind that nothing could
-        -- remove. WORLD_MAP_UPDATE fires often enough for that to pile up quickly.
+        -- Reuse the frame at this index: creating a new one per redraw orphaned the old
+        -- one, still parented to the map and still visible, so every zoom left another
+        -- marker behind that nothing could hide.
         local f = WLPins.frames[i] or NewPin(i)
         f.pin = pin
 
@@ -265,66 +239,34 @@ function WLPins:Redraw()
         local style = pin.style or STYLE.other
         local r, g, b = style.ring[1], style.ring[2], style.ring[3]
 
-        -- Round = a coloured ring around an ivory face (readable at 30 px, and the
-        -- middle is filled rather than transparent, which is what made the old version
-        -- look like a black square). Square = a solid coloured plate. Either way the
-        -- black outline underneath keeps it off the parchment.
-        if style.shape == "round" then
-            f.outline:SetTexture(RING_ROUND)
-            f.outline:SetSize(38, 38)
-            f.outline:SetVertexColor(0, 0, 0, 1)
-            f.shape:SetTexture(RING_ROUND)
-            f.shape:SetSize(32, 32)
-            f.shape:SetVertexColor(r, g, b, 1)
-
-            f.plate:SetTexture(WHITE)
-            f.plate:SetSize(20, 20)
-            f.plate:SetVertexColor(0.97, 0.94, 0.86, 1)
-            f.plate:SetAlpha(1)
-        else
-            f.outline:SetTexture(WHITE)
-            f.outline:SetSize(32, 32)
-            f.outline:SetVertexColor(0, 0, 0, 1)
-            f.shape:SetTexture(WHITE)
-            f.shape:SetSize(26, 26)
-            f.shape:SetVertexColor(r, g, b, 1)
-            f.plate:SetAlpha(0)
-        end
-
-        f.glyph.text:SetText(style.glyph)
-        f.glyph.text:SetTextColor(0.05, 0.05, 0.05)
+        f.glyph:SetText(style.glyph)
+        f.glyph:SetTextColor(r, g, b)
+        f.shadow:SetText(style.glyph)
 
         local text = pin.quest or "companion quest"
-        if #text > 24 then text = string.sub(text, 1, 22) .. "..." end
-        f.tab.text:SetText(text .. "  |cffb0a898(" .. style.label .. ")|r")
-        f.tab:SetWidth(math.max(46, f.tab.text:GetStringWidth() + 14))
+        if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
+        f.label:SetText(text)
+        f.label:SetTextColor(r, g, b)
 
-        -- Labels collide when two quests sit close together (two Goldshire hand-ins
-        -- are 4% apart, invisible at map scale). Try the row under the badge, then push
-        -- it further down until it clears the tabs already placed in this redraw.
-        local tabWidth = f.tab:GetWidth()
-
-        local function overlaps(ax, ay, aw, bx, by, bw)
-            return math.abs(ax - bx) * 2 < (aw + bw) and math.abs(ay - by) < 18
-        end
-
-        for row = 0, 3 do
-            local tabY = py + 21 + row * 18
+        -- Nudge the label down a row when it would land on one already placed: two
+        -- Goldshire hand-ins are four percent apart, invisible at map scale.
+        local width = f.label:GetStringWidth()
+        local row = 0
+        for attempt = 0, 3 do
+            row = attempt
             local clash = false
-            for _, other in ipairs(WLPins.placedTabs) do
-                if overlaps(px, tabY, tabWidth, other.x, other.y, other.w) then
+            for _, other in ipairs(placed) do
+                if math.abs(px - other.x) * 2 < (width + other.w)
+                   and math.abs(py - (other.y)) < 13 then
                     clash = true
                     break
                 end
             end
-
-            if not clash then
-                f.tab:ClearAllPoints()
-                f.tab:SetPoint("TOP", f, "BOTTOM", 0, -3 - row * 18)
-                table.insert(WLPins.placedTabs, { x = px, y = tabY, w = tabWidth })
-                break
-            end
+            if not clash then break end
         end
+
+        f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
+        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width })
 
         shown = shown + 1
     end
