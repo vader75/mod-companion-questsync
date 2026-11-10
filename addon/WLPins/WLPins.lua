@@ -19,6 +19,7 @@ local PIN_LIFETIME = 30 * 60          -- seconds a pin stays useful
 local FLIP_Y = false                  -- set true with /wlpins flip if pins land mirrored
 
 local WLPins = CreateFrame("Frame")
+WLPins.debug = false
 WLPins.pins = {}                      -- [{x=, y=, colour=, label=, at=, zone=}]
 WLPins.frames = {}
 
@@ -198,6 +199,9 @@ WLPins:SetScript("OnEvent", function(self, event, arg1, arg2)
             #self.pins .. " pin(s). /wlpins for help.")
 
     elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER" then
+        if self.debug then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper: " .. tostring(arg1))
+        end
         local x, y = ParseCoords(arg1)
         if x and y then
             local colour, label = Classify(arg1)
@@ -236,6 +240,15 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r vertical flip " ..
             (FLIP_Y and "on" or "off") .. " (pins move to the other side of the map).")
 
+    elseif msg == "test" then
+        AddPin(48, 52, { r = 1, g = 0.82, b = 0.16 }, "TEST PIN")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test pin at 48, 52 - press M and look mid-map.")
+
+    elseif msg == "debug" then
+        WLPins.debug = not WLPins.debug
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper logging " ..
+            (WLPins.debug and "on" or "off") .. ".")
+
     elseif msg == "list" then
         if #WLPins.pins == 0 then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r: no pins.")
@@ -251,6 +264,8 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list  - what is pinned")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins clear - remove every pin")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins flip  - pins mirrored top/bottom? flip them")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins test  - draw a pin at 48,52 to prove drawing works")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins debug - log every whisper the addon hears")
         DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
     end
 end
