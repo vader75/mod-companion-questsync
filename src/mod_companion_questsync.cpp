@@ -1130,37 +1130,50 @@ namespace
     /// the module asks its AI to run that first: real coin, nothing lost. Without a
     /// vendor in interact range the action is a no-op, which makes it safe to try
     /// whenever the bags get tight.
-    /// Cover the last few yards to the quest giver.
+    /// Get the companion the last few yards to a quest giver.
     ///
-    /// playerbots only takes a bot as far as its master: stand 15 yards from the NPC
-    /// and the companion waits behind you, so the hand-in fails with "cannot talk to
-    /// the quest giver" and the player has to lead it by hand. When the companion has
-    /// something to hand in and the giver is within reach, walk it the rest of the way
-    /// - never further than 80 yards, and never while the player is more than 40 yards
-    /// off, so it cannot wander across the zone on its own.
+    /// playerbots only escorts a bot as far as its master: stand 15 yards from the
+    /// NPC and the companion waits behind you, so the hand-in fails with "cannot
+    /// talk to the quest giver" and the player has to lead it by hand.
+    ///
+    /// Walking it does not work. The module used to issue a MovePoint toward the NPC
+    /// every 8 s, but playerbots' follow generator runs every tick and drags the bot
+    /// back to its master a fraction of a second later - the log showed the gap
+    /// *growing* (43 yd, then 50 yd) while it kept "walking". So step it instead,
+    /// beside the giver rather than on top of it, and let its own reward action fire
+    /// from interaction range.
     void WalkToGiver(Player* owner, Player* bot, Creature* npc)
     {
         if (!npc || bot->IsInCombat() || npc->IsInCombat())
             return;
 
         float const toNpc = bot->GetDistance(npc);
-        if (toNpc <= 5.0f || toNpc > 80.0f)
+        if (toNpc <= 6.0f || toNpc > 80.0f)
             return;
 
-        if (owner->GetDistance(bot) > 40.0f)
+        if (owner->GetDistance(bot) > 80.0f)
             return;
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_walkAt[botGuid];
-        if (last && now - last < 8)
-            return;                                  // one step every few seconds
+        if (last && now - last < 20)
+            return;                                  // one hop per twenty seconds
 
         last = now;
-        bot->GetMotionMaster()->MovePoint(0, npc->GetPosition(), FORCED_MOVEMENT_NONE, 0.f, true, true);
 
-        if (g_cfg.debug >= 2)
-            LOG_INFO("server.loading", "[CompanionQuestSync] walking {} to {} ({:.0f} yd)",
+        float const angle = npc->GetAngle(bot);
+        float x = npc->GetPositionX() + 2.5f * std::cos(angle);
+        float y = npc->GetPositionY() + 2.5f * std::sin(angle);
+        float z = npc->GetPositionZ();
+
+        bot->UpdateGroundPositionZ(x, y, z);
+        bot->StopMoving();
+        bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+        bot->SetFacingToObject(npc);
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] stepped {} to {} ({:.0f} yd)",
                      bot->GetName(), npc->GetName(), toNpc);
     }
 
@@ -1830,7 +1843,9 @@ namespace
         if (!force && line == last && (sentAt && now - sentAt < 600))
             return;
 
-        bot->Whisper(line, LANG_UNIVERSAL, owner);
+        // Grey and quiet: the addon needs the line, the player does not need to read
+        // it. Colour codes are stripped by WLPins before it parses.
+        bot->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
 
         last = line;
         g_pinSyncAt[ownerGuid] = now;

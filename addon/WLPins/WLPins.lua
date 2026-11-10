@@ -297,13 +297,18 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         end
         -- "Finished 'Kobold Candles' - that pin can go." arrives when the companion
         -- actually hands a quest in; the marker has done its job by then.
-        local syncCount, payload = string.match(arg1 or "", "^Pin sync (%d+):%s*(.*)$")
+        -- the server greys these lines so they do not shout in chat; strip the
+        -- colour codes before trying to read anything out of them
+        local text = string.gsub(arg1 or "", "|c%x%x%x%x%x%x%x%x", "")
+        text = string.gsub(text, "|r", "")
+
+        local syncCount, payload = string.match(text, "^Pin sync (%d+):%s*(.*)$")
         if syncCount then
             SyncPins(payload)
             return
         end
 
-        local done = string.match(arg1 or "", "Finished '([^']+)'")
+        local done = string.match(text, "Finished '([^']+)'")
         if done then
             RemoveByQuest(done)
             if self.debug then
@@ -312,9 +317,9 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
             return
         end
 
-        local x, y = ParseCoords(arg1)
+        local x, y = ParseCoords(text)
         if x and y then
-            AddPin(x, y, Classify(arg1), ParseQuestName(arg1) or "companion quest")
+            AddPin(x, y, Classify(text), ParseQuestName(text) or "companion quest")
         end
 
     elseif event == "WORLD_MAP_UPDATE" then
