@@ -80,4 +80,4 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 
 ## Licence
 
-AGPL-3.0, matching AzerothCore.
+GPL-2.0, matching AzerothCore and mod-playerbots.
