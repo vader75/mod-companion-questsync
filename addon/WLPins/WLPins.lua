@@ -1,35 +1,38 @@
--- WL Companion Pins - 3.3.5a (Interface 30300)
+-- WL Companion Pins - 3.3.5a (Interface 30300)  v0.3
 --
--- The server cannot tint a quest-area pin and cannot draw one for a quest that is
--- not in your own log. What it CAN do is tell you where the companion needs to go,
--- and it already does that in its whisper: "... about 456 yards from me, map 82, 34."
+-- The server cannot draw a quest-area pin for a quest that is not in your own log,
+-- and cannot colour one at all. The companion already says where it needs to go:
+--   "... I will gather them as we go (map 64, 59)."
+--   "... I will hand it in next time we are near (map 43, 65)."
+-- This addon turns those whispers into signposts.
 --
--- This addon reads those whispers and puts a coloured pin at those map coordinates,
--- so the companion's errands show up on your world map as their own markers:
---
---   gold pin   the companion still owes its own copy of a quest you already finished
---   blue pin   a quest you are both working on, and the giver is that way
---   red pin    a pin older than 30 minutes (stale, click to remove)
---
--- No libraries, no server changes. Install, log in, and the companion's whispers
--- start drawing pins. Right-click a pin to remove it, or /wlpins clear.
+-- v0.3  shape carries the meaning, not just colour: a round badge for a hand-in,
+--       a square badge with a corner flag for work still to do, and both sit on a
+--       black outline plate so nothing can be mistaken for map art.
 
 local ADDON = "WLPins"
-local PIN_LIFETIME = 30 * 60          -- seconds a pin stays useful
-local FLIP_Y = false                  -- set true with /wlpins flip if pins land mirrored
+local PIN_LIFETIME = 30 * 60
+local FLIP_Y = false
 
 local WLPins = CreateFrame("Frame")
 WLPins.debug = false
 WLPins.offsetX = 0
 WLPins.offsetY = 0
-WLPins.pins = {}                      -- [{x=, y=, colour=, label=, at=, zone=}]
+WLPins.pins = {}
 WLPins.frames = {}
 
---------------------------------------------------------------------------
--- parsing
---------------------------------------------------------------------------
+-- shape: "round" (hand-in) or "square" (work to do)
+local STYLE = {
+    handin = { key = "handin", label = "hand in",  glyph = "?", shape = "round",
+               ring = { 1.00, 0.80, 0.15 } },
+    gather = { key = "gather", label = "to gather", glyph = "!", shape = "square",
+               ring = { 0.35, 0.95, 0.35 } },
+    finish = { key = "finish", label = "to finish", glyph = "!", shape = "square",
+               ring = { 0.35, 0.95, 0.35 } },
+    other  = { key = "other",  label = "quest",     glyph = "?", shape = "square",
+               ring = { 0.40, 0.70, 1.00 } },
+}
 
--- "... map 82, 34." / "(map 82, 34)" - digits, comma, digits, not part of a bigger number
 local function ParseCoords(text)
     if type(text) ~= "string" then return nil end
     local x, y = string.match(text, "map%s+(%d+)%s*,%s*(%d+)")
@@ -39,15 +42,19 @@ local function ParseCoords(text)
     return x, y
 end
 
+local function ParseQuestName(text)
+    if type(text) ~= "string" then return nil end
+    local name = string.match(text, "'([^']+)'")      -- 'Kobold Candles'
+    if name then return name end
+    return string.match(text, "\"([^\"]+)\"")
+end
+
 local function Classify(text)
     local lower = string.lower(text or "")
-    if string.find(lower, "my own copy") then
-        return { r = 1.00, g = 0.82, b = 0.16 }, "companion turn-in"
-    end
-    if string.find(lower, "still owe") or string.find(lower, "help each other") then
-        return { r = 0.20, g = 0.90, b = 0.30 }, "quest to finish"
-    end
-    return { r = 0.25, g = 0.60, b = 1.00 }, "turn-in"
+    if string.find(lower, "my own copy") or string.find(lower, "hand it in") then return STYLE.handin end
+    if string.find(lower, "i still owe") then return STYLE.gather end
+    if string.find(lower, "to finish") then return STYLE.finish end
+    return STYLE.other
 end
 
 local function CurrentZoneName()
@@ -61,13 +68,11 @@ end
 
 local function SaveDB()
     WLPinsDB = WLPinsDB or {}
-    WLPinsDB.offsetX = WLPins.offsetX
-    WLPinsDB.offsetY = WLPins.offsetY
+    WLPinsDB.offsetX, WLPinsDB.offsetY = WLPins.offsetX, WLPins.offsetY
     WLPinsDB.pins = {}
     for i, pin in ipairs(WLPins.pins) do
-        WLPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at,
-                             label = pin.label, zone = pin.zone,
-                             r = pin.colour.r, g = pin.colour.g, b = pin.colour.b }
+        WLPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
+                             zone = pin.zone, style = pin.style.key }
     end
 end
 
@@ -77,24 +82,22 @@ local function LoadDB()
     WLPins.offsetY = WLPinsDB.offsetY or 0
     for _, saved in ipairs(WLPinsDB.pins or {}) do
         table.insert(WLPins.pins, {
-            x = saved.x, y = saved.y, at = saved.at, label = saved.label, zone = saved.zone,
-            colour = { r = saved.r or 1, g = saved.g or 0.82, b = saved.b or 0.16 },
+            x = saved.x, y = saved.y, at = saved.at, quest = saved.quest,
+            zone = saved.zone, style = STYLE[saved.style or "other"] or STYLE.other,
         })
     end
 end
 
-local function AddPin(x, y, colour, label)
-    -- one pin per spot: refresh instead of stacking
+local function AddPin(x, y, style, quest)
     for _, pin in ipairs(WLPins.pins) do
         if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5 then
-            pin.at, pin.colour, pin.label, pin.zone = time(), colour, label, CurrentZoneName()
+            pin.at, pin.style, pin.quest, pin.zone = time(), style, quest, CurrentZoneName()
             SaveDB(); WLPins:Redraw()
             return
         end
     end
-
-    table.insert(WLPins.pins, { x = x, y = y, at = time(), colour = colour,
-                                label = label, zone = CurrentZoneName() })
+    table.insert(WLPins.pins, { x = x, y = y, at = time(), style = style,
+                                quest = quest, zone = CurrentZoneName() })
     SaveDB(); WLPins:Redraw()
 end
 
@@ -109,41 +112,63 @@ end
 -- drawing
 --------------------------------------------------------------------------
 
-local function PinFrame(index)
-    local f = WLPins.frames[index]
-    if f then return f end
+-- Built-in textures only: the round badge uses the quickslot ring, the square one
+-- is a plate built from WHITE8X8. Every badge gets a black outline underlay so it
+-- reads against parchment, snow and dark forest alike.
+local RING_ROUND = "Interface\\Buttons\\UI-Quickslot2"
+local WHITE      = "Interface\\Buttons\\WHITE8X8"
 
-    f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
-    f:SetSize(16, 16)
+local function NewPin(index)
+    local f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
+    f:SetSize(34, 34)
 
-    f.glow = f:CreateTexture(nil, "BACKGROUND")
-    f.glow:SetAllPoints(f)
-    f.glow:SetTexture("Interface\\Buttons\\WHITE8X8")
-    f.glow:SetVertexColor(1, 1, 1, 0.35)
+    f.outline = f:CreateTexture(nil, "BACKGROUND")
+    f.outline:SetPoint("CENTER")
+    f.outline:SetSize(36, 36)
+    f.outline:SetTexture(WHITE)
+    f.outline:SetVertexColor(0, 0, 0, 0.95)      -- black outline plate
 
-    f.dot = f:CreateTexture(nil, "ARTWORK")
-    f.dot:SetPoint("CENTER")
-    f.dot:SetSize(12, 12)
-    f.dot:SetTexture("Interface\\Buttons\\WHITE8X8")
+    f.shape = f:CreateTexture(nil, "BACKGROUND")
+    f.shape:SetPoint("CENTER")
+    f.shape:SetSize(30, 30)
+    f.shape:SetTexture(RING_ROUND)                -- ring texture doubles as the face
 
-    f.ring = f:CreateTexture(nil, "OVERLAY")
-    f.ring:SetPoint("CENTER")
-    f.ring:SetSize(16, 16)
-    f.ring:SetTexture("Interface\\Buttons\\WHITE8X8")
-    f.ring:SetVertexColor(0, 0, 0, 0.55)
+    f.plate = f:CreateTexture(nil, "ARTWORK")
+    f.plate:SetPoint("CENTER")
+    f.plate:SetSize(22, 22)
+    f.plate:SetTexture(WHITE)
+    f.plate:SetVertexColor(0.05, 0.04, 0.03, 0.95)  -- dark face keeps text legible
 
-    f.label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.label:SetPoint("BOTTOM", f, "TOP", 0, 2)
-    f.label:SetTextColor(1, 0.92, 0.65)
+    f.glyph = CreateFrame("Frame", nil, f)
+    f.glyph.text = f.glyph:CreateFontString(nil, "OVERLAY")
+    f.glyph.text:SetFont(STANDARD_TEXT_FONT, 17, "OUTLINE")
+    f.glyph.text:SetPoint("CENTER", f, "CENTER", 0, 0)
+
+    f.tab = CreateFrame("Frame", nil, f)
+    f.tab:SetPoint("TOP", f, "BOTTOM", 0, -3)
+    f.tab:SetHeight(17)
+    f.tab.outline = f.tab:CreateTexture(nil, "BACKGROUND")
+    f.tab.outline:SetAllPoints(f.tab)
+    f.tab.outline:SetTexture(WHITE)
+    f.tab.outline:SetVertexColor(0, 0, 0, 0.95)
+    f.tab.bg = f.tab:CreateTexture(nil, "BORDER")
+    f.tab.bg:SetPoint("TOPLEFT", 2, -2)
+    f.tab.bg:SetPoint("BOTTOMRIGHT", -2, 2)
+    f.tab.bg:SetTexture(WHITE)
+    f.tab.bg:SetVertexColor(0.07, 0.06, 0.05, 0.95)
+    f.tab.text = f.tab:CreateFontString(nil, "OVERLAY")
+    f.tab.text:SetFont(STANDARD_TEXT_FONT, 12, "OUTLINE")
+    f.tab.text:SetPoint("CENTER", f.tab, "CENTER", 0, 0)
 
     f:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         local pin = self.pin
         if pin then
-            GameTooltip:AddLine(pin.label or "companion", 1, 0.9, 0.6)
-            GameTooltip:AddLine(string.format("%d, %d%s", pin.x, pin.y,
-                pin.zone and pin.zone ~= "" and ("  " .. pin.zone) or ""), 0.9, 0.9, 0.9)
-            GameTooltip:AddLine("right-click to remove", 0.6, 0.6, 0.6)
+            GameTooltip:AddLine(pin.quest or "companion quest", 1, 0.92, 0.6)
+            GameTooltip:AddLine(string.format("%s - %s", pin.style.label,
+                (pin.zone and pin.zone ~= "" and pin.zone or "here")), 0.85, 0.85, 0.85)
+            GameTooltip:AddLine(string.format("%d, %d", pin.x, pin.y), 0.6, 0.6, 0.6)
+            GameTooltip:AddLine("right-click to remove", 0.5, 0.5, 0.5)
         end
         GameTooltip:Show()
     end)
@@ -164,27 +189,44 @@ function WLPins:Redraw()
     local shown = 0
 
     for i, pin in ipairs(self.pins) do
-        local stale = (now - (pin.at or 0)) > PIN_LIFETIME
-        local f = PinFrame(i)
+        local f = NewPin(i)
         f.pin = pin
 
-        -- calibration: the detail frame carries a margin the terrain texture does
-        -- not, so pure percentages land a few percent right and low. /wlpins offset
-        -- moves every pin by whole percent until they sit on the roads they belong to.
         local px = ((pin.x + WLPins.offsetX) / 100) * w
         local py = (FLIP_Y and (1 - (pin.y + WLPins.offsetY) / 100)
-                             or ((pin.y + WLPins.offsetY) / 100)) * h
+                           or ((pin.y + WLPins.offsetY) / 100)) * h
         f:ClearAllPoints()
         f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
         f:Show()
 
-        local c = pin.colour or { r = 1, g = 0.82, b = 0.16 }
-        if stale then
-            f.dot:SetVertexColor(1, 0.25, 0.20, 0.75)
+        local style = pin.style or STYLE.other
+        local stale = (now - (pin.at or 0)) > PIN_LIFETIME
+        local r, g, b = style.ring[1], style.ring[2], style.ring[3]
+        if stale then r, g, b = 0.75, 0.35, 0.30 end
+
+        -- round badge for a hand-in, square plate for work left to do
+        if style.shape == "round" then
+            f.shape:SetTexture(RING_ROUND)
+            f.shape:SetSize(30, 30)
+            f.shape:SetVertexColor(r, g, b, 1)
+            f.plate:SetSize(20, 20)
+            f.plate:Show()
         else
-            f.dot:SetVertexColor(c.r, c.g, c.b, 1)
+            f.shape:SetTexture(WHITE)
+            f.shape:SetSize(30, 30)
+            f.shape:SetVertexColor(r, g, b, 1)
+            f.plate:SetSize(24, 24)
+            f.plate:Show()
         end
-        f.label:SetText(pin.label or "")
+
+        f.glyph.text:SetText(style.glyph)
+        f.glyph.text:SetTextColor(r, g, b)
+
+        local text = pin.quest or "companion quest"
+        if #text > 24 then text = string.sub(text, 1, 22) .. "..." end
+        f.tab.text:SetText(text .. "  |cffb0a898(" .. style.label .. ")|r")
+        f.tab:SetWidth(math.max(46, f.tab.text:GetStringWidth() + 14))
+
         shown = shown + 1
     end
 
@@ -202,10 +244,10 @@ WLPins:RegisterEvent("CHAT_MSG_WHISPER")
 WLPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 WLPins:RegisterEvent("WORLD_MAP_UPDATE")
 
-WLPins:SetScript("OnEvent", function(self, event, arg1, arg2)
+WLPins:SetScript("OnEvent", function(self, event, arg1)
     if event == "PLAYER_LOGIN" then
         LoadDB()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r loaded - " ..
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r v0.3 loaded - " ..
             #self.pins .. " pin(s). /wlpins for help.")
 
     elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER" then
@@ -214,8 +256,7 @@ WLPins:SetScript("OnEvent", function(self, event, arg1, arg2)
         end
         local x, y = ParseCoords(arg1)
         if x and y then
-            local colour, label = Classify(arg1)
-            AddPin(x, y, colour, label)
+            AddPin(x, y, Classify(arg1), ParseQuestName(arg1) or "companion quest")
         end
 
     elseif event == "WORLD_MAP_UPDATE" then
@@ -223,16 +264,15 @@ WLPins:SetScript("OnEvent", function(self, event, arg1, arg2)
     end
 end)
 
--- the map frame is rebuilt whenever the zone changes; redraw after it settles
-local hooked = CreateFrame("Frame")
-hooked:RegisterEvent("ZONE_CHANGED")
-hooked:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-hooked:SetScript("OnEvent", function()
+local zoneWatch = CreateFrame("Frame")
+zoneWatch:RegisterEvent("ZONE_CHANGED")
+zoneWatch:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+zoneWatch:SetScript("OnEvent", function()
     if WorldMapFrame and WorldMapFrame:IsShown() then WLPins:Redraw() end
 end)
 
 --------------------------------------------------------------------------
--- slash command
+-- commands
 --------------------------------------------------------------------------
 
 SLASH_WLPINS1 = "/wlpins"
@@ -248,7 +288,7 @@ SlashCmdList["WLPINS"] = function(msg)
         FLIP_Y = not FLIP_Y
         WLPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r vertical flip " ..
-            (FLIP_Y and "on" or "off") .. " (pins move to the other side of the map).")
+            (FLIP_Y and "on" or "off") .. ".")
 
     elseif string.find(msg, "^offset") then
         local ox, oy = string.match(msg, "^offset%s+(-?%d+)%s*(-?%d+)")
@@ -264,8 +304,8 @@ SlashCmdList["WLPINS"] = function(msg)
         end
 
     elseif msg == "test" then
-        AddPin(48, 52, { r = 1, g = 0.82, b = 0.16 }, "TEST PIN")
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test pin at 48, 52 - press M and look mid-map.")
+        AddPin(48, 52, STYLE.handin, "TEST PIN")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test badge at 48, 52 - press M.")
 
     elseif msg == "debug" then
         WLPins.debug = not WLPins.debug
@@ -278,17 +318,16 @@ SlashCmdList["WLPINS"] = function(msg)
             return
         end
         for _, pin in ipairs(WLPins.pins) do
-            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cff00ccffWLPins|r %d, %d - %s",
-                pin.x, pin.y, pin.label or "?"))
+            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cff00ccffWLPins|r %d, %d - %s (%s)",
+                pin.x, pin.y, pin.quest or "?", pin.style.label))
         end
 
     else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r - pins from the companion's whispers")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list  - what is pinned")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins clear - remove every pin")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins flip  - pins mirrored top/bottom? flip them")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins test  - draw a pin at 48,52 to prove drawing works")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins debug - log every whisper the addon hears")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r - signposts from the companion's whispers")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  hand in a copy the companion owes")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff66b3ffsquare blue ?|r  a turn-in only it can do")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
         DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
     end
