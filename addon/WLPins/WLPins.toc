@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: WL Companion Pins
+## Notes: Draws map pins for the companion's quest turn-ins, read from its whispers ("... map 82, 34").
+## Notes-de-DE: Zeichnet Kartenmarkierungen fuer die Quest-Abgabe des Begleiters.
+## Author: Hermes (for WOW Legends)
+## Version: 0.1
+## SavedVariables: WLPinsDB
+## X-Category: Map
+
+WLPins.lua

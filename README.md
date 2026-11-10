@@ -78,6 +78,18 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 - The sweep is owner → companion only. A companion that races ahead is left alone unless `DropExtraBotQuests` is enabled.
 - Map pins are best effort: the 3.3.5 client decides whether to draw POIs for quests outside its own log, so the whisper always carries map coordinates as a fallback.
 
+## Companion addon: coloured map pins
+
+`addon/WLPins/` is an optional 3.3.5a client addon that draws the companion's
+turn-ins on your world map. The client decides how quest areas look and will not
+draw one for a quest outside your own log, and the quest-POI packet carries no
+colour, so this cannot be done server-side. The addon reads the coordinates the
+module already whispers (`... map 82, 34`) and pins them in colour: gold for a
+copy the companion owns but you have finished, green for a quest you share, blue
+for a ready turn-in.
+
+Client-side only — no server change, no core edit. See `addon/WLPins/README.md`.
+
 ## Licence
 
 GPL-2.0, matching AzerothCore and mod-playerbots.
