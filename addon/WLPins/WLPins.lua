@@ -101,6 +101,16 @@ local function AddPin(x, y, style, quest)
     SaveDB(); WLPins:Redraw()
 end
 
+local function RemoveByQuest(name)
+    if not name then return end
+    local target = string.lower(name)
+    for i = #WLPins.pins, 1, -1 do
+        local quest = string.lower(WLPins.pins[i].quest or "")
+        if quest == target then table.remove(WLPins.pins, i) end
+    end
+    SaveDB(); WLPins:Redraw()
+end
+
 local function RemovePin(pin)
     for i, p in ipairs(WLPins.pins) do
         if p == pin then table.remove(WLPins.pins, i); break end
@@ -254,6 +264,17 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         if self.debug then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper: " .. tostring(arg1))
         end
+        -- "Finished 'Kobold Candles' - that pin can go." arrives when the companion
+        -- actually hands a quest in; the marker has done its job by then.
+        local done = string.match(arg1 or "", "Finished '([^']+)'")
+        if done then
+            RemoveByQuest(done)
+            if self.debug then
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r pin cleared: " .. done)
+            end
+            return
+        end
+
         local x, y = ParseCoords(arg1)
         if x and y then
             AddPin(x, y, Classify(arg1), ParseQuestName(arg1) or "companion quest")
