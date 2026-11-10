@@ -135,9 +135,13 @@ end
 local function RemoveByQuest(name)
     if not name then return end
     local target = string.lower(name)
+    local stem = string.gsub(target, "%.%.$", "")   -- the sync line shortens titles
     for i = #WLPins.pins, 1, -1 do
         local quest = string.lower(WLPins.pins[i].quest or "")
-        if quest == target then table.remove(WLPins.pins, i) end
+        local short = string.gsub(quest, "%.%.$", "")
+        if quest == target or short == stem then
+            table.remove(WLPins.pins, i)
+        end
     end
     SaveDB(); WLPins:Redraw()
 end
@@ -229,8 +233,21 @@ function WLPins:Redraw()
     local now = time()
     local shown = 0
 
+    -- Drop pins that have outlived their use instead of recolouring them. The old
+    -- "stale" tint was a dark red plate that read as a black square left behind, and
+    -- nothing ever removed it.
+    for i = #self.pins, 1, -1 do
+        if (now - (self.pins[i].at or 0)) > PIN_LIFETIME then
+            table.remove(self.pins, i)
+        end
+    end
+
     for i, pin in ipairs(self.pins) do
-        local f = NewPin(i)
+        -- Reuse the frame at this index. Creating a new one each redraw orphaned the
+        -- previous frame: it stayed parented to the world map and visible, so every
+        -- map open or zoom left another black-outlined badge behind that nothing could
+        -- remove. WORLD_MAP_UPDATE fires often enough for that to pile up quickly.
+        local f = WLPins.frames[i] or NewPin(i)
         f.pin = pin
 
         local px = ((pin.x + WLPins.offsetX) / 100) * w
@@ -241,18 +258,22 @@ function WLPins:Redraw()
         f:Show()
 
         local style = pin.style or STYLE.other
-        local stale = (now - (pin.at or 0)) > PIN_LIFETIME
         local r, g, b = style.ring[1], style.ring[2], style.ring[3]
-        if stale then r, g, b = 0.75, 0.35, 0.30 end
 
         -- round badge for a hand-in, square plate for work left to do
         if style.shape == "round" then
+            -- the outline follows the shape: a square black plate behind a round badge
+            -- showed four black corners that read as leftover boxes on the map
+            f.outline:SetTexture(RING_ROUND)
+            f.outline:SetSize(36, 36)
             f.shape:SetTexture(RING_ROUND)
             f.shape:SetSize(30, 30)
             f.shape:SetVertexColor(r, g, b, 1)
             f.plate:SetSize(20, 20)
             f.plate:Show()
         else
+            f.outline:SetTexture(WHITE)
+            f.outline:SetSize(34, 34)
             f.shape:SetTexture(WHITE)
             f.shape:SetSize(30, 30)
             f.shape:SetVertexColor(r, g, b, 1)
@@ -271,8 +292,9 @@ function WLPins:Redraw()
         shown = shown + 1
     end
 
-    for i = shown + 1, #self.frames do
+    for i = #self.pins + 1, #self.frames do
         self.frames[i]:Hide()
+        self.frames[i].pin = nil
     end
 end
 
