@@ -77,6 +77,7 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 - Timed quests are skipped by default (`SkipTimedQuests`), as are quests the companion's class or race cannot take (reported once, not counted as failures).
 - The sweep is owner → companion only. A companion that races ahead is left alone unless `DropExtraBotQuests` is enabled.
 - Map pins are best effort: the 3.3.5 client decides whether to draw POIs for quests outside its own log, so the whisper always carries map coordinates as a fallback.
+- **One companion per player.** `FindCompanionGuid` returns a single `bot_guid` for an owner, and the sweep, heartbeat, whisper funnel and pin sync are all keyed on the owner guid. A second bound companion is not tracked: it will not be levelled, will not have quests mirrored, and will not appear on the map. Supporting more than one companion needs the binding lookup to return a list, a per-bot key through those paths, and a pin format that names the companion — the addon already understands a `@Companion` suffix on pin entries (`43,65,h=Kobold Candles@Beta`) so the wire format can grow without breaking existing clients. Until that work is done, document one companion and keep the binding table to one row per player.
 
 ## Companion addon: coloured map pins
 
