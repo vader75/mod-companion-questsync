@@ -167,26 +167,30 @@ local function NewPin(index)
     local f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
     f:SetSize(34, 34)
 
+    -- A solid coloured face on a black outline, with a dark glyph on top. The first
+    -- version layered a quickslot RING texture over a black plate, which at 30 px read
+    -- as a black square: the ring's middle is transparent, so all that showed was the
+    -- plate behind it. Colour has to be the fill, not a hairline edge.
     f.outline = f:CreateTexture(nil, "BACKGROUND")
     f.outline:SetPoint("CENTER")
-    f.outline:SetSize(36, 36)
+    f.outline:SetSize(32, 32)
     f.outline:SetTexture(WHITE)
-    f.outline:SetVertexColor(0, 0, 0, 0.95)      -- black outline plate
+    f.outline:SetVertexColor(0, 0, 0, 1)
 
-    f.shape = f:CreateTexture(nil, "BACKGROUND")
+    f.shape = f:CreateTexture(nil, "ARTWORK")
     f.shape:SetPoint("CENTER")
-    f.shape:SetSize(30, 30)
-    f.shape:SetTexture(RING_ROUND)                -- ring texture doubles as the face
+    f.shape:SetSize(26, 26)
+    f.shape:SetTexture(WHITE)
 
     f.plate = f:CreateTexture(nil, "ARTWORK")
     f.plate:SetPoint("CENTER")
-    f.plate:SetSize(22, 22)
+    f.plate:SetSize(26, 26)
     f.plate:SetTexture(WHITE)
-    f.plate:SetVertexColor(0.05, 0.04, 0.03, 0.95)  -- dark face keeps text legible
+    f.plate:SetAlpha(0)          -- kept for compatibility, unused
 
     f.glyph = CreateFrame("Frame", nil, f)
     f.glyph.text = f.glyph:CreateFontString(nil, "OVERLAY")
-    f.glyph.text:SetFont(STANDARD_TEXT_FONT, 17, "OUTLINE")
+    f.glyph.text:SetFont(STANDARD_TEXT_FONT, 16, "OUTLINE")
     f.glyph.text:SetPoint("CENTER", f, "CENTER", 0, 0)
 
     f.tab = CreateFrame("Frame", nil, f)
@@ -261,29 +265,34 @@ function WLPins:Redraw()
         local style = pin.style or STYLE.other
         local r, g, b = style.ring[1], style.ring[2], style.ring[3]
 
-        -- round badge for a hand-in, square plate for work left to do
+        -- Round = a coloured ring around an ivory face (readable at 30 px, and the
+        -- middle is filled rather than transparent, which is what made the old version
+        -- look like a black square). Square = a solid coloured plate. Either way the
+        -- black outline underneath keeps it off the parchment.
         if style.shape == "round" then
-            -- the outline follows the shape: a square black plate behind a round badge
-            -- showed four black corners that read as leftover boxes on the map
             f.outline:SetTexture(RING_ROUND)
-            f.outline:SetSize(36, 36)
+            f.outline:SetSize(38, 38)
+            f.outline:SetVertexColor(0, 0, 0, 1)
             f.shape:SetTexture(RING_ROUND)
-            f.shape:SetSize(30, 30)
+            f.shape:SetSize(32, 32)
             f.shape:SetVertexColor(r, g, b, 1)
+
+            f.plate:SetTexture(WHITE)
             f.plate:SetSize(20, 20)
-            f.plate:Show()
+            f.plate:SetVertexColor(0.97, 0.94, 0.86, 1)
+            f.plate:SetAlpha(1)
         else
             f.outline:SetTexture(WHITE)
-            f.outline:SetSize(34, 34)
+            f.outline:SetSize(32, 32)
+            f.outline:SetVertexColor(0, 0, 0, 1)
             f.shape:SetTexture(WHITE)
-            f.shape:SetSize(30, 30)
+            f.shape:SetSize(26, 26)
             f.shape:SetVertexColor(r, g, b, 1)
-            f.plate:SetSize(24, 24)
-            f.plate:Show()
+            f.plate:SetAlpha(0)
         end
 
         f.glyph.text:SetText(style.glyph)
-        f.glyph.text:SetTextColor(r, g, b)
+        f.glyph.text:SetTextColor(0.05, 0.05, 0.05)
 
         local text = pin.quest or "companion quest"
         if #text > 24 then text = string.sub(text, 1, 22) .. "..." end
