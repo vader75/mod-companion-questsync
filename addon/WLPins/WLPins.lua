@@ -57,6 +57,16 @@ local function Classify(text)
     return STYLE.other
 end
 
+-- A pin may name the companion it belongs to ("Kobold Candles@Beta") once there is
+-- more than one. Splitting on '@' now means the wire format can grow without the
+-- client misreading a pinned quest literally called "Kobold Candles@Beta".
+local function SplitCompanion(name)
+    if not name then return nil, nil end
+    local quest, companion = string.match(name, "^(.-)@([%w]+)$")
+    if quest and quest ~= "" then return quest, companion end
+    return name, nil
+end
+
 local function CurrentZoneName()
     if GetZoneText then return GetZoneText() end
     return ""
@@ -245,6 +255,8 @@ function WLPins:Redraw()
 
         local text = pin.quest or "companion quest"
         if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
+        local questName, companion = SplitCompanion(text)
+        if companion then text = questName .. "  |cff9a9a9a" .. companion .. "|r" end
         f.label:SetText(text)
         f.label:SetTextColor(r, g, b)
 
