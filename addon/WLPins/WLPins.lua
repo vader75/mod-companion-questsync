@@ -101,6 +101,37 @@ local function AddPin(x, y, style, quest)
     SaveDB(); WLPins:Redraw()
 end
 
+-- "Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange" is the server's own
+-- answer to "which pins are real". Rebuilding from it is what cleans the map after a
+-- desync: anything it does not mention is removed, anything missing is added back.
+local function SyncPins(payload)
+    local fresh = {}
+    for entry in string.gmatch(payload or "", "[^|]+") do
+        local x, y, style, name = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+)$")
+        if x and y then
+            local key = string.lower(name)
+            local kept = nil
+            for _, pin in ipairs(WLPins.pins) do
+                if string.lower(pin.quest or "") == key then kept = pin.at end
+            end
+            table.insert(fresh, {
+                x = tonumber(x), y = tonumber(y),
+                style = (style == "h") and STYLE.handin or STYLE.gather,
+                quest = name, at = kept or time(), zone = CurrentZoneName(),
+            })
+        end
+    end
+
+    local removed = #WLPins.pins - #fresh
+    WLPins.pins = fresh
+    SaveDB(); WLPins:Redraw()
+
+    if WLPins.debug then
+        DEFAULT_CHAT_FRAME:AddMessage(string.format(
+            "|cff00ccffWLPins|r synced: %d pin(s), %d removed", #fresh, removed > 0 and removed or 0))
+    end
+end
+
 local function RemoveByQuest(name)
     if not name then return end
     local target = string.lower(name)
@@ -266,6 +297,12 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         end
         -- "Finished 'Kobold Candles' - that pin can go." arrives when the companion
         -- actually hands a quest in; the marker has done its job by then.
+        local syncCount, payload = string.match(arg1 or "", "^Pin sync (%d+):%s*(.*)$")
+        if syncCount then
+            SyncPins(payload)
+            return
+        end
+
         local done = string.match(arg1 or "", "Finished '([^']+)'")
         if done then
             RemoveByQuest(done)

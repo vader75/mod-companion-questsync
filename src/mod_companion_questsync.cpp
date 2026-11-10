@@ -45,11 +45,9 @@
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
-#ifdef MOD_PLAYERBOTS
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
-#include "PlayerbotAI.h"     // sell vendor trash, wear upgrades
-#include "Playerbots.h"      // GET_PLAYERBOT_AI
-#endif
+#include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
+#include "Playerbots.h"    // GET_PLAYERBOT_AI
 #include "QuestDef.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
@@ -78,6 +76,7 @@ namespace
         bool skipTimedQuests    = true;
         bool forceAccept        = false;
         uint32 debug            = 0;     // 0 silent, 1 per-change, 2 + heartbeat
+        bool pinSync            = true;  // keep the addon map reconciled with the companion
         bool announce           = true;
         bool announceLogin      = true;
         uint32 intervalSeconds  = 20;
@@ -151,6 +150,11 @@ namespace
     };
 
     std::unordered_map<uint32, SessionTally> g_session;   // owner guid -> tally
+    std::map<uint32, std::set<uint32>> g_sessionRefused;  // owner guid -> quests refused once
+    std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
+    std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
+    std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
+    std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -160,6 +164,7 @@ namespace
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
     std::map<std::pair<uint32, uint32>, std::string> g_openLatch;  // last owed-strings logged
     std::map<std::pair<uint32, uint32>, uint32> g_turnInHintAt;     // (bot, quest) -> unix time
+    std::map<std::pair<uint32, uint32>, uint32> g_rewardProdAt;     // (bot, quest) -> unix time
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
 
     bool AnyPlayerInWorld()
@@ -222,6 +227,7 @@ namespace
         std::string ownerName;
         std::string botName;
         std::vector<std::string> skipped;   // human readable, one per refused quest
+        std::vector<uint32> refusedIds;     // the same refusals, by quest id
         bool hasCompanion = false;
         bool companionOnline = false;
         bool grouped = false;
@@ -238,6 +244,7 @@ namespace
         g_cfg.skipTimedQuests    = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipTimedQuests", true);
         g_cfg.forceAccept        = sConfigMgr->GetOption<bool>("CompanionQuestSync.ForceAccept", false);
         g_cfg.debug              = sConfigMgr->GetOption<uint32>("CompanionQuestSync.Debug", 0);
+        g_cfg.pinSync            = sConfigMgr->GetOption<bool>("CompanionQuestSync.PinSync", true);
         g_cfg.announce           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceAtStartup", true);
         g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 20);
@@ -326,6 +333,7 @@ namespace
             return;
 
         report.skipped.push_back(quest->GetTitle() + " (" + std::to_string(quest->GetQuestId()) + "): " + reason);
+        report.refusedIds.push_back(quest->GetQuestId());
     }
 
     /// Why the companion cannot take this quest. `expected` marks the refusals
@@ -498,13 +506,48 @@ namespace
     {
         float mapX = x;
         float mapY = y;
-        Zone2MapCoordinates(mapX, mapY, zoneId);
+
+        // Map2ZoneCoordinates is the world -> map-percentage direction; the
+        // similarly named Zone2MapCoordinates converts the other way, which is why
+        // every coordinate this module produced came back out of range and was
+        // dropped by the guard below - no "map X, Y", so nothing for the addon to pin.
+        Map2ZoneCoordinates(mapX, mapY, zoneId);
 
         if (mapX < 0.0f || mapX > 100.0f || mapY < 0.0f || mapY > 100.0f)
             return std::string();
 
         return "map " + std::to_string(uint32(mapX)) + ", " + std::to_string(uint32(mapY));
     }
+    /// "map X, Y" for a quest's objective area, taken from its POI points. The
+    /// addon pins whatever the companion says out loud, so a hint without coordinates
+    /// is a hint that never becomes a pin - which is exactly what happened when only
+    /// the "far away" branch carried them.
+    std::string PoiCoords(Player* bot, Quest const* quest)
+    {
+        QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(quest->GetQuestId());
+        if (!poi)
+            return std::string();
+
+        for (QuestPOI const& entry : *poi)
+        {
+            if (entry.points.empty())
+                continue;
+
+            float x = float(entry.points[0].x);
+            float y = float(entry.points[0].y);
+            Map2ZoneCoordinates(x, y, bot->GetZoneId());
+
+            if (x >= 0.0f && x <= 100.0f && y >= 0.0f && y <= 100.0f)
+                return "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+
+            if (g_cfg.debug >= 2)
+                LOG_INFO("server.loading", "[CompanionQuestSync] POI {} out of range after conversion: {:.1f}, {:.1f}",
+                         quest->GetQuestId(), x, y);
+        }
+
+        return std::string();
+    }
+
     std::string ZoneName(uint32 zoneId)
     {
         if (AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId))
@@ -514,6 +557,8 @@ namespace
         return "an unknown zone";
     }
 
+    void SendPinSync(Player* owner, Player* bot, bool force);  // defined below
+    void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
     std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
 
     /// Mark the turn-in NPCs where the owner is already done and the companion is not.
@@ -562,6 +607,8 @@ namespace
             Creature* npc = owner->FindNearestCreature(spot.entry, 80.0f);
             if (!npc)
                 continue;
+
+            WalkToGiver(owner, bot, npc);
 
             owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, npc->GetGUID());
             marked += std::to_string(questId) + ",";
@@ -724,12 +771,31 @@ namespace
 
             float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
 
-            if (dist <= 25.0f)
+            // Interaction range is 5 yards, not 25: claiming "I am at the giver" from
+            // across the square is what made the module say it was handing a quest in
+            // while nothing on the bot side had even opened the gossip window.
+            if (dist <= 6.0f)
             {
                 last = now;
                 hintAt = nowTs;
+
+                // Actually ask the bot's AI to hand it in ("r" is playerbots' reward
+                // trigger). Previously the module announced a hand-in that nobody was
+                // performing - the quest sat COMPLETE with all eight candles in its bags.
+                uint32& prodAt = g_rewardProdAt[{ bot->GetGUID().GetCounter(), questId }];
+                if (!prodAt || nowTs - prodAt >= 60)
+                {
+                    prodAt = nowTs;
+#ifdef MOD_PLAYERBOTS
+                    if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                        ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
+#endif
+                }
+
+                std::string const here = MapCoords(spot.x, spot.y, bot->GetZoneId());
                 SayToOwner(bot, owner, "I am at " + spot.name + " with '" + quest->GetTitle() +
-                                      "' ready - handing it in now.");
+                                      "' ready - handing it in now" +
+                                      (here.empty() ? "." : " (" + here + ")."));
                 return;
             }
 
@@ -935,8 +1001,27 @@ namespace
                 continue;
 
             std::string const owed = DescribeMissingItems(bot, quest);
+            std::string const where = PoiCoords(bot, quest);
+
+            // Nothing owed, but the quest is still unfinished: point at the objective
+            // area instead of staying silent. Kill-and-collect quests have no item debt
+            // to report, and those are exactly the ones that leave a companion wandering.
             if (owed.empty())
-                continue;
+            {
+                if (where.empty())
+                    continue;
+
+                std::pair<uint32, uint32> const poiKey{ botGuid, questId };
+                uint32& poiAt = g_nudgeAt[poiKey];
+                if (poiAt && now - poiAt < 300)
+                    continue;
+
+                poiAt = now;
+                SayToOwner(bot, owner, "I still have '" + quest->GetTitle() +
+                                      "' to finish for us - the area is on the map at " + where +
+                                      ". Want to head that way?", 45);
+                return;
+            }
 
             std::pair<uint32, uint32> const key{ botGuid, questId };
             uint32& last = g_nudgeAt[key];
@@ -946,7 +1031,8 @@ namespace
             last = now;
             SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
                                   "' before we move on? I still owe " + owed +
-                                  " - I will gather them as we go.", 45);
+                                  " - I will gather them as we go" +
+                                  (where.empty() ? "." : " (" + where + ")."), 45);
             return;                                  // one request per pass
         }
     }
@@ -1044,6 +1130,40 @@ namespace
     /// the module asks its AI to run that first: real coin, nothing lost. Without a
     /// vendor in interact range the action is a no-op, which makes it safe to try
     /// whenever the bags get tight.
+    /// Cover the last few yards to the quest giver.
+    ///
+    /// playerbots only takes a bot as far as its master: stand 15 yards from the NPC
+    /// and the companion waits behind you, so the hand-in fails with "cannot talk to
+    /// the quest giver" and the player has to lead it by hand. When the companion has
+    /// something to hand in and the giver is within reach, walk it the rest of the way
+    /// - never further than 80 yards, and never while the player is more than 40 yards
+    /// off, so it cannot wander across the zone on its own.
+    void WalkToGiver(Player* owner, Player* bot, Creature* npc)
+    {
+        if (!npc || bot->IsInCombat() || npc->IsInCombat())
+            return;
+
+        float const toNpc = bot->GetDistance(npc);
+        if (toNpc <= 5.0f || toNpc > 80.0f)
+            return;
+
+        if (owner->GetDistance(bot) > 40.0f)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_walkAt[botGuid];
+        if (last && now - last < 8)
+            return;                                  // one step every few seconds
+
+        last = now;
+        bot->GetMotionMaster()->MovePoint(0, npc->GetPosition(), FORCED_MOVEMENT_NONE, 0.f, true, true);
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] walking {} to {} ({:.0f} yd)",
+                     bot->GetName(), npc->GetName(), toNpc);
+    }
+
     void TrySellJunk(Player* owner, Player* bot)
     {
         if (!g_cfg.sellJunk)
@@ -1060,21 +1180,17 @@ namespace
 
         last = now;
 
-#ifdef MOD_PLAYERBOTS
         PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
         if (!ai)
             return;
 
-        // Wear the upgrades first: a full bag of gear it could simply put on is the
-        // most common jam, and equipping frees the slot outright.
+        // Before anything is destroyed: wear the upgrades. A full bag of gear it could
+        // simply put on is the most common jam, and equipping frees the slot outright.
         ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
 
-        // Sell vendor trash next - the same command the owner could whisper; it
-        // queues onto the bot's own thread, so this is safe from the world tick.
+        // The same command the owner could whisper; it queues onto the bot's own
+        // thread, so calling it from the world tick is safe.
         ai->HandleCommand(CHAT_MSG_WHISPER, "s vendor", owner);
-#else
-        (void)owner;
-#endif
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} asked to sell vendor trash ({} free slot(s))",
@@ -1301,13 +1417,15 @@ namespace
             if (!proto || !proto->ItemId)
                 return;
 
+            // Never a container: a bag in the backpack looks like a disposable white item
+            // and destroying one costs more slots than it frees.
             // The keep-quality rule: at or above it, the item is safe. Default green, so
             // greys and whites are disposable and green-and-better never is. This is the
             // knob that stops "inventory is full" being permanent - a companion that can
             // never shed a white item has no way out of a full bag on its own.
             if (proto->Quality >= g_cfg.itemKeepQuality)
                 return;
-            if (proto->Class == ITEM_CLASS_QUEST || proto->StartQuest)
+            if (proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->StartQuest)
                 return;                                  // quest item / quest starter
             if (wanted.count(proto->ItemId))
                 return;                                  // a live quest still needs it
@@ -1330,7 +1448,6 @@ namespace
         // QUEST, SKILL, DISENCHANT or AH is touched.
         if (g_cfg.tidyVendorJunk && bot->GetFreeInventorySpace() == 0)
         {
-#ifdef MOD_PLAYERBOTS
             if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             {
                 auto considerVendorJunk = [&wanted, &victims, ai](Item* item)
@@ -1342,7 +1459,7 @@ namespace
                     if (!proto || !proto->ItemId)
                         return;
 
-                    if (proto->Class == ITEM_CLASS_QUEST || proto->StartQuest)
+                    if (proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->StartQuest)
                         return;
                     if (wanted.count(proto->ItemId))
                         return;
@@ -1366,7 +1483,6 @@ namespace
                         for (uint8 j = 0; j < bag->GetBagSize(); ++j)
                             considerVendorJunk(bot->GetItemByPos(i, j));
             }
-#endif
         }
 
         // Still wedged? Spare consumables and materials are worth a few copper each and
@@ -1599,10 +1715,128 @@ namespace
         FlushNotices(owner, bot);
         FlushWhisperQueue(owner, bot);
 
+        // Quest cleared: say so once, so the addon can drop its pin instead of
+        // leaving a marker on a quest that is already done.
+        {
+            std::set<uint32>& previous = g_seenQuests[bot->GetGUID().GetCounter()];
+            std::set<uint32> current;
+
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+                if (uint32 const id = bot->GetQuestSlotQuestId(slot))
+                    current.insert(id);
+
+            for (uint32 const gone : previous)
+            {
+                if (current.count(gone) || !bot->IsQuestRewarded(gone))
+                    continue;
+
+                if (Quest const* done = sObjectMgr->GetQuestTemplate(gone))
+                    SayToOwner(bot, owner, "Finished '" + done->GetTitle() + "' - that pin can go.", 30);
+            }
+
+            previous = current;
+        }
+
+        // Authoritative pin list, so a stale marker cannot survive a desync.
+        SendPinSync(owner, bot, false);
+
         bool const clean = report.added == 0 && report.completed == 0 && report.dropped == 0 &&
                            report.levelFrom == 0 && report.skipped.empty();
         g_passMemo[ownerGuid] = { QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull), clean };
         return report;
+    }
+
+    /// One line that describes the companion's pins exactly, so the addon can
+    /// rebuild its map instead of guessing from the hints it happened to hear.
+    ///
+    ///     Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange|...
+    ///
+    /// h = it can hand that quest in now, g = it still has work there. A pin that
+    /// is not in this line is not real, which is what lets the map clean up after a
+    /// desync: a whisper lost to a rate limit, a logout, or an abandoned quest.
+    std::string BuildPinLine(Player* owner, Player* bot)
+    {
+        std::string line;
+        uint32 count = 0;
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE && count < 4; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            std::string coords;
+            char style = 'g';
+
+            if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
+            {
+                EnderSpot const& spot = FindQuestEnder(questId);
+                if (spot.found && spot.map == bot->GetMapId())
+                    coords = MapCoords(spot.x, spot.y, bot->GetZoneId());
+
+                style = 'h';
+            }
+
+            if (coords.empty())
+                coords = PoiCoords(bot, quest);
+
+            if (coords.empty())
+                continue;
+
+            // "map 43, 65" -> "43,65"
+            std::string numbers = coords.substr(4);
+            numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
+                                         [](char c) { return c == ' '; }), numbers.end());
+
+            if (numbers.empty())
+                continue;
+
+            std::string title = quest->GetTitle();
+            if (title.size() > 22)
+                title = title.substr(0, 20) + "..";
+
+            // a title cannot carry the separators, or the addon would split it
+            std::replace(title.begin(), title.end(), '|', '/');
+            std::replace(title.begin(), title.end(), '=', ':');
+
+            if (!line.empty())
+                line += "|";
+
+            line += numbers + "," + style + "=" + title;
+            ++count;
+        }
+
+        return "Pin sync " + std::to_string(count) + ": " + line;
+    }
+
+    /// Send the pin line when it changes, and again every ten minutes in case one
+    /// was missed. A whisper, because that is the only channel the addon can read.
+    void SendPinSync(Player* owner, Player* bot, bool force = false)
+    {
+        if (!g_cfg.pinSync || !owner || !bot)
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        std::string const line = BuildPinLine(owner, bot);
+
+        std::string& last = g_lastPinSync[ownerGuid];
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32 const sentAt = g_pinSyncAt[ownerGuid];
+
+        if (!force && line == last && (sentAt && now - sentAt < 600))
+            return;
+
+        bot->Whisper(line, LANG_UNIVERSAL, owner);
+
+        last = line;
+        g_pinSyncAt[ownerGuid] = now;
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] pin sync -> {}: {}", owner->GetName(), line);
     }
 
     void PrintReport(ChatHandler* handler, Player* owner, SyncReport const& report, bool manual)
@@ -1745,7 +1979,13 @@ public:
             tally.added += report.added;
             tally.completed += report.completed;
             tally.reopened += report.reopened;
-            tally.refused += uint32(report.skipped.size());
+            // Count each quest once per session. The sweep re-checks a blocked quest
+            // every 20 s, so adding skipped.size() per pass reported 23 "refusals" for
+            // a single blocked quest - which made a quiet session look broken.
+            std::set<uint32>& seenRefused = g_sessionRefused[player->GetGUID().GetCounter()];
+            for (uint32 const refusedId : report.refusedIds)
+                if (seenRefused.insert(refusedId).second)
+                    ++tally.refused;
             if (report.levelFrom && !tally.levelFrom)
                 tally.levelFrom = report.levelFrom;
             if (report.levelTo)
@@ -1856,6 +2096,7 @@ public:
     {
         static ChatCommandTable companionSyncTable =
         {
+            { "pins",   HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
             { "",       HandleSyncCommand,   SEC_PLAYER, Console::No },
@@ -1883,6 +2124,33 @@ public:
 
         SyncReport const report = SyncCompanion(player);
         PrintReport(handler, player, report, true);
+        return true;
+    }
+
+    /// .companionsync pins - resend the reconciliation on demand, which is the fix
+    /// for "the map says one thing and the companion another" without a relog.
+    static bool HandlePinsCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 botGuid = 0;
+        if (!g_cfg.enable || !FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
+            return true;
+        }
+
+        SendPinSync(player, bot, true);
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: map pins resent - the addon rebuilds from that line.");
         return true;
     }
 
@@ -2027,6 +2295,13 @@ public:
             return;
 
         ChatHandler handler(player->GetSession());
+
+        // Reconcile the map on the way in: a pin left behind by a session that ended
+        // badly is cleared the moment the player logs back in.
+        if (uint32 botGuid = 0; g_cfg.pinSync && FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                SendPinSync(player, bot, true);
+
         handler.SendSysMessage("|cff00ff00This server runs with |cff00ccffmod-companion-questsync|r |cffcccccc- companion quest + level sync|r");
         handler.SendSysMessage("|cff00ff00Companion:|r quests and level follow yours. |cffffff00.companionsync status|r for a report, |cffffff00.companionsync|r to sync now.");
     }
