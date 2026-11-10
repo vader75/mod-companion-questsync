@@ -232,6 +232,7 @@ function WLPins:Redraw()
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
     local now = time()
     local shown = 0
+    WLPins.placedTabs = {}
 
     -- Drop pins that have outlived their use instead of recolouring them. The old
     -- "stale" tint was a dark red plate that read as a black square left behind, and
@@ -288,6 +289,33 @@ function WLPins:Redraw()
         if #text > 24 then text = string.sub(text, 1, 22) .. "..." end
         f.tab.text:SetText(text .. "  |cffb0a898(" .. style.label .. ")|r")
         f.tab:SetWidth(math.max(46, f.tab.text:GetStringWidth() + 14))
+
+        -- Labels collide when two quests sit close together (two Goldshire hand-ins
+        -- are 4% apart, invisible at map scale). Try the row under the badge, then push
+        -- it further down until it clears the tabs already placed in this redraw.
+        local tabWidth = f.tab:GetWidth()
+
+        local function overlaps(ax, ay, aw, bx, by, bw)
+            return math.abs(ax - bx) * 2 < (aw + bw) and math.abs(ay - by) < 18
+        end
+
+        for row = 0, 3 do
+            local tabY = py + 21 + row * 18
+            local clash = false
+            for _, other in ipairs(WLPins.placedTabs) do
+                if overlaps(px, tabY, tabWidth, other.x, other.y, other.w) then
+                    clash = true
+                    break
+                end
+            end
+
+            if not clash then
+                f.tab:ClearAllPoints()
+                f.tab:SetPoint("TOP", f, "BOTTOM", 0, -3 - row * 18)
+                table.insert(WLPins.placedTabs, { x = px, y = tabY, w = tabWidth })
+                break
+            end
+        end
 
         shown = shown + 1
     end
