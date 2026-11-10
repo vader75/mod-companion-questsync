@@ -1,0 +1,2106 @@
+/*
+ * mod-companion-questsync
+ *
+ * Keeps a player's companion (the bound bot recorded by mod-wowlegends in
+ * `wowlegends_companion`) on the same quest log - and optionally the same
+ * level - as its owner, so the two can always quest together.
+ *
+ * Why this exists
+ * ---------------
+ * mod-playerbots already syncs COMPLETION one way (AiPlayerbot.SyncQuestWithPlayer:
+ * a bot's copy of a quest is force-completed once the master's is complete), and
+ * it auto-accepts a quest the master explicitly SHARES from the quest log. What
+ * is missing is anything that:
+ *   - notices a quest the owner has and the companion does not, and adds it
+ *     without the owner clicking "Share quest" once per quest;
+ *   - keeps the companion high enough level to take those quests at all
+ *     (Player::SatisfyQuestLevel gates on quest_template.MinLevel, and a
+ *     companion's level is whatever AddClass pool character it came from);
+ *   - reconciles a prerequisite chain the companion never walked.
+ *
+ * This module does those three things from outside the core and outside
+ * mod-playerbots: it only calls public Player/Quest APIs, so it survives a
+ * repack update and can be switched off with one config line.
+ *
+ * Deliberately NOT done
+ * ---------------------
+ * - Objective counters are not copied. The owner never sees the companion's
+ *   quest log, and kill/quest-event credit inside a group already reaches the
+ *   companion, so only the STATUS (complete / not complete) has to match for
+ *   the pair to hand in together.
+ * - Timed quests are not copied (their client timer cannot be transferred).
+ * - Companions are found through the binding table, never through AI internals,
+ *   so this file has no dependency on mod-playerbots headers or link order.
+ */
+
+#include "Bag.h"
+#include "Chat.h"
+#include "Config.h"
+#include "DatabaseEnv.h"
+#include "DBCStores.h"
+#include "GossipDef.h"   // PlayerTalkClass::SendQuestGiverStatus
+#include "Group.h"
+#include "Item.h"
+#include "Log.h"
+#include "ObjectAccessor.h"
+#include "ObjectGuid.h"
+#include "Player.h"
+#ifdef MOD_PLAYERBOTS
+#include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
+#include "PlayerbotAI.h"     // sell vendor trash, wear upgrades
+#include "Playerbots.h"      // GET_PLAYERBOT_AI
+#endif
+#include "QuestDef.h"
+#include "ScriptMgr.h"
+#include "SharedDefines.h"
+#include "WorldSession.h"
+#include "WorldSessionMgr.h"
+
+#include <algorithm>
+#include <deque>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+using namespace Acore::ChatCommands;
+
+namespace
+{
+    struct SyncSettings
+    {
+        bool enable             = true;
+        bool autoSync           = true;
+        bool syncCompletion     = true;
+        bool dropExtraBotQuests = false;
+        bool requireGrouped     = true;
+        bool skipInCombat       = true;
+        bool skipTimedQuests    = true;
+        bool forceAccept        = false;
+        uint32 debug            = 0;     // 0 silent, 1 per-change, 2 + heartbeat
+        bool announce           = true;
+        bool announceLogin      = true;
+        uint32 intervalSeconds  = 20;
+        uint32 heartbeatSeconds = 300;  // Debug >= 2 heartbeat window (0 = off)
+        uint32 levelMode        = 1;   // 0 off, 1 raise to owner, 2 exact
+        uint32 notifySkipped    = 1;   // 0 off, 1 class/race only, 2 all refusals
+        bool tidyInventory     = true;
+        bool sellJunk          = true;      // ask the AI to sell vendor trash first
+        bool tidyVendorJunk    = true;      // at zero slots, bin what playerbots would vendor
+        bool mapPins           = true;      // push the companion's quest areas onto the owner's map
+        bool tidySurplus       = true;      // last resort: bin spare consumables/materials
+        uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
+        uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
+        uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
+        uint32 keepFreeSlots   = 2;
+        std::string bindingTable = "wowlegends_companion";
+    };
+
+    SyncSettings g_cfg;
+
+    // owner guid -> bot guid, refreshed on demand (a binding changes only when
+    // the player runs .companion create/forget, which is rare).
+    // owner guid -> (bot guid, expiry). Expiring matters: a companion forgotten
+    // and recreated mid-session is a different bot_guid, and an unexpired "no
+    // companion" answer would keep the module blind for the whole session - the
+    // one drift it could not heal on its own.
+    std::unordered_map<uint32, std::pair<uint32, uint32>> g_bindingCache;
+    uint32 constexpr kBindingCacheSeconds = 60;
+
+    // Sweep memo: hash of both quest logs plus both levels, with a "last pass
+    // was clean" flag. A clean pass over an unchanged pair cannot produce a
+    // different result, so it is skipped instead of re-walked every 20 s. Any
+    // refusal (or add/complete/drop/level change) marks the pass dirty, so
+    // work that failed is always retried rather than cached away.
+    struct PassMemo
+    {
+        uint64 digest = 0;
+        bool clean = false;
+    };
+
+    std::unordered_map<uint32, PassMemo> g_passMemo;     // owner guid -> memo
+    std::unordered_map<uint32, uint32> g_junkNoticeAt;   // bot guid -> unix time
+
+    // Heartbeat window state. Namespace-level rather than members of the world
+    // script: the accept hook adds quests too, and a window total that ignored
+    // them read "0 added" while the log showed four adds in the same period.
+    uint32 g_hbTimer = 0;
+    uint32 g_hbPasses = 0;
+    uint32 g_hbAdded = 0;
+    uint32 g_hbCompleted = 0;
+    uint32 g_hbDropped = 0;
+    uint32 g_hbReopened = 0;
+    uint32 g_hbLocked = 0;
+    std::map<uint32, std::string> g_hbLines;        // owner guid -> summary line
+    std::map<uint32, uint32> g_hbHookAdds;          // owner guid -> adds via hook
+
+    uint32 g_hbOnlineMs = 0;                        // seconds with a player in world
+    uint32 g_hbOnlineProbe = 0;
+
+    /// What a player's session actually did. Logged as one line on logout so a
+    /// session can be reviewed without reading every heartbeat window.
+    struct SessionTally
+    {
+        uint32 added = 0;       // via the sweep
+        uint32 onAccept = 0;    // via the accept hook
+        uint32 completed = 0;
+        uint32 reopened = 0;
+        uint32 refused = 0;
+        uint8 levelFrom = 0;
+        uint8 levelTo = 0;
+    };
+
+    std::unordered_map<uint32, SessionTally> g_session;   // owner guid -> tally
+    std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
+    std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
+    std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
+    std::map<uint32, std::vector<std::string>> g_pendingNotices;  // bot guid -> lines
+    std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
+    std::map<uint32, std::deque<std::string>> g_whisperQueue;  // owner guid -> waiting texts
+    std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
+    std::map<std::pair<uint32, uint32>, std::string> g_openLatch;  // last owed-strings logged
+    std::map<std::pair<uint32, uint32>, uint32> g_turnInHintAt;     // (bot, quest) -> unix time
+    std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
+
+    bool AnyPlayerInWorld()
+    {
+        for (auto const& pair : sWorldSessionMgr->GetAllSessions())
+        {
+            WorldSession* session = pair.second;
+            if (!session || session->IsBot())
+                continue;
+
+            Player* player = session->GetPlayer();
+            if (player && player->IsInWorld())
+                return true;
+        }
+
+        return false;
+    }    uint64 QuestLogDigest(Player* player)
+    {
+        // FNV-1a over level, quest ids and statuses: cheap, order-stable, and
+        // sensitive to exactly the things a pass acts on.
+        uint64 hash = 1469598103934665603ull;
+        auto mix = [&hash](uint64 value)
+        {
+            hash ^= value;
+            hash *= 1099511628211ull;
+        };
+
+        mix(player->GetLevel());
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = player->GetQuestSlotQuestId(slot);
+            mix(questId);
+            if (questId)
+                mix(uint64(player->GetQuestStatus(questId)));
+        }
+
+        return hash;
+    }
+    // bot guid -> quest ids already reported to the owner, so an auto pass does
+    // not repeat the same line every interval.
+    std::unordered_map<uint32, std::set<uint32>> g_notified;
+
+    bool g_tableReady = false;
+    bool g_tableWarned = false;
+
+    struct SyncReport
+    {
+        uint32 added = 0;
+        uint32 completed = 0;
+        uint32 dropped = 0;
+        uint32 classRaceLocked = 0;
+        uint32 reopened = 0;      // COMPLETE copies that could never be handed in
+        uint32 ownerQuestCount = 0;
+        uint32 botQuestCount = 0;
+        uint8 levelFrom = 0;
+        uint8 levelTo = 0;
+        uint8 ownerLevel = 0;
+        uint8 botLevel = 0;
+        std::string ownerName;
+        std::string botName;
+        std::vector<std::string> skipped;   // human readable, one per refused quest
+        bool hasCompanion = false;
+        bool companionOnline = false;
+        bool grouped = false;
+    };
+
+    void LoadSettings()
+    {
+        g_cfg.enable             = sConfigMgr->GetOption<bool>("CompanionQuestSync.Enable", true);
+        g_cfg.autoSync           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoSync", true);
+        g_cfg.syncCompletion     = sConfigMgr->GetOption<bool>("CompanionQuestSync.SyncCompletion", true);
+        g_cfg.dropExtraBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropExtraBotQuests", false);
+        g_cfg.requireGrouped     = sConfigMgr->GetOption<bool>("CompanionQuestSync.RequireGrouped", true);
+        g_cfg.skipInCombat       = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipInCombat", true);
+        g_cfg.skipTimedQuests    = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipTimedQuests", true);
+        g_cfg.forceAccept        = sConfigMgr->GetOption<bool>("CompanionQuestSync.ForceAccept", false);
+        g_cfg.debug              = sConfigMgr->GetOption<uint32>("CompanionQuestSync.Debug", 0);
+        g_cfg.announce           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceAtStartup", true);
+        g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
+        g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 20);
+        g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
+        g_cfg.levelMode          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.LevelMode", 1);
+        g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 1);
+        g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
+        g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
+        g_cfg.tidyVendorJunk     = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyVendorJunk", true);
+        g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
+        g_cfg.tidySurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidySurplus", true);
+        g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
+        g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
+        g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
+        g_cfg.keepFreeSlots      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.KeepFreeSlots", 2);
+        g_cfg.bindingTable       = sConfigMgr->GetOption<std::string>("CompanionQuestSync.BindingTable", "wowlegends_companion");
+
+        if (g_cfg.intervalSeconds < 5)
+            g_cfg.intervalSeconds = 5;
+
+        if (g_cfg.levelMode > 2)
+            g_cfg.levelMode = 2;
+
+        // The table name is interpolated into SQL, so accept nothing but a
+        // plain identifier. Anything else disables the module rather than
+        // risking an injection through the config file.
+        bool ok = !g_cfg.bindingTable.empty();
+        for (char const c : g_cfg.bindingTable)
+        {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            {
+                ok = false;
+                break;
+            }
+        }
+
+        if (!ok)
+        {
+            LOG_ERROR("server.loading", "[CompanionQuestSync] BindingTable '{}' is not a plain identifier - module disabled.", g_cfg.bindingTable);
+            g_cfg.enable = false;
+        }
+    }
+
+    bool CheckBindingTable()
+    {
+        QueryResult result = CharacterDatabase.Query("SHOW TABLES LIKE '{}'", g_cfg.bindingTable);
+        return static_cast<bool>(result);
+    }
+
+    bool FindCompanionGuid(uint32 ownerGuid, uint32& botGuid)
+    {
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        auto itr = g_bindingCache.find(ownerGuid);
+        if (itr != g_bindingCache.end() && itr->second.second > now)
+        {
+            botGuid = itr->second.first;
+            return botGuid != 0;
+        }
+
+        QueryResult result = CharacterDatabase.Query("SELECT bot_guid FROM {} WHERE owner_guid = {}", g_cfg.bindingTable, ownerGuid);
+        if (!result)
+        {
+            g_bindingCache[ownerGuid] = { 0, now + kBindingCacheSeconds };
+            return false;
+        }
+
+        botGuid = result->Fetch()[0].Get<uint32>();
+        g_bindingCache[ownerGuid] = { botGuid, now + kBindingCacheSeconds };
+        return botGuid != 0;
+    }
+
+    void InvalidateCompanionGuid(uint32 ownerGuid)
+    {
+        g_bindingCache.erase(ownerGuid);
+    }
+
+    Player* FindCompanionPlayer(uint32 botGuid)
+    {
+        return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid));
+    }
+
+    void AddSkipped(SyncReport& report, Quest const* quest, std::string const& reason)
+    {
+        if (report.skipped.size() >= 10)
+            return;
+
+        report.skipped.push_back(quest->GetTitle() + " (" + std::to_string(quest->GetQuestId()) + "): " + reason);
+    }
+
+    /// Why the companion cannot take this quest. `expected` marks the refusals
+    /// that are structural rather than a missing prerequisite: a companion of a
+    /// different class or race can never take another class's / race's quests,
+    /// so those are not failures of the sync.
+    struct Refusal
+    {
+        std::string reason;
+        bool expected = false;
+    };
+
+    Refusal ExplainRefusal(Player* bot, Quest const* quest)
+    {
+        uint32 const botLevel = bot->GetLevel();
+        uint32 const maxLevel = quest->GetMaxLevel();
+
+        // A level gap is fixable (LevelMode), so it is reported first: once the
+        // companion catches up, the next pass surfaces the real limit.
+        if (maxLevel > 0 && botLevel > maxLevel)
+            return { "I am level " + std::to_string(botLevel) + ", above its cap of " + std::to_string(maxLevel) + " - I need to be at most that", false };
+
+        if (botLevel < quest->GetMinLevel())
+            return { "I need level " + std::to_string(quest->GetMinLevel()) + " first (I am " + std::to_string(botLevel) + ")", false };
+
+        if (!bot->SatisfyQuestClass(quest, false))
+            return { "it is a class quest my class cannot take", true };
+
+        if (!bot->SatisfyQuestRace(quest, false))
+            return { "it is not open to my race", true };
+
+        if (!bot->SatisfyQuestPreviousQuest(quest, false))
+        {
+            // Name it: "prerequisite quest missing" tells the player nothing about
+            // which quest to finish on the companion before this one can be taken.
+            Quest const* prev = quest->GetPrevQuestId() > 0
+                                     ? sObjectMgr->GetQuestTemplate(uint32(quest->GetPrevQuestId()))
+                                     : nullptr;
+
+            return { prev ? "I have not finished '" + prev->GetTitle() + "' yet"
+                          : std::string("a prerequisite quest is missing"),
+                     false };
+        }
+
+        if (!bot->SatisfyQuestReputation(quest, false))
+            return { "I need more reputation with them first", false };
+
+        if (!bot->SatisfyQuestSkill(quest, false))
+            return { "I need the right profession for it", false };
+
+        if (!bot->SatisfyQuestConditions(quest, false))
+            return { "its conditions are not met yet", false };
+
+        return { "I am not eligible for it yet", false };
+    }
+
+    /// Everything the companion says to its owner goes through here.
+    ///
+    /// One considerate rule set: at most one whisper per 45 s per owner, never a
+    /// wall of them when several quests fail at once, and always something the
+    /// player can act on. Unthrottled per-quest whispering is what makes a rough
+    /// levelling session feel like an error console.
+    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45)
+    {
+        if (!owner || !owner->GetSession())
+            return false;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_lastWhisperAt[ownerGuid];
+
+        if (last && now - last < minGap)
+        {
+            // Hold it, do not lose it. The one-shot "help me finish this quest"
+            // request used to be dropped here when the window was busy, so a player
+            // who was mid-fight simply never heard it again.
+            auto& queue = g_whisperQueue[ownerGuid];
+            if (queue.size() < 3 && std::find(queue.begin(), queue.end(), text) == queue.end())
+                queue.push_back(text);
+
+            if (g_cfg.debug >= 2)
+                LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", text);
+            return false;
+        }
+
+        last = now;
+        bot->Whisper(text, LANG_UNIVERSAL, owner);
+
+        // Log what was actually said. Without this the log only ever recorded what was
+        // held back, so a report about wording could not be checked against it.
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered: {}", bot->GetName(), text);
+
+        return true;
+    }
+
+    /// Tell the owner, once per quest, that the companion could not take it.
+    /// The message comes from the companion itself, which is how every other
+    /// bot message in this realm arrives; repeats are suppressed until the quest
+    /// leaves and re-enters the owner's log.
+    void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)
+    {
+        bool const wanted = (refusal.expected ? g_cfg.notifySkipped >= 1 : g_cfg.notifySkipped >= 2);
+        if (!wanted)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::set<uint32>& seen = g_notified[botGuid];
+        if (!seen.insert(quest->GetQuestId()).second)
+            return;
+
+        // Queue rather than whisper: one level-up can refuse half a dozen quests
+        // in a single pass, and six whispers in a row is noise. FlushNotices turns
+        // the batch into one sentence that ends with a next step.
+        g_pendingNotices[botGuid].push_back("'" + quest->GetTitle() + "': " + refusal.reason);
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} notified owner about '{}' ({})", bot->GetName(), quest->GetTitle(), quest->GetQuestId());
+    }
+
+    /// Where a quest is handed in, so the companion can say how far it is rather
+    /// than just "I cannot do this".
+    struct EnderSpot
+    {
+        bool found = false;
+        uint32 entry = 0;
+        std::string name;
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        uint32 map = 0;
+    };
+
+    std::unordered_map<uint32, EnderSpot> g_enderCache;   // quest id -> ender spot
+
+    EnderSpot const& FindQuestEnder(uint32 questId)
+    {
+        auto itr = g_enderCache.find(questId);
+        if (itr != g_enderCache.end())
+            return itr->second;
+
+        EnderSpot spot;
+
+        QueryResult result = WorldDatabase.Query(
+            "SELECT ct.name, c.position_x, c.position_y, c.position_z, c.map, ce.id "
+            "FROM creature_questender ce "
+            "JOIN creature_template ct ON ct.entry = ce.id "
+            "JOIN creature c ON c.id1 = ce.id "
+            "WHERE ce.quest = {} LIMIT 1", questId);
+
+        if (result)
+        {
+            Field* fields = result->Fetch();
+            spot.found = true;
+            spot.name = fields[0].Get<std::string>();
+            spot.x = fields[1].Get<float>();
+            spot.y = fields[2].Get<float>();
+            spot.z = fields[3].Get<float>();
+            spot.map = fields[4].Get<uint32>();
+            spot.entry = fields[5].Get<uint32>();
+        }
+
+        return g_enderCache[questId] = spot;
+    }
+
+    /// "map 52, 34" for a world position, in the client's own 0-100 scale, so the
+    /// player can find the spot even when the map will not show a pin for a quest
+    /// that is not in their own log.
+    std::string MapCoords(float x, float y, uint32 zoneId)
+    {
+        float mapX = x;
+        float mapY = y;
+        Zone2MapCoordinates(mapX, mapY, zoneId);
+
+        if (mapX < 0.0f || mapX > 100.0f || mapY < 0.0f || mapY > 100.0f)
+            return std::string();
+
+        return "map " + std::to_string(uint32(mapX)) + ", " + std::to_string(uint32(mapY));
+    }
+    std::string ZoneName(uint32 zoneId)
+    {
+        if (AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId))
+            if (zone->area_name[0])
+                return zone->area_name[0];
+
+        return "an unknown zone";
+    }
+
+    std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
+
+    /// Mark the turn-in NPCs where the owner is already done and the companion is not.
+    ///
+    /// The quest-area POI packet has no colour field - the client picks the shading,
+    /// and it only draws areas for quests in its own log. The markers it does take
+    /// from the server are the quest-giver icons, so those get a turn-in status: a
+    /// quest the player has finished but the companion still owes shows up with the
+    /// turn-in icon on that NPC, which is as close to a differently coloured pin as
+    /// this client allows. Only for NPCs the player can already see (80 yd).
+    void MarkOwnErrands(Player* owner, Player* bot)
+    {
+        if (!g_cfg.mapPins || !owner->PlayerTalkClass)
+            return;
+
+        std::string marked;
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            QuestStatus const botStatus = bot->GetQuestStatus(questId);
+            if (botStatus != QUEST_STATUS_INCOMPLETE && botStatus != QUEST_STATUS_COMPLETE)
+                continue;
+
+            // The owner must already be clear of it, otherwise the marker is just
+            // their own turn-in and says nothing.
+            if (!owner->IsQuestRewarded(questId) && owner->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            // Still gathering? Then it is not a turn-in yet, and marking it would
+            // read as "go hand this in" when nothing can be handed in.
+            if (!DescribeMissingItems(bot, quest).empty())
+                continue;
+
+            EnderSpot const& spot = FindQuestEnder(questId);
+            if (!spot.found || !spot.entry)
+                continue;
+
+            Creature* npc = owner->FindNearestCreature(spot.entry, 80.0f);
+            if (!npc)
+                continue;
+
+            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, npc->GetGUID());
+            marked += std::to_string(questId) + ",";
+        }
+
+        if (!marked.empty() && g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] marked the companion's turn-in(s) for {}",
+                     owner->GetName());
+    }
+
+    /// Put the companion's open quest areas on the owner's map.
+    ///
+    /// The client only asks for quest POIs for quests in its *own* log, so a quest
+    /// the companion is behind on never draws. This pushes the same response the
+    /// query handler would build (QueryHandler.cpp:427) for the companion's open
+    /// quests, one packet, only when the set changes. Experimental by nature: if the
+    /// client ignores POIs for quests it does not hold, the packet is simply dropped
+    /// and the whisper carries map coordinates instead.
+    void SendQuestPins(Player* owner, Player* bot)
+    {
+        if (!g_cfg.mapPins || !owner->GetSession())
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        std::vector<uint32> wanted;
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            // Only skip what the owner has already been credited for. Their copy being
+            // COMPLETE does not draw the area any more (the objectives are done), and
+            // that is exactly the case where the companion still has work to do there.
+            if (owner->IsQuestRewarded(questId))
+                continue;
+
+            if (!sObjectMgr->GetQuestPOIVector(questId))
+                continue;
+
+            wanted.push_back(questId);
+        }
+
+        std::string const key = [&wanted]()
+        {
+            std::string s;
+            for (uint32 id : wanted)
+                s += std::to_string(id) + ",";
+            return s;
+        }();
+
+        if (g_pinnedQuests[ownerGuid] == key)
+            return;
+
+        g_pinnedQuests[ownerGuid] = key;
+
+        if (wanted.empty())
+            return;
+
+        WorldPacket data(SMSG_QUEST_POI_QUERY_RESPONSE, 8 + wanted.size() * 40);
+        data << uint32(wanted.size());
+
+        for (uint32 const questId : wanted)
+        {
+            QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(questId);
+            data << uint32(questId);
+            data << uint32(poi ? poi->size() : 0);
+
+            if (!poi)
+                continue;
+
+            for (QuestPOI const& entry : *poi)
+            {
+                data << uint32(entry.Id);
+                data << int32(entry.ObjectiveIndex);
+                data << uint32(entry.MapId);
+                data << uint32(entry.AreaId);
+                data << uint32(entry.FloorId);
+                data << uint32(entry.Unk3);
+                data << uint32(entry.Unk4);
+                data << uint32(entry.points.size());
+
+                for (QuestPOIPoint const& point : entry.points)
+                {
+                    data << int32(point.x);
+                    data << int32(point.y);
+                }
+            }
+        }
+
+        owner->GetSession()->SendPacket(&data);
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] pushed {} quest area(s) to {} map",
+                     uint32(wanted.size()), owner->GetName());
+    }
+
+    /// Position is the other half of a desync: the two logs can match while the
+    /// companion is a zone away, and nothing used to say so. Reports three cases -
+    /// separated, too far from the giver, or actually standing on it - in the same
+    /// voice as everything else. Throttled per companion, because this state
+    /// persists until somebody moves.
+    void ReportPosition(Player* owner, Player* bot)
+    {
+        if (g_cfg.notifySkipped < 2)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_positionNoticeAt[botGuid];
+        if (last && now - last < 180)
+            return;
+
+        if (bot->GetZoneId() && owner->GetZoneId() && bot->GetZoneId() != owner->GetZoneId())
+        {
+            last = now;
+            SayToOwner(bot, owner, "I think I have lost you - I am in " + ZoneName(bot->GetZoneId()) +
+                                  " and you are in " + ZoneName(owner->GetZoneId()) +
+                                  ". Summon me, or I will follow when you are back, and we can carry on together.");
+            return;
+        }
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            // COMPLETE is not the same as hand-in-able: a delivery quest whose items
+            // are still owed cannot be rewarded, so pointing at its giver is wrong -
+            // and it reads as "go here now" while the companion is still gathering.
+            // Only report a turn-in for a copy it could actually reward.
+            if (!DescribeMissingItems(bot, quest).empty())
+                continue;
+
+            EnderSpot const& spot = FindQuestEnder(questId);
+            if (!spot.found)
+                continue;
+
+            if (spot.map != bot->GetMapId())
+            {
+                last = now;
+                SayToOwner(bot, owner, "'" + quest->GetTitle() + "' gets handed in at " + spot.name +
+                                      ", and that is on another map from here - we would have to travel there together.");
+                return;
+            }
+
+            // A standing fact, not news: one hint per quest per ten minutes. Repeating
+            // it every sweep is what made it feel like nagging.
+            std::pair<uint32, uint32> const hintKey{ bot->GetGUID().GetCounter(), questId };
+            uint32& hintAt = g_turnInHintAt[hintKey];
+            uint32 const nowTs = static_cast<uint32>(time(nullptr));
+            if (hintAt && nowTs - hintAt < 600)
+                continue;
+
+            float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
+
+            if (dist <= 25.0f)
+            {
+                last = now;
+                hintAt = nowTs;
+                SayToOwner(bot, owner, "I am at " + spot.name + " with '" + quest->GetTitle() +
+                                      "' ready - handing it in now.");
+                return;
+            }
+
+            if (dist > 60.0f)
+            {
+                last = now;
+                hintAt = nowTs;
+                std::string const coords = MapCoords(spot.x, spot.y, bot->GetZoneId());
+
+                // If the owner has already been rewarded for this quest, their part is
+                // done - asking them along reads as "you still owe this", which they do
+                // not. It is the companion's own errand; say it that way.
+                if (owner->IsQuestRewarded(questId))
+                    SayToOwner(bot, owner, "I still owe " + spot.name + " my own copy of '" +
+                                          quest->GetTitle() +
+                                          "' - I will hand it in next time we are near" +
+                                          (coords.empty() ? "." : " (" + coords + ")."));
+                else
+                    SayToOwner(bot, owner, "When we get a chance, could we stop by " + spot.name +
+                                          "? I can hand in '" + quest->GetTitle() + "' there - about " +
+                                          std::to_string(uint32(dist)) + " yards from me" +
+                                          (coords.empty() ? "." : ", " + coords + "."));
+                return;
+            }
+        }
+    }
+
+    /// "Large Candle 0/8" - what the companion still owes for a quest, spelled
+    /// out. A bare "missing items" whisper told the player nothing they could act
+    /// on: not which item, not how many are already in the bags.
+    std::string DescribeMissingItems(Player* bot, Quest const* quest)
+    {
+        std::string out;
+
+        for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            uint32 const required = quest->RequiredItemCount[i];
+            if (!required)
+                continue;
+
+            uint32 const itemId = quest->RequiredItemId[i];
+            uint32 const have = bot->GetItemCount(itemId);
+            if (have >= required)
+                continue;
+
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+            std::string const name = proto ? proto->Name1 : ("item " + std::to_string(itemId));
+
+            if (!out.empty())
+                out += ", ";
+
+            out += name + " " + std::to_string(have) + "/" + std::to_string(required);
+        }
+
+        return out;
+    }
+
+    /// A copy can be COMPLETE and still un-hand-in-able: a quest with a
+    /// RequiredItemId only rewards when those items are in the companion's own
+    /// bags (CanRewardQuest re-checks the counts), and mod-playerbots completes
+    /// the copy at the giver regardless of what it carries. Left alone the copy
+    /// is dead: it can never be handed in, nothing gives its AI a reason to
+    /// collect, and the follow-up quest is then refused for a missing
+    /// prerequisite. Seen live with 'Kobold Candles' (60): COMPLETE, 0 of 8 item
+    /// 772, and 'Shipment to Stormwind' (61) blocked behind it.
+    ///
+    /// Reopening is the only honest fix: the companion then has an incomplete
+    /// quest whose items it wants (IsItemUsefulForQuest), so it collects them and
+    /// completes on its own. Copies that already hold what they owe are untouched.
+    void RepairStrandedDelivery(Player* owner, Player* bot, SyncReport& report)
+    {
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest || !quest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_DELIVER))
+                continue;
+
+            bool missing = false;
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT && !missing; ++i)
+            {
+                uint32 const required = quest->RequiredItemCount[i];
+                if (required && bot->GetItemCount(quest->RequiredItemId[i]) < required)
+                    missing = true;
+            }
+
+            if (!missing)
+                continue;
+
+            bot->SetQuestStatus(questId, QUEST_STATUS_INCOMPLETE);
+            bot->SetQuestSlotState(slot, QUEST_STATE_NONE);
+            ++report.reopened;
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} reopened '{}' ({}) - it owes the delivery items",
+                     bot->GetName(), quest->GetTitle(), questId);
+
+            g_repairing[bot->GetGUID().GetCounter()].insert(questId);
+
+            if (g_cfg.notifySkipped >= 2)
+                SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
+                                      "' before moving on? I still owe " + DescribeMissingItems(bot, quest) +
+                                      " - I will gather them as we go, then I can hand it in.");
+        }
+
+        // Second half of the same story: once it has collected what it owed, say
+        // so - otherwise the player only sees the original complaint and no finish.
+        std::set<uint32>& tracking = g_repairing[bot->GetGUID().GetCounter()];
+        for (auto itr = tracking.begin(); itr != tracking.end();)
+        {
+            Quest const* quest = sObjectMgr->GetQuestTemplate(*itr);
+            if (!quest || bot->GetQuestStatus(*itr) == QUEST_STATUS_NONE)
+            {
+                itr = tracking.erase(itr);
+                continue;
+            }
+
+            if (bot->GetQuestStatus(*itr) == QUEST_STATUS_COMPLETE && DescribeMissingItems(bot, quest).empty())
+            {
+                if (g_cfg.notifySkipped >= 2)
+                    SayToOwner(bot, owner, "I have everything for '" + quest->GetTitle() +
+                                          "' now - handing it in. Thanks for the help!");
+
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} collected what it owed for '{}' ({})",
+                         bot->GetName(), quest->GetTitle(), *itr);
+
+                itr = tracking.erase(itr);
+                continue;
+            }
+
+            ++itr;
+        }
+    }
+    /// One whisper for everything refused since the last flush - at most three
+    /// named, then a count - ending with what the player can actually do about it.
+    /// Send whatever was held back by the rate limit, one per pass.
+    void FlushWhisperQueue(Player* owner, Player* bot)
+    {
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        auto itr = g_whisperQueue.find(ownerGuid);
+        if (itr == g_whisperQueue.end() || itr->second.empty())
+            return;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_lastWhisperAt[ownerGuid];
+        if (last && now - last < 45)
+            return;
+
+        last = now;
+        bot->Whisper(itr->second.front(), LANG_UNIVERSAL, owner);
+        itr->second.pop_front();
+    }
+
+    void FlushNotices(Player* owner, Player* bot)
+    {
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        auto itr = g_pendingNotices.find(botGuid);
+        if (itr == g_pendingNotices.end() || itr->second.empty())
+            return;
+
+        std::vector<std::string> const lines = itr->second;
+        g_pendingNotices.erase(itr);
+
+        std::string text = "A few quests I cannot take yet: ";
+        for (size_t i = 0; i < lines.size() && i < 3; ++i)
+        {
+            if (i)
+                text += "; ";
+            text += lines[i];
+        }
+
+        if (lines.size() > 3)
+            text += "; and " + std::to_string(lines.size() - 3) + " more";
+
+        text += ". Could we sort those out when you get a moment?";
+        SayToOwner(bot, owner, text);
+    }
+
+    /// Keep asking for help while the companion still owes quest items.
+    ///
+    /// One request was not enough: it fired once, lost a race with the whisper
+    /// rate limit, and the player never heard anything again while the companion sat
+    /// on an unfinished quest. Now the request repeats every five minutes until the
+    /// items are gathered, and the queue above guarantees it is not dropped.
+    void NudgeForHelp(Player* owner, Player* bot)
+    {
+        if (g_cfg.notifySkipped < 2)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            std::string const owed = DescribeMissingItems(bot, quest);
+            if (owed.empty())
+                continue;
+
+            std::pair<uint32, uint32> const key{ botGuid, questId };
+            uint32& last = g_nudgeAt[key];
+            if (last && now - last < 300)
+                continue;
+
+            last = now;
+            SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
+                                  "' before we move on? I still owe " + owed +
+                                  " - I will gather them as we go.", 45);
+            return;                                  // one request per pass
+        }
+    }
+
+    /// Raise / set the companion's level according to LevelMode.
+    /// quest_template.MinLevel is the hard gate for every quest on the owner's
+    /// log, so this runs before any quest is considered.
+    void AlignLevel(Player* owner, Player* bot, SyncReport& report)
+    {
+        if (!g_cfg.levelMode)
+            return;
+
+        uint8 const ownerLevel = owner->GetLevel();
+        uint8 const botLevel = bot->GetLevel();
+
+        bool const needsChange = (g_cfg.levelMode == 1) ? (botLevel < ownerLevel) : (botLevel != ownerLevel);
+        if (!needsChange)
+            return;
+
+        report.levelFrom = botLevel;
+        report.levelTo = ownerLevel;
+        bot->GiveLevel(ownerLevel);
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} -> level {} (owner {} level {})",
+                     bot->GetName(), uint32(bot->GetLevel()), owner->GetName(), uint32(ownerLevel));
+    }
+
+    /// How many slots of a quest log are in use, for the heartbeat line.
+    uint32 CountQuestLog(Player* player)
+    {
+        uint32 count = 0;
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            if (player->GetQuestSlotQuestId(slot))
+                ++count;
+
+        return count;
+    }
+
+    /// Give the companion somewhere to put things.
+    ///
+    /// Chasing bag space with destruction is the wrong end of the problem: a level-6
+    /// hunter filled 20 slots with two quest stacks, cloth, water and a dozen gear
+    /// pieces, and then could not loot the last Gold Dust it needed. With this on, an
+    /// empty bag slot is filled once with a plain 16-slot bag (Pumpkin Bag, no level
+    /// requirement), so the companion carries 5 bags instead of 1. The item and the
+    /// number of slots are both configurable, and a slot that is already full - or
+    /// held by a bag the player gave the companion - is never touched.
+    void EnsureBags(Player* owner, Player* bot)
+    {
+        if (!g_cfg.extraBags || !g_cfg.extraBagItem)
+            return;
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(g_cfg.extraBagItem);
+        if (!proto || proto->Class != ITEM_CLASS_CONTAINER || !proto->ContainerSlots)
+            return;
+
+        uint32 given = 0;
+
+        for (uint8 i = 0; i < g_cfg.extraBags && i < (INVENTORY_SLOT_BAG_END - INVENTORY_SLOT_BAG_START); ++i)
+        {
+            uint8 const slot = INVENTORY_SLOT_BAG_START + i;
+            if (bot->GetBagByPos(slot))
+                continue;                                   // already has one
+
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, g_cfg.extraBagItem, 1) != EQUIP_ERR_OK)
+                break;
+
+            Item* bag = bot->StoreNewItem(dest, g_cfg.extraBagItem, true);
+            if (!bag)
+                continue;
+
+            bot->EquipItem(uint16((INVENTORY_SLOT_BAG_0 << 8) | slot), bag, true);
+            ++given;
+        }
+
+        if (given)
+        {
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} given {} bag(s) of {} slots ({} free slot(s) now)",
+                     bot->GetName(), given, proto->ContainerSlots, bot->GetFreeInventorySpace());
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} was carrying too much - bags topped up",
+                         bot->GetName());
+        }
+    }
+
+    /// Sell before destroying.
+    ///
+    /// Destroying greys was the only lever the module had, and greys are worth
+    /// almost nothing - the bag pressure comes from white gear the companion will
+    /// never use. playerbots already knows which items those are (its item usage
+    /// value answers VENDOR/AH for them) and owns a "sell vendor trash" action, so
+    /// the module asks its AI to run that first: real coin, nothing lost. Without a
+    /// vendor in interact range the action is a no-op, which makes it safe to try
+    /// whenever the bags get tight.
+    void TrySellJunk(Player* owner, Player* bot)
+    {
+        if (!g_cfg.sellJunk)
+            return;
+
+        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_sellAt[botGuid];
+        if (last && now - last < 120)
+            return;
+
+        last = now;
+
+#ifdef MOD_PLAYERBOTS
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai)
+            return;
+
+        // Wear the upgrades first: a full bag of gear it could simply put on is the
+        // most common jam, and equipping frees the slot outright.
+        ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
+
+        // Sell vendor trash next - the same command the owner could whisper; it
+        // queues onto the bot's own thread, so this is safe from the world tick.
+        ai->HandleCommand(CHAT_MSG_WHISPER, "s vendor", owner);
+#else
+        (void)owner;
+#endif
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} asked to sell vendor trash ({} free slot(s))",
+                     bot->GetName(), bot->GetFreeInventorySpace());
+    }
+
+    std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
+    uint32 TidyInventory(Player* bot);   // defined below, used by the accept path
+    /// The companion bins grey loot when its bags are full - say so, once per
+    /// couple of minutes, so nothing appears to vanish unexplained.
+    void NotifyJunk(Player* owner, Player* bot, uint32 count)
+    {
+        if (!count)
+            return;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_junkNoticeAt[bot->GetGUID().GetCounter()];
+        if (last && now - last < 120)
+            return;
+
+        last = now;
+        SayToOwner(bot, owner, "I cleared some junk out of my bags to make room - nothing worth keeping.", 120);
+    }
+
+    /// Mirror one quest onto one companion. Shared by the periodic sweep and the
+    /// accept hook, so the "slow" and "instant" paths can never drift apart.
+    /// `report` is optional: the hook path only needs the notifications/log.
+    void SyncQuestToBot(Player* owner, Player* bot, Quest const* quest, SyncReport* report)
+    {
+        uint32 const questId = quest->GetQuestId();
+
+        // Nothing to do for a quest the companion already finished.
+        if (bot->IsQuestRewarded(questId))
+            return;
+
+        if (g_cfg.skipTimedQuests && quest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_TIMED))
+        {
+            if (report)
+                AddSkipped(*report, quest, "timed quest not copied");
+            return;
+        }
+
+        QuestStatus botStatus = bot->GetQuestStatus(questId);
+        QuestStatus const ownerStatus = owner->GetQuestStatus(questId);
+
+        if (botStatus == QUEST_STATUS_NONE)
+        {
+            if (!g_cfg.forceAccept)
+            {
+                if (!bot->CanTakeQuest(quest, false))
+                {
+                    // Name the gate that refused, so the player is not left
+                    // guessing why one quest never arrives. Class and race
+                    // refusals are expected for a differently-built companion;
+                    // they are counted apart and reported to the owner instead
+                    // of being treated as sync failures.
+                    Refusal const refusal = ExplainRefusal(bot, quest);
+                    if (report)
+                    {
+                        if (refusal.expected)
+                            ++report->classRaceLocked;
+
+                        AddSkipped(*report, quest, refusal.reason);
+                    }
+
+                    NotifyRefusal(owner, bot, quest, refusal);
+                    return;
+                }
+
+                if (!bot->SatisfyQuestLog(false))
+                {
+                    // Say how full: "25/25" is actionable, "full" is not.
+                    Refusal const refusal{ "my quest log is full (" +
+                                               std::to_string(CountQuestLog(bot)) + "/" +
+                                               std::to_string(MAX_QUEST_LOG_SIZE) + ")",
+                                           false };
+                    if (report)
+                        AddSkipped(*report, quest, refusal.reason);
+
+                    NotifyRefusal(owner, bot, quest, refusal);
+                    return;
+                }
+
+                if (!bot->CanAddQuest(quest, false))
+                {
+                    // Bags full: free real junk and try once more before giving
+                    // up, so a full companion stops silently skipping quests.
+                    TidyInventory(bot);
+
+                    if (!bot->CanAddQuest(quest, false))
+                    {
+                        // Only claim "bags" when a bag is actually the problem.
+                        // CanAddQuest fails for two reasons at most: the quest
+                        // log (checked above) and room for the starter item it
+                        // hands over. Collected quest items live in the quest log,
+                        // so a full inventory does not stop those being gathered -
+                        // blaming bags for them was simply wrong.
+                        std::string reason;
+                        uint32 const srcItem = quest->GetSrcItemId();
+                        if (srcItem)
+                        {
+                            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(srcItem);
+                            reason = std::string("my bags are full - I need one free slot for ") +
+                                     (proto ? proto->Name1 : ("item " + std::to_string(srcItem)));
+                        }
+                        else
+                        {
+                            reason = "the server would not let me take it, and my bags are not the reason";
+                        }
+
+                        reason += " (" + std::to_string(bot->GetFreeInventorySpace()) + " free slot(s))";
+
+                        Refusal const refusal{ reason, false };
+                        if (report)
+                            AddSkipped(*report, quest, refusal.reason);
+
+                        NotifyRefusal(owner, bot, quest, refusal);
+                        return;
+                    }
+                }
+            }
+
+            if (g_cfg.forceAccept)
+                bot->AddQuest(quest, owner);
+            else
+                bot->AddQuestAndCheckCompletion(quest, owner);
+
+            botStatus = bot->GetQuestStatus(questId);
+            if (botStatus == QUEST_STATUS_NONE)
+            {
+                if (report)
+                    AddSkipped(*report, quest, "core refused to add it");
+
+                return;
+            }
+
+            if (report)
+                ++report->added;
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} + '{}' ({})", bot->GetName(), quest->GetTitle(), questId);
+        }
+
+        if (g_cfg.syncCompletion && ownerStatus == QUEST_STATUS_COMPLETE &&
+            (botStatus == QUEST_STATUS_INCOMPLETE || botStatus == QUEST_STATUS_FAILED))
+        {
+            // A delivery quest only rewards with the items in the companion's own
+            // bags (CanRewardQuest re-checks them). Marking such a copy COMPLETE
+            // is what leaves it dead - and it is also what made RepairStranded
+            // Delivery fight this branch: reopen, complete, reopen, forever.
+            // Left incomplete, the companion has an ordinary quest to finish and
+            // its own AI keeps hunting the items - the behaviour we want.
+            std::string const owed = DescribeMissingItems(bot, quest);
+            if (!owed.empty())
+            {
+                // Log on change, not once per pass: "left it open" repeated every
+                // 20 s buried everything else in the log.
+                std::string& latch = g_openLatch[{ bot->GetGUID().GetCounter(), questId }];
+                if (g_cfg.debug >= 2 && latch != owed)
+                {
+                    latch = owed;
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} left '{}' ({}) open - it still owes {}",
+                             bot->GetName(), quest->GetTitle(), questId, owed);
+                }
+
+                return;
+            }
+
+
+            // Only the status is touched: hand-in stays with whoever owns it (the
+            // bot AI, or the existing mod-playerbots sync), so nothing here can
+            // swallow a reward or a turn-in.
+            bot->CompleteQuest(questId);
+
+            if (report)
+                ++report->completed;
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} = '{}' ({}) completed", bot->GetName(), quest->GetTitle(), questId);
+        }
+    }
+
+    /// Free bag space on a companion.
+    ///
+    /// Nothing in this fork does it for them: mod-playerbots' sell/repair
+    /// "errands" are not part of a companion's strategy set, and the core has no
+    /// sell API at module level (selling exists only as HandleSellItemOpcode -,
+    /// a vendor interaction plus a packet). So the safe satellite behaviour is to
+    /// destroy genuine junk: Poor quality only, never a quest item, never a quest
+    /// starter, never an item one of the companion's own live quests still wants.
+    /// Returns how many stacks were destroyed.
+    uint32 TidyInventory(Player* bot)
+    {
+        if (!g_cfg.tidyInventory)
+            return 0;
+
+        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
+            return 0;
+
+        // Item ids the companion's own live quests need: never destroy these.
+        std::set<uint32> wanted;
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            Quest const* quest = questId ? sObjectMgr->GetQuestTemplate(questId) : nullptr;
+            if (!quest)
+                continue;
+
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+                if (quest->RequiredItemId[i])
+                    wanted.insert(quest->RequiredItemId[i]);
+        }
+
+        // Cheapest first: when something has to go, go by vendor value, so the
+        // least valuable junk disappears instead of whatever sat in the first bag
+        // slot.
+        std::vector<std::pair<uint32, uint32>> victims;   // (sell price, item id)
+        auto consider = [&wanted, &victims](Item* item)
+        {
+            if (!item)
+                return;
+
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || !proto->ItemId)
+                return;
+
+            // The keep-quality rule: at or above it, the item is safe. Default green, so
+            // greys and whites are disposable and green-and-better never is. This is the
+            // knob that stops "inventory is full" being permanent - a companion that can
+            // never shed a white item has no way out of a full bag on its own.
+            if (proto->Quality >= g_cfg.itemKeepQuality)
+                return;
+            if (proto->Class == ITEM_CLASS_QUEST || proto->StartQuest)
+                return;                                  // quest item / quest starter
+            if (wanted.count(proto->ItemId))
+                return;                                  // a live quest still needs it
+
+            victims.emplace_back(proto->SellPrice, proto->ItemId);
+        };
+
+        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+
+        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+            if (Bag* bag = bot->GetBagByPos(i))
+                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                    consider(bot->GetItemByPos(i, j));
+
+        // Nothing but white gear left? At zero free slots the companion cannot
+        // pick up a quest item at all - it cannot even loot the Gold Dust it owes -
+        // which is worse than losing a few copper of vendor trash. Ask playerbots
+        // what it would vendor and bin exactly that; nothing it rates EQUIP,
+        // QUEST, SKILL, DISENCHANT or AH is touched.
+        if (g_cfg.tidyVendorJunk && bot->GetFreeInventorySpace() == 0)
+        {
+#ifdef MOD_PLAYERBOTS
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            {
+                auto considerVendorJunk = [&wanted, &victims, ai](Item* item)
+                {
+                    if (!item)
+                        return;
+
+                    ItemTemplate const* proto = item->GetTemplate();
+                    if (!proto || !proto->ItemId)
+                        return;
+
+                    if (proto->Class == ITEM_CLASS_QUEST || proto->StartQuest)
+                        return;
+                    if (wanted.count(proto->ItemId))
+                        return;
+                    if (proto->Quality >= g_cfg.itemKeepQuality)
+                        return;                       // green and better are never binned
+
+                    ItemUsage const usage = ai->GetAiObjectContext()
+                                               ->GetValue<ItemUsage>("item usage", proto->ItemId)
+                                               ->Get();
+                    if (usage != ITEM_USAGE_VENDOR)
+                        return;
+
+                    victims.emplace_back(proto->SellPrice, proto->ItemId);
+                };
+
+                for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+                    considerVendorJunk(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+
+                for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+                    if (Bag* bag = bot->GetBagByPos(i))
+                        for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                            considerVendorJunk(bot->GetItemByPos(i, j));
+            }
+#endif
+        }
+
+        // Still wedged? Spare consumables and materials are worth a few copper each and
+        // the companion does not craft - at zero free slots one of them is worth more as
+        // an empty slot than as an item. Cheapest first, surplus stacks only, and never
+        // the hearthstone, gear or anything a quest needs.
+        if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() == 0)
+        {
+            auto considerSurplus = [&wanted, &victims](Item* item)
+            {
+                if (!item)
+                    return;
+
+                ItemTemplate const* proto = item->GetTemplate();
+                if (!proto || !proto->ItemId)
+                    return;
+
+                if (proto->Class != ITEM_CLASS_CONSUMABLE &&
+                    proto->Class != ITEM_CLASS_TRADE_GOODS &&
+                    proto->Class != ITEM_CLASS_RECIPE)
+                    return;
+
+                if (proto->StartQuest || wanted.count(proto->ItemId))
+                    return;
+
+                if (proto->Quality >= g_cfg.itemKeepQuality)
+                    return;
+
+                if (item->GetCount() < 2 && proto->Class != ITEM_CLASS_RECIPE)
+                    return;                       // keep the last of anything useful
+
+                victims.emplace_back(proto->SellPrice, proto->ItemId);
+            };
+
+            for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+                considerSurplus(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+
+            for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+                if (Bag* bag = bot->GetBagByPos(i))
+                    for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                        considerSurplus(bot->GetItemByPos(i, j));
+        }
+
+        std::sort(victims.begin(), victims.end(),
+                  [](std::pair<uint32, uint32> const& a, std::pair<uint32, uint32> const& b)
+                  { return a.first < b.first; });
+
+        uint32 destroyed = 0;
+        for (auto const& victim : victims)
+        {
+            if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
+                break;
+
+            uint32 const entry = victim.second;
+            uint32 const count = bot->GetItemCount(entry);
+            if (!count)
+                continue;
+
+            bot->DestroyItemCount(entry, count, true);
+            ++destroyed;
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} destroyed {}x item {} to free bag space",
+                         bot->GetName(), count, entry);
+        }
+
+        return destroyed;
+    }
+
+    /// Resolve the owner's companion and check it is a live bot we may touch.
+    /// Returns nullptr (with what we learned recorded in `report`) if not.
+    Player* ResolveCompanion(Player* owner, SyncReport& report)
+    {
+        uint32 botGuid = 0;
+        if (!FindCompanionGuid(owner->GetGUID().GetCounter(), botGuid))
+            return nullptr;
+
+        report.hasCompanion = true;
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+            return nullptr;
+
+        // Safety rail: only ever act on a BOT session. A hand-edited or stale
+        // binding row must not be able to level or re-quest a real player's
+        // character, and self-binding must do nothing at all.
+        if (bot->GetGUID() == owner->GetGUID())
+            return nullptr;
+
+        if (!bot->GetSession() || !bot->GetSession()->IsBot())
+        {
+            if (g_cfg.debug >= 1)
+                LOG_ERROR("server.loading", "[CompanionQuestSync] binding {} -> {} does not point at a bot session; refusing to touch it",
+                          owner->GetName(), bot->GetName());
+
+            return nullptr;
+        }
+
+        report.companionOnline = true;
+        report.ownerName = owner->GetName();
+        report.botName = bot->GetName();
+        report.ownerLevel = owner->GetLevel();
+        report.botLevel = bot->GetLevel();
+
+        if (g_cfg.requireGrouped)
+        {
+            Group* group = owner->GetGroup();
+            report.grouped = group && group->IsMember(bot->GetGUID());
+            if (!report.grouped)
+                return nullptr;
+        }
+
+        return bot;
+    }
+
+    /// Copy the owner's quest log onto the companion. Returns what happened so
+    /// both the command output and the debug log can use it.
+    SyncReport SyncCompanion(Player* owner)
+    {
+        SyncReport report;
+
+        Player* bot = ResolveCompanion(owner, report);
+        if (!bot)
+            return report;
+
+        // Combat defers only the LEVEL change. Quest copying used to be blocked
+        // here outright, which is why a companion refused to pick up a quest
+        // mid-fight and the owner had to share it by hand - questing is mostly
+        // combat. Adding a quest or marking one complete is safe in combat.
+        bool const inCombat = g_cfg.skipInCombat && (owner->IsInCombat() || bot->IsInCombat());
+
+        // Snapshot the owner's log once: it is used for the sync itself, for the
+        // "drop extras" comparison and to prune stale notifications.
+        std::vector<uint32> ownerQuests;
+        ownerQuests.reserve(MAX_QUEST_LOG_SIZE);
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = owner->GetQuestSlotQuestId(slot);
+            if (questId)
+                ownerQuests.push_back(questId);
+        }
+
+        report.ownerQuestCount = uint32(ownerQuests.size());
+        report.botQuestCount = CountQuestLog(bot);
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint64 const digest = QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull);
+
+        auto const memo = g_passMemo.find(ownerGuid);
+        if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
+        {
+            // Nothing changed and the last pass had nothing left over: the same
+            // work would reach the same result, so skip the walk entirely.
+            return report;
+        }
+
+        if (!inCombat)
+            AlignLevel(owner, bot, report);
+
+        // Keep a couple of slots free so quest items can be picked up and
+        // quest source items stored, instead of discovering the shortage only
+        // when an accept is refused.
+        EnsureBags(owner, bot);                        // room before anything else
+        TrySellJunk(owner, bot);                       // earn coin first
+        NotifyJunk(owner, bot, TidyInventory(bot));    // destroy only what is left
+
+        // A level change is the one thing here that other modules react to
+        // (mod-playerbots re-evaluates spells/gear, mod-wowlegends' path rules
+        // can veto the level outright). Let them settle for one interval before
+        // stuffing quests in, so a levelled companion is never handed a log it
+        // was about to be re-geared for.
+        if (report.levelFrom != 0)
+        {
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} levelled; quest sync deferred to the next pass", bot->GetName());
+
+            g_passMemo[ownerGuid] = { digest, false };   // levels moved: always re-run
+            return report;
+        }
+
+        RepairStrandedDelivery(owner, bot, report);
+        NudgeForHelp(owner, bot);
+        ReportPosition(owner, bot);
+        SendQuestPins(owner, bot);
+        MarkOwnErrands(owner, bot);
+
+        for (uint32 const questId : ownerQuests)
+        {
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            SyncQuestToBot(owner, bot, quest, &report);
+        }
+
+        // Forget notifications whose quest left the owner's log, so re-taking it
+        // later reports again.
+        std::set<uint32>& notified = g_notified[bot->GetGUID().GetCounter()];
+        for (auto itr = notified.begin(); itr != notified.end();)
+        {
+            if (std::find(ownerQuests.begin(), ownerQuests.end(), *itr) != ownerQuests.end())
+                ++itr;
+            else
+                itr = notified.erase(itr);
+        }
+
+        if (g_cfg.dropExtraBotQuests)
+        {
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            {
+                uint32 const questId = bot->GetQuestSlotQuestId(slot);
+                if (!questId || bot->IsQuestRewarded(questId))
+                    continue;
+
+                if (std::find(ownerQuests.begin(), ownerQuests.end(), questId) != ownerQuests.end())
+                    continue;
+
+                bot->SetQuestSlot(slot, 0);
+                bot->TakeQuestSourceItem(questId, false);
+                bot->RemoveActiveQuest(questId, false);
+                ++report.dropped;
+
+                if (g_cfg.debug >= 1)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} - dropped quest {}", bot->GetName(), questId);
+            }
+        }
+
+        report.botQuestCount = CountQuestLog(bot);
+
+        FlushNotices(owner, bot);
+        FlushWhisperQueue(owner, bot);
+
+        bool const clean = report.added == 0 && report.completed == 0 && report.dropped == 0 &&
+                           report.levelFrom == 0 && report.skipped.empty();
+        g_passMemo[ownerGuid] = { QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull), clean };
+        return report;
+    }
+
+    void PrintReport(ChatHandler* handler, Player* owner, SyncReport const& report, bool manual)
+    {
+        if (!report.hasCompanion)
+        {
+            if (manual)
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: you have no companion bound. Use |cffffff00.companion create <race> <class> <name>|r first.");
+            return;
+        }
+
+        if (!report.companionOnline)
+        {
+            if (manual)
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online. Use |cffffff00.companion summon|r.");
+            return;
+        }
+
+        if (g_cfg.requireGrouped && !report.grouped)
+        {
+            if (manual)
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not in your group - nothing was synced.");
+            return;
+        }
+
+        if (!manual)
+            return;
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} quest(s) added, {} marked complete{}.",
+                                 report.added, report.completed,
+                                 report.levelFrom ? std::string(", level ") + std::to_string(report.levelFrom) + " -> " + std::to_string(report.levelTo) : "");
+
+        if (report.levelFrom)
+        {
+            handler->PSendSysMessage("  level changed this pass - quests are copied on the next pass, once the companion has settled.");
+        }
+
+        if (report.classRaceLocked)
+        {
+            handler->PSendSysMessage("  |cffffd200{} class/race-locked quest(s)|r skipped - expected when the companion is a different class or race.",
+                                     report.classRaceLocked);
+        }
+
+        for (std::string const& line : report.skipped)
+            handler->PSendSysMessage("  |cffff6060skipped|r {}", line);
+    }
+
+    /// One line for the heartbeat window: who, what level, how many quests, and
+    /// whether the two logs currently line up.
+    std::string DescribeReport(SyncReport const& report)
+    {
+        std::string line = report.ownerName + " (lvl " + std::to_string(report.ownerLevel) + ") "
+                         + std::to_string(report.ownerQuestCount) + "q / "
+                         + report.botName + " (lvl " + std::to_string(report.botLevel) + ") "
+                         + std::to_string(report.botQuestCount) + "q";
+
+        line += (report.ownerQuestCount == report.botQuestCount) ? " - in sync" : " - catching up";
+
+        if (report.classRaceLocked)
+            line += ", " + std::to_string(report.classRaceLocked) + " class/race locked";
+
+        if (report.levelFrom)
+            line += ", levelled " + std::to_string(report.levelFrom) + " -> " + std::to_string(report.levelTo);
+
+        return line;
+    }
+}
+
+class CompanionQuestSyncWorldScript : public WorldScript
+{
+public:
+    // Hooks are opt-in in this core (CALL_ENABLED_HOOKS): a WorldScript that
+    // does not name them here never receives them, which silently made
+    // ".reload config" a no-op for this module - every option change needed a
+    // restart. Named now, so a config edit can be applied without downtime.
+    CompanionQuestSyncWorldScript() : WorldScript("CompanionQuestSyncWorldScript",
+        { WORLDHOOK_ON_AFTER_CONFIG_LOAD, WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_UPDATE }) { }
+
+    void OnAfterConfigLoad(bool reload) override
+    {
+        // Both hooks fire once at startup (config load, then world startup);
+        // announce only on the first one and on an explicit .reload config.
+        Refresh(reload);
+    }
+
+    void OnStartup() override
+    {
+        Refresh(false);
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        if (!g_cfg.enable || !g_cfg.autoSync || !g_tableReady)
+            return;
+
+        // Heartbeat window (Debug >= 2): one summary line per window so a log
+        // check can answer "is it doing anything" without waiting for a change.
+        bool const heartbeat = g_cfg.debug >= 2 && g_cfg.heartbeatSeconds > 0;
+        if (heartbeat)
+        {
+            g_hbTimer += diff;
+
+            // Online time next to the pass count: seven passes in a 300 s window
+            // looks like a stall until you know the player was there for 140 s.
+            g_hbOnlineProbe += diff;
+            if (g_hbOnlineProbe >= 1000)
+            {
+                g_hbOnlineProbe = 0;
+                if (AnyPlayerInWorld())
+                    g_hbOnlineMs += 1000;
+            }
+        }
+
+        _accumulator += diff;
+        uint32 const intervalMs = g_cfg.intervalSeconds * 1000;
+        if (_accumulator < intervalMs)
+            return;
+
+        _accumulator = 0;
+
+        bool synced = false;
+
+        for (auto const& pair : sWorldSessionMgr->GetAllSessions())
+        {
+            WorldSession* session = pair.second;
+            if (!session || session->IsBot())
+                continue;
+
+            Player* player = session->GetPlayer();
+            if (!player || !player->IsInWorld())
+                continue;
+
+            SyncReport const report = SyncCompanion(player);
+            if (!report.companionOnline)
+                continue;
+
+            synced = true;
+
+            SessionTally& tally = g_session[player->GetGUID().GetCounter()];
+            tally.added += report.added;
+            tally.completed += report.completed;
+            tally.reopened += report.reopened;
+            tally.refused += uint32(report.skipped.size());
+            if (report.levelFrom && !tally.levelFrom)
+                tally.levelFrom = report.levelFrom;
+            if (report.levelTo)
+                tally.levelTo = report.levelTo;
+
+            if (g_hbTimer >= g_cfg.heartbeatSeconds * 1000)
+            {
+                g_hbAdded += report.added;
+                g_hbCompleted += report.completed;
+                g_hbDropped += report.dropped;
+                g_hbReopened += report.reopened;
+                g_hbLocked += report.classRaceLocked;
+                std::string line = DescribeReport(report);
+                auto const hook = g_hbHookAdds.find(player->GetGUID().GetCounter());
+                if (hook != g_hbHookAdds.end() && hook->second)
+                    line += " (+" + std::to_string(hook->second) + " on accept)";
+
+                g_hbLines[player->GetGUID().GetCounter()] = line;
+            }
+        }
+
+        if (synced)
+            ++g_hbPasses;
+
+        if (heartbeat && g_hbTimer >= g_cfg.heartbeatSeconds * 1000)
+        {
+            if (!g_hbPasses && !g_hbAdded && !g_hbCompleted && !g_hbDropped)
+            {
+                // Nothing to reconcile because nobody was in the world: say so
+                // instead of a row of zeroes that reads like the module stalled.
+                LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat: no players online in the last {}s - module idle.",
+                         g_cfg.heartbeatSeconds);
+            }
+            else
+            {
+                LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat: {} pass(es) over {}s (player in world {}s) - {} added, {} completed, {} dropped, {} class/race locked.",
+                         g_hbPasses, g_cfg.heartbeatSeconds, g_hbOnlineMs / 1000, g_hbAdded, g_hbCompleted, g_hbDropped, g_hbReopened, g_hbLocked);
+            }
+
+            for (auto const& line : g_hbLines)
+                LOG_INFO("server.loading", "[CompanionQuestSync]   {}", line.second);
+
+            g_hbTimer = 0;
+            g_hbPasses = 0;
+            g_hbAdded = g_hbCompleted = g_hbDropped = g_hbLocked = g_hbReopened = 0;
+            g_hbHookAdds.clear();
+            g_hbOnlineMs = 0;
+            g_hbLines.clear();
+        }
+    }
+
+private:
+    void Refresh(bool reload)
+    {
+        LoadSettings();
+
+        if (!g_cfg.enable)
+            return;
+
+        g_tableReady = CheckBindingTable();
+
+        if (!g_tableReady)
+        {
+            if (!g_tableWarned || reload)
+                LOG_INFO("server.loading", "[CompanionQuestSync] table '{}' not found - module idle (no companion system installed?).", g_cfg.bindingTable);
+
+            g_tableWarned = true;
+            return;
+        }
+
+        g_bindingCache.clear();
+
+        if (!_announced || reload)
+        {
+            // Startup banner: same idea as mod-playerbots' "This server runs
+            // with ..." line, printed to the console/log at boot so the module's
+            // presence is visible without reading the config list.
+            if (g_cfg.announce)
+            {
+                LOG_INFO("server.loading", " ");
+                LOG_INFO("server.loading", "  +-----------------------------------------------------------+");
+                LOG_INFO("server.loading", "  |  This server runs with mod-companion-questsync            |");
+                LOG_INFO("server.loading", "  |  Companion quest + level sync     (.companionsync)        |");
+                LOG_INFO("server.loading", "  +-----------------------------------------------------------+");
+            }
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] enabled (auto {}, every {}s, level mode {}, completion sync {}, notify {}).",
+                     g_cfg.autoSync ? "on" : "off", g_cfg.intervalSeconds, g_cfg.levelMode,
+                     g_cfg.syncCompletion ? "on" : "off", g_cfg.notifySkipped);
+            _announced = true;
+        }
+    }
+
+    uint32 _accumulator = 0;
+    bool _announced = false;
+
+    // Heartbeat window state (Debug >= 2).
+
+    std::unordered_map<uint32, std::string> g_hbLines;
+};
+
+class CompanionQuestSyncCommandScript : public CommandScript
+{
+public:
+    CompanionQuestSyncCommandScript() : CommandScript("CompanionQuestSyncCommandScript") { }
+
+    ChatCommandTable GetCommands() const override
+    {
+        static ChatCommandTable companionSyncTable =
+        {
+            { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
+            { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
+            { "",       HandleSyncCommand,   SEC_PLAYER, Console::No },
+        };
+
+        static ChatCommandTable baseTable =
+        {
+            { "companionsync", companionSyncTable },
+        };
+
+        return baseTable;
+    }
+
+    static bool HandleSyncCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r is disabled in the server configuration.");
+            return true;
+        }
+
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        SyncReport const report = SyncCompanion(player);
+        PrintReport(handler, player, report, true);
+        return true;
+    }
+
+    static bool HandleStatusCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 botGuid = 0;
+        if (!g_cfg.enable || !FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: companion guid {} is offline.", botGuid);
+            return true;
+        }
+
+        uint32 ownerQuests = 0;
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            if (player->GetQuestSlotQuestId(slot))
+                ++ownerQuests;
+
+        uint32 botQuests = 0;
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            if (bot->GetQuestSlotQuestId(slot))
+                ++botQuests;
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r level {} with {} quest(s); you are level {} with {} quest(s). Auto sync {}, level mode {}.",
+                                 bot->GetName(), uint32(bot->GetLevel()), botQuests,
+                                 uint32(player->GetLevel()), ownerQuests,
+                                 g_cfg.autoSync ? "on" : "off", g_cfg.levelMode);
+
+        // Counts alone cannot answer "why has it not taken my quest?". Walk the
+        // difference and name the reason for each, capped so the answer stays
+        // readable in the chat frame.
+        uint32 pending = 0;
+        uint32 shown = 0;
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = player->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            if (bot->GetQuestStatus(questId) != QUEST_STATUS_NONE || bot->IsQuestRewarded(questId))
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            ++pending;
+            if (shown >= 5)
+                continue;
+
+            Refusal const refusal = ExplainRefusal(bot, quest);
+            handler->PSendSysMessage("  |cffffd200waiting|r {}: {}", quest->GetTitle(), refusal.reason);
+            ++shown;
+        }
+
+        if (pending > shown)
+            handler->PSendSysMessage("  |cffaaaaaa... and {} more|r", pending - shown);
+
+        if (!pending)
+            handler->PSendSysMessage("  |cff20ff20nothing waiting|r - every quest on your log is on the companion's.");
+
+        // Level mode 1 is raise-only, so the companion can end up above the
+        // player - and then the player's own quests can be refused for being
+        // below its level. Name it, because it reads like a sync failure.
+        if (g_cfg.levelMode == 1 && bot->GetLevel() > player->GetLevel())
+            handler->PSendSysMessage("  |cffffd200level mode 1|r lets the companion sit above you; quests capped below its level ({} - against {} now) are refused. |cffffff00LevelMode 2|r pins both levels instead.",
+                                     uint32(bot->GetLevel()), uint32(player->GetLevel()));
+
+        return true;
+    }
+
+    static bool HandleLevelCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable || !g_cfg.levelMode)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: level alignment is disabled (LevelMode 0).");
+            return true;
+        }
+
+        uint32 botGuid = 0;
+        if (!FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
+            return true;
+        }
+
+        if (bot->GetLevel() == player->GetLevel())
+        {
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} is already level {}.", bot->GetName(), uint32(bot->GetLevel()));
+            return true;
+        }
+
+        uint8 const from = bot->GetLevel();
+        bot->GiveLevel(player->GetLevel());
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} levelled {} -> {}.", bot->GetName(), uint32(from), uint32(bot->GetLevel()));
+        return true;
+    }
+};
+
+/// The player-side half of the banner: mod-playerbots announces itself when a
+/// real player enters the world, and a module the player can actually use should
+/// say so too. Bots are skipped; the message respects the same Enable switch and
+/// stays quiet if the companion table is missing (nothing could sync anyway).
+class CompanionQuestSyncPlayerScript : public PlayerScript
+{
+public:
+    // Hook registration is not optional in this core: a PlayerScript that does
+    // not name its hooks is never called (ScriptRegistry only invokes the
+    // scripts listed for each hook), which is why the login greeting silently
+    // did nothing before.
+    CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
+        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT }) { }
+
+    void OnPlayerLogin(Player* player) override
+    {
+        if (!g_cfg.enable || !g_cfg.announceLogin || !g_tableReady)
+            return;
+
+        if (!player->GetSession() || player->GetSession()->IsBot())
+            return;
+
+        ChatHandler handler(player->GetSession());
+        handler.SendSysMessage("|cff00ff00This server runs with |cff00ccffmod-companion-questsync|r |cffcccccc- companion quest + level sync|r");
+        handler.SendSysMessage("|cff00ff00Companion:|r quests and level follow yours. |cffffff00.companionsync status|r for a report, |cffffff00.companionsync|r to sync now.");
+    }
+
+    /// One line per session on the way out. The heartbeat answers "is it alive";
+    /// this answers "what did it actually do while I played".
+    void OnPlayerLogout(Player* player) override
+    {
+        if (!player || !g_cfg.enable)
+            return;
+
+        // Only owners get a tally (the sweep skips bot sessions), so a companion
+        // logging out finds nothing and stays quiet.
+        auto itr = g_session.find(player->GetGUID().GetCounter());
+        if (itr == g_session.end())
+            return;
+
+        SessionTally const tally = itr->second;
+        g_session.erase(itr);
+
+        if (!tally.added && !tally.onAccept && !tally.completed && !tally.refused && !tally.reopened && !tally.levelFrom)
+            return;
+
+        std::string level;
+        if (tally.levelFrom && tally.levelTo)
+            level = ", level " + std::to_string(tally.levelFrom) + " -> " + std::to_string(tally.levelTo);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused{}",
+                 player->GetName(), tally.added + tally.onAccept, tally.onAccept, tally.completed, tally.reopened, tally.refused, level);
+    }
+    /// Instant mirror: the moment a real player accepts a quest, hand it to the
+    /// companion. The 20 s sweep stays as the safety net (logins, level gates,
+    /// anything the hook could not do), but this removes the wait - and it runs
+    /// regardless of combat, which the sweep deliberately no longer blocks.
+    void OnPlayerQuestAccept(Player* player, Quest const* quest) override
+    {
+        if (!g_cfg.enable || !g_tableReady || !quest)
+            return;
+
+        // Our own additions for the companion arrive here too; never recurse.
+        if (!player->GetSession() || player->GetSession()->IsBot())
+            return;
+
+        SyncReport report;
+        Player* bot = ResolveCompanion(player, report);
+        if (!bot)
+            return;
+
+        uint32 const questId = quest->GetQuestId();
+        QuestStatus const before = bot->GetQuestStatus(questId);
+
+        SyncQuestToBot(player, bot, quest, nullptr);
+
+        bool const landed = before == QUEST_STATUS_NONE && bot->GetQuestStatus(questId) != QUEST_STATUS_NONE;
+        if (!landed)
+            return;
+
+        // Count it: this path is how most quests actually arrive, so leaving it
+        // out of the window totals made the heartbeat under-report the truth.
+        ++g_hbAdded;
+        ++g_hbHookAdds[player->GetGUID().GetCounter()];
+        ++g_session[player->GetGUID().GetCounter()].onAccept;
+
+        FlushNotices(player, bot);
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] accept hook: {} picked up '{}' ({}) immediately",
+                     bot->GetName(), quest->GetTitle(), questId);
+    }
+};
+
+void Addmod_companion_questsyncScripts()
+{
+    new CompanionQuestSyncWorldScript();
+    new CompanionQuestSyncCommandScript();
+    new CompanionQuestSyncPlayerScript();
+}

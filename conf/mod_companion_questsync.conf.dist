@@ -1,0 +1,185 @@
+[worldserver]
+########################################################################
+# COMPANION QUEST SYNC
+#
+# Keeps a player's companion (the bound bot recorded by mod-wowlegends in
+# `wowlegends_companion`) on the SAME quest log as its owner, and optionally
+# on the same level, so the two can always quest together.
+#
+# This module only ADDS behaviour: it never patches the core or
+# mod-playerbots. Everything it does goes through public Player/Quest APIs.
+#
+#    CompanionQuestSync.Enable
+#        1 = the module is active at all (command included).
+#        0 = fully inert; nothing is read and no command is registered.
+#        Default: 1
+#
+#    CompanionQuestSync.AutoSync
+#        1 = reconcile every companion on a timer (see IntervalSeconds).
+#        0 = only the manual ".companionsync" command syncs.
+#        Default: 1
+#
+#    CompanionQuestSync.IntervalSeconds
+#        Seconds between automatic reconciliation passes. Each pass is cheap
+#        (one binding lookup + one quest-log walk per online player).
+#        Default: 20
+#
+#    CompanionQuestSync.LevelMode
+#        0 = never touch the companion's level.
+#        1 = raise the companion to the owner's level (never lower it).
+#        2 = make the companion exactly the owner's level (raise and lower).
+#        Quests gate on quest_template.MinLevel, so a companion below its
+#        owner's level simply cannot take the owner's quests - this is the
+#        switch that fixes that. Raising a companion can make its own quests
+#        grey, which mod-playerbots may drop; this module re-adds them on the
+#        next pass.
+#        Default: 1
+#
+#    CompanionQuestSync.SyncCompletion
+#        1 = when the owner's copy of a quest is COMPLETE, mark the
+#            companion's copy COMPLETE too (so both can hand in).
+#        0 = leave the companion's progress alone.
+#        Default: 1
+#
+#    CompanionQuestSync.ForceAccept
+#        0 = respect the core's eligibility rules (CanTakeQuest: level, class,
+#            race, reputation, prerequisite chain, conditions). A quest the
+#            companion is not eligible for is reported and skipped.
+#        1 = bypass those rules and insert the quest anyway (Player::AddQuest).
+#            Use only to work around a broken chain; the companion may then
+#            hold a quest it cannot complete.
+#        Default: 0
+#
+#    CompanionQuestSync.DropExtraBotQuests
+#        1 = delete companion quests the owner does not have, so the two logs
+#            match exactly. Destructive: this also removes the companion's own
+#            quests (class, profession, its own pickups).
+#        0 = keep them; the owner's quests are still added on top.
+#        Default: 0
+#
+#    CompanionQuestSync.RequireGrouped
+#        1 = only sync while the companion is in the owner's group (the state
+#            it is summoned in). Avoids touching a released/dismissed bot.
+#        Default: 1
+#
+#    CompanionQuestSync.SkipInCombat
+#        1 = do not LEVEL the companion while either side is in combat (a level
+#            change re-gears the bot, so it waits for a quiet moment). Quest
+#            copying is deliberately NOT gated by this: adding a quest or marking
+#            one complete is safe in combat, and blocking it there is what made
+#            pickups look slow.
+#        Default: 1
+#
+#    CompanionQuestSync.SkipTimedQuests
+#        1 = do not copy timed quests; the client timer is not transferable.
+#        Default: 1
+#
+#    CompanionQuestSync.BindingTable
+#        Character-database table holding owner_guid -> bot_guid. Change it
+#        only if another module owns the binding. Letters, digits and
+#        underscore only, otherwise the module disables itself.
+#        Default: "wowlegends_companion"
+#
+#    CompanionQuestSync.NotifySkippedQuests
+#        How much the companion whispers the owner about quests it could not
+#        take. Repeats are suppressed per quest until it leaves and re-enters
+#        the owner's log, so this cannot spam.
+#        0 = silent
+#        1 = class/race locks only (the refusals that are nobody's fault)
+#        2 = every refusal - level, bags, quest cap, prerequisite, reputation
+#        Default: 2 (a silent refusal reads as a broken sync)
+#
+#    CompanionQuestSync.Debug
+#        0 = silent.
+#        1 = log every added/completed/skipped quest to the server log, tagged
+#            with the companion's name.
+#        2 = the above, plus a heartbeat line per window (see HeartbeatSeconds):
+#            passes, adds, completions, drops and whether the two logs line up.
+#        Default: 0
+#
+#    CompanionQuestSync.TidyInventory
+#        1 = when the companion's bags are nearly full, destroy its own junk so
+#            quests and quest items can still be picked up. Nothing else frees
+#            space for a companion: mod-playerbots' sell/repair errands are not in
+#            its strategy set and the core has no sell API outside the vendor
+#            opcode. Only Poor-quality items are destroyed, never a quest item,
+#            quest starter, or an item one of its own live quests still wants.
+#        0 = never touch the companion's bags (a full companion then silently
+#            skips quests whose source item cannot be stored).
+#        Default: 1
+#
+#    CompanionQuestSync.SellJunk
+#        When the companion's bags get tight, ask its own AI to sell what
+#        playerbots rates as vendor trash (item usage VENDOR/AH - useless whites
+#        as well as greys) before the module destroys anything. Real coin instead
+#        of deletion, and the judgement is playerbots', not this module's.
+#        Needs a vendor in interact range; with none it is a no-op, so the module
+#        simply falls through to destroying greys.
+#        Default: 1
+##    CompanionQuestSync.KeepFreeSlots
+#        Free bag slots the tidy tries to restore (checked each pass and again
+#        when an accept is refused for lack of space).
+#        Default: 2
+#
+
+CompanionQuestSync.Enable = 1
+CompanionQuestSync.AutoSync = 1
+CompanionQuestSync.IntervalSeconds = 20
+CompanionQuestSync.LevelMode = 1
+CompanionQuestSync.SyncCompletion = 1
+CompanionQuestSync.ForceAccept = 0
+CompanionQuestSync.DropExtraBotQuests = 0
+CompanionQuestSync.RequireGrouped = 1
+CompanionQuestSync.SkipInCombat = 1
+CompanionQuestSync.SkipTimedQuests = 1
+CompanionQuestSync.BindingTable = "wowlegends_companion"
+CompanionQuestSync.NotifySkippedQuests = 2
+CompanionQuestSync.TidyInventory = 1
+CompanionQuestSync.KeepFreeSlots = 2
+CompanionQuestSync.SellJunk = 1
+CompanionQuestSync.TidyVendorJunk = 1
+CompanionQuestSync.MapPins = 1
+CompanionQuestSync.TidySurplus = 1
+CompanionQuestSync.ExtraBagItem = 20400
+CompanionQuestSync.ExtraBags = 4
+CompanionQuestSync.ItemKeepQuality = 2
+
+#    CompanionQuestSync.ExtraBagItem / ExtraBags
+#        Give the companion somewhere to put things: any empty bag slot is filled
+#        once with ExtraBagItem (default Pumpkin Bag, 16 slots, no level requirement),
+#        up to ExtraBags slots. A slot that is already occupied is never touched, so a
+#        bag the player gave the companion stays. 0 for either disables it.
+#
+#    CompanionQuestSync.ItemKeepQuality
+#        Minimum quality worth keeping: 0 poor, 1 common, 2 uncommon (green), 3 rare,
+#        4 epic. Items below it may be sold or binned when the bags are tight; items at
+#        or above it never are. Default 2 - greys and whites are disposable, greens are
+#        not. This is what stops "inventory full" being permanent.
+#
+#    CompanionQuestSync.TidySurplus
+#        Last resort when the bags are completely full and nothing else is left: bin
+#        surplus consumables, trade goods and recipes (cheapest first, never the last
+#        of a stack, never gear, never anything a live quest needs). The companion
+#        does not craft, and an empty slot is worth more than a few copper of water.
+#        Default: 1
+#
+#    CompanionQuestSync.MapPins
+#        Push the areas of the companion's open quests onto the owner's world map,
+#        for quests the owner does not hold themselves (the cases where the client
+#        would otherwise never draw them). Best effort: the client is not required to
+#        honour POIs for quests outside its own log, in which case nothing is drawn
+#        and the whisper's map coordinates are the fallback. Sent once per change.
+#        Default: 1
+#
+#    CompanionQuestSync.TidyVendorJunk
+#        With zero free bag slots a companion cannot loot a quest item at all, so
+#        quests that need gathering stall completely. With this on, the module asks
+#        playerbots' item-usage value what it would vendor and destroys exactly
+#        that - never anything rated EQUIP, QUEST, SKILL, DISENCHANT or AH, and
+#        never a quest item, quest starter or item a live quest needs.
+#        Default: 1
+CompanionQuestSync.AnnounceAtStartup = 1
+CompanionQuestSync.AnnounceOnLogin = 1
+CompanionQuestSync.HeartbeatSeconds = 300
+CompanionQuestSync.Debug = 0
+
