@@ -42,6 +42,8 @@
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
+#include "Map.h"
+#include "MapMgr.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
@@ -155,6 +157,7 @@ namespace
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
+    std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -465,7 +468,17 @@ namespace
         float y = 0.0f;
         float z = 0.0f;
         uint32 map = 0;
+        uint32 zone = 0;
     };
+
+    uint32 ZoneAt(uint32 mapId, uint32 phaseMask, float x, float y, float z)
+    {
+        Map* map = sMapMgr->FindMap(mapId, 0);
+        if (!map)
+            return 0;
+
+        return map->GetZoneId(phaseMask, x, y, z);
+    }
 
     std::unordered_map<uint32, EnderSpot> g_enderCache;   // quest id -> ender spot
 
@@ -478,7 +491,7 @@ namespace
         EnderSpot spot;
 
         QueryResult result = WorldDatabase.Query(
-            "SELECT ct.name, c.position_x, c.position_y, c.position_z, c.map, ce.id "
+            "SELECT ct.name, c.position_x, c.position_y, c.position_z, c.map, ce.id, c.zoneId "
             "FROM creature_questender ce "
             "JOIN creature_template ct ON ct.entry = ce.id "
             "JOIN creature c ON c.id1 = ce.id "
@@ -494,6 +507,12 @@ namespace
             spot.z = fields[3].Get<float>();
             spot.map = fields[4].Get<uint32>();
             spot.entry = fields[5].Get<uint32>();
+            spot.zone = fields[6].Get<uint32>();
+
+            // creature.zoneId is 0 for plenty of NPCs (Morgan Pestle among them), which
+            // is how a Stormwind giver ended up pinned on the Elwynn map.
+            if (!spot.zone)
+                spot.zone = ZoneAt(spot.map, 1, spot.x, spot.y, spot.z);
         }
 
         return g_enderCache[questId] = spot;
@@ -533,9 +552,21 @@ namespace
             if (entry.points.empty())
                 continue;
 
+            if (entry.MapId != bot->GetMapId())
+                continue;
+
             float x = float(entry.points[0].x);
             float y = float(entry.points[0].y);
-            Map2ZoneCoordinates(x, y, bot->GetZoneId());
+            float const z = float(entry.points[0].y);
+
+            // Convert against the POI's own zone, and only when that is the zone the
+            // companion is standing in - otherwise the numbers belong to a different
+            // map page and read as a real location.
+            uint32 const poiZone = ZoneAt(entry.MapId, bot->GetPhaseMask(), x, y, z);
+            if (poiZone && poiZone != bot->GetZoneId())
+                continue;
+
+            Map2ZoneCoordinates(x, y, poiZone ? poiZone : bot->GetZoneId());
 
             if (x >= 0.0f && x <= 100.0f && y >= 0.0f && y <= 100.0f)
                 return "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
@@ -548,6 +579,11 @@ namespace
         return std::string();
     }
 
+    /// The zone a world position really sits in, from the loaded terrain.
+    ///
+    /// Needed because Stormwind and Elwynn share map 0: a map-id comparison says
+    /// "same place" for two positions three zones apart, and converting Stormwind
+    /// coordinates against Elwynn's bounds produced a confident, wrong pin.
     std::string ZoneName(uint32 zoneId)
     {
         if (AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId))
@@ -575,6 +611,8 @@ namespace
             return;
 
         std::string marked;
+        std::set<uint64> wanted;
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
 
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
         {
@@ -611,8 +649,24 @@ namespace
             WalkToGiver(owner, bot, npc);
 
             owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, npc->GetGUID());
+            wanted.insert(npc->GetGUID().GetRawValue());
             marked += std::to_string(questId) + ",";
         }
+
+        // Clear the icons this module forced and no longer needs. Without this the
+        // turn-in "?" stayed over the giver after the companion had already handed the
+        // quest in - a marker for work that no longer exists, and a gold "?" at an NPC
+        // with nothing to offer, which read as a broken quest rather than a signpost.
+        std::set<uint64>& previously = g_markedNpcs[ownerGuid];
+        for (uint64 const stale : previously)
+        {
+            if (wanted.count(stale))
+                continue;
+
+            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_NONE, ObjectGuid(stale));
+        }
+
+        previously = wanted;
 
         if (!marked.empty() && g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] marked the companion's turn-in(s) for {}",
@@ -1177,6 +1231,85 @@ namespace
                      bot->GetName(), npc->GetName(), toNpc);
     }
 
+    /// Hand in the companion's own quests even when the player is nowhere near the giver.
+    ///
+    /// This is the "I cannot speak to the quest giver" case. The turn-in reporter and
+    /// MarkOwnErrands both start from an NPC the *owner* can see, so a companion with a
+    /// finished quest and a player across the square got a complaint and nothing else.
+    /// Here the giver is found from the quest itself, the companion is stepped beside it
+    /// and its own reward action is asked to run - no leading, no standing nearby.
+    void DeliverHandIns(Player* owner, Player* bot)
+    {
+        if (!bot->IsAlive() || bot->IsInCombat() || (owner && owner->IsInCombat()))
+            return;
+
+        uint32 const nowTs = static_cast<uint32>(time(nullptr));
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = bot->GetQuestSlotQuestId(slot);
+            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest || !DescribeMissingItems(bot, quest).empty())
+                continue;                          // still owes items: cannot reward
+
+            EnderSpot const& spot = FindQuestEnder(questId);
+            if (!spot.found || spot.map != bot->GetMapId())
+                continue;
+
+            if (spot.zone && spot.zone != bot->GetZoneId())
+                continue;                          // giver is in another zone
+
+            float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
+
+            if (dist <= 6.0f)
+            {
+                uint32& prodAt = g_rewardProdAt[{ botGuid, questId }];
+                if (prodAt && nowTs - prodAt < 60)
+                    continue;
+
+                prodAt = nowTs;
+#ifdef MOD_PLAYERBOTS
+                if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                    ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
+#endif
+
+                if (g_cfg.debug >= 1)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] asked {} to hand in '{}' ({})",
+                             bot->GetName(), quest->GetTitle(), questId);
+                continue;
+            }
+
+            // Too far to step responsibly: the companion is questing elsewhere, and
+            // yanking it 300 yards across the zone would look like a bug.
+            if (dist > 120.0f)
+                continue;
+
+            uint32& stepAt = g_walkAt[botGuid];
+            if (stepAt && nowTs - stepAt < 20)
+                continue;
+
+            stepAt = nowTs;
+
+            float const angle = std::atan2(bot->GetPositionY() - spot.y, bot->GetPositionX() - spot.x);
+            float x = spot.x + 2.5f * std::cos(angle);
+            float y = spot.y + 2.5f * std::sin(angle);
+            float z = spot.z;
+
+            bot->UpdateGroundPositionZ(x, y, z);
+            bot->StopMoving();
+            bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] stepped {} to {} for '{}' ({:.0f} yd)",
+                         bot->GetName(), spot.name, quest->GetTitle(), dist);
+            return;
+        }
+    }
+
     void TrySellJunk(Player* owner, Player* bot)
     {
         if (!g_cfg.sellJunk)
@@ -1680,6 +1813,7 @@ namespace
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
         SendQuestPins(owner, bot);
+        DeliverHandIns(owner, bot);
         MarkOwnErrands(owner, bot);
 
         for (uint32 const questId : ownerQuests)
@@ -1772,7 +1906,7 @@ namespace
         std::string line;
         uint32 count = 0;
 
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE && count < 4; ++slot)
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
         {
             uint32 const questId = bot->GetQuestSlotQuestId(slot);
             if (!questId)
@@ -1788,8 +1922,13 @@ namespace
             if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
             {
                 EnderSpot const& spot = FindQuestEnder(questId);
-                if (spot.found && spot.map == bot->GetMapId())
-                    coords = MapCoords(spot.x, spot.y, bot->GetZoneId());
+
+                // Only pin a giver standing in the same zone. Stormwind and Elwynn share
+                // map 0, so a map check alone let Morgan Pestle (Stormwind) be pinned on
+                // the Elwynn map at a plausible-looking but wrong spot - "26,39" for a
+                // hand-in that is two zones away.
+                if (spot.found && spot.map == bot->GetMapId() && spot.zone == bot->GetZoneId())
+                    coords = MapCoords(spot.x, spot.y, spot.zone);
 
                 style = 'h';
             }
@@ -1823,7 +1962,7 @@ namespace
             ++count;
         }
 
-        return "Pin sync " + std::to_string(count) + ": " + line;
+        return line;
     }
 
     /// Send the pin line when it changes, and again every ten minutes in case one
@@ -1834,24 +1973,76 @@ namespace
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::string const line = BuildPinLine(owner, bot);
+        std::string const payload = BuildPinLine(owner, bot);
 
         std::string& last = g_lastPinSync[ownerGuid];
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32 const sentAt = g_pinSyncAt[ownerGuid];
 
-        if (!force && line == last && (sentAt && now - sentAt < 600))
+        if (!force && payload == last && (sentAt && now - sentAt < 600))
             return;
 
-        // Grey and quiet: the addon needs the line, the player does not need to read
-        // it. Colour codes are stripped by WLPins before it parses.
-        bot->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+        // Chunk the payload. A companion carrying more than about five pin-worthy
+        // quests overflowed the whisper length limit, and the old fixed cap of four
+        // dropped the rest silently - which is how a quest could sit in the companion's
+        // log with no pin on the map. "Pin sync 1/3: ..." tells the addon to hold the
+        // parts until the set is complete; a single part stays "Pin sync 4: ...".
+        std::vector<std::string> chunks;
+        std::string current;
+        size_t start = 0;
+        uint32 entries = 0;
 
-        last = line;
+        while (start <= payload.size())
+        {
+            size_t const bar = payload.find('|', start);
+            std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+
+            if (!current.empty() && current.size() + entry.size() + 1 > 150)
+            {
+                chunks.push_back(current);
+                current.clear();
+            }
+
+            if (!current.empty())
+                current += "|";
+
+            current += entry;
+            ++entries;
+
+            if (bar == std::string::npos)
+                break;
+
+            start = bar + 1;
+        }
+
+        if (!current.empty())
+            chunks.push_back(current);
+
+        if (chunks.empty())
+            chunks.push_back(std::string());
+
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            std::string line = "Pin sync ";
+
+            if (chunks.size() > 1)
+                line += std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ": ";
+            else
+                line += std::to_string(entries) + ": ";
+
+            line += chunks[i];
+
+            // Grey and quiet: the addon needs the line, the player does not need to read
+            // it. Colour codes are stripped by WLPins before it parses.
+            bot->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+        }
+
+        last = payload;
         g_pinSyncAt[ownerGuid] = now;
 
         if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] pin sync -> {}: {}", owner->GetName(), line);
+            LOG_INFO("server.loading", "[CompanionQuestSync] pin sync -> {}: {} part(s), {} entries",
+                     owner->GetName(), uint32(chunks.size()), entries);
     }
 
     void PrintReport(ChatHandler* handler, Player* owner, SyncReport const& report, bool manual)

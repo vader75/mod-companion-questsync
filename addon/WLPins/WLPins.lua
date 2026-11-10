@@ -315,6 +315,23 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         local text = string.gsub(arg1 or "", "|c%x%x%x%x%x%x%x%x", "")
         text = string.gsub(text, "|r", "")
 
+        -- "Pin sync 1/3: ..." arrives in parts when the companion carries more quests
+        -- than one whisper can hold. Hold them until the set is complete, then rebuild
+        -- once - applying a part on its own would wipe the pins named in the others.
+        local part, total, piece = string.match(text, "^Pin sync (%d+)/(%d+):%s*(.*)$")
+        if part then
+            WLPins.syncParts = WLPins.syncParts or {}
+            WLPins.syncParts[tonumber(part)] = piece
+
+            if #WLPins.syncParts == tonumber(total) then
+                local joined = {}
+                for i = 1, tonumber(total) do joined[i] = WLPins.syncParts[i] or "" end
+                WLPins.syncParts = nil
+                SyncPins(table.concat(joined, "|"))
+            end
+            return
+        end
+
         local syncCount, payload = string.match(text, "^Pin sync (%d+):%s*(.*)$")
         if syncCount then
             SyncPins(payload)
