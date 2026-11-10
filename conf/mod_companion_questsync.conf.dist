@@ -124,7 +124,7 @@
 
 CompanionQuestSync.Enable = 1
 CompanionQuestSync.AutoSync = 1
-CompanionQuestSync.IntervalSeconds = 20
+CompanionQuestSync.IntervalSeconds = 30
 CompanionQuestSync.LevelMode = 1
 CompanionQuestSync.SyncCompletion = 1
 CompanionQuestSync.ForceAccept = 0

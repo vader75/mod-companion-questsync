@@ -6,7 +6,7 @@ Built for AzerothCore 3.3.5a with [mod-playerbots](https://github.com/liyunfan12
 
 ## What it does
 
-Every 20 seconds (and instantly on quest accept) the module reconciles one player's quest log onto the companion bound to them:
+Every 30 seconds (and instantly on quest accept) the module reconciles one player's quest log onto the companion bound to them:
 
 | Behaviour | Detail |
 |---|---|

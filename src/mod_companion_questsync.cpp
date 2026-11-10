@@ -44,6 +44,7 @@
 #include "Log.h"
 #include "Map.h"
 #include "MapMgr.h"
+#include <chrono>
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
@@ -158,6 +159,8 @@ namespace
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
+    std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
+    std::map<std::pair<uint32, uint32>, std::string> g_poiCache;      // (zone, quest) -> "map X, Y"
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -172,6 +175,18 @@ namespace
 
     bool AnyPlayerInWorld()
     {
+        // Cached for five seconds. The heartbeat probes this once a second, and with a
+        // hundred bot sessions in world that is a pointless walk every tick.
+        static uint32 cachedAt = 0;
+        static bool cached = false;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        if (cachedAt && now - cachedAt < 5)
+            return cached;
+
+        cachedAt = now;
+        cached = false;
+
         for (auto const& pair : sWorldSessionMgr->GetAllSessions())
         {
             WorldSession* session = pair.second;
@@ -180,11 +195,16 @@ namespace
 
             Player* player = session->GetPlayer();
             if (player && player->IsInWorld())
-                return true;
+            {
+                cached = true;
+                break;
+            }
         }
 
-        return false;
-    }    uint64 QuestLogDigest(Player* player)
+        return cached;
+    }
+
+    uint64 QuestLogDigest(Player* player)
     {
         // FNV-1a over level, quest ids and statuses: cheap, order-stable, and
         // sensitive to exactly the things a pass acts on.
@@ -555,9 +575,18 @@ namespace
             if (entry.MapId != bot->GetMapId())
                 continue;
 
+            // POI geometry is static and the conversion depends only on the zone, so the
+            // pair (zone, quest) is enough to reuse the answer - ZoneAt walks terrain.
+            std::pair<uint32, uint32> const key{ bot->GetZoneId(), quest->GetQuestId() };
+            auto const cached = g_poiCache.find(key);
+            if (cached != g_poiCache.end())
+                return cached->second;
+
             float x = float(entry.points[0].x);
             float y = float(entry.points[0].y);
-            float const z = float(entry.points[0].y);
+            // QuestPOIPoint is 2D; the zone lookup only needs the horizontal position,
+            // and passing y as a height (as this once did) put the probe underground.
+            float const z = 0.0f;
 
             // Convert against the POI's own zone, and only when that is the zone the
             // companion is standing in - otherwise the numbers belong to a different
@@ -569,21 +598,40 @@ namespace
             Map2ZoneCoordinates(x, y, poiZone ? poiZone : bot->GetZoneId());
 
             if (x >= 0.0f && x <= 100.0f && y >= 0.0f && y <= 100.0f)
-                return "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+            {
+                std::string const spot = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+                g_poiCache[key] = spot;
+                return spot;
+            }
 
             if (g_cfg.debug >= 2)
                 LOG_INFO("server.loading", "[CompanionQuestSync] POI {} out of range after conversion: {:.1f}, {:.1f}",
                          quest->GetQuestId(), x, y);
         }
 
+        // Cache the negative too, or a quest with no usable area is re-scanned every pass.
+        g_poiCache[{ bot->GetZoneId(), quest->GetQuestId() }] = std::string();
         return std::string();
     }
 
-    /// The zone a world position really sits in, from the loaded terrain.
-    ///
-    /// Needed because Stormwind and Elwynn share map 0: a map-id comparison says
-    /// "same place" for two positions three zones apart, and converting Stormwind
-    /// coordinates against Elwynn's bounds produced a confident, wrong pin.
+    std::string DescribeMissingItemsUncached(Player* bot, Quest const* quest);  // defined below
+
+    /// One bag scan per (bot, quest) per pass instead of three. The delivery routine,
+    /// the owner-visible markers and the turn-in reporter all ask the same question
+    /// about the same quest, and each answer walks the companion's bags.
+    std::string DescribeMissingItems(Player* bot, Quest const* quest)
+    {
+        std::pair<uint32, uint32> const key{ bot->GetGUID().GetCounter(), quest->GetQuestId() };
+
+        auto itr = g_missingCache.find(key);
+        if (itr != g_missingCache.end())
+            return itr->second;
+
+        std::string text = DescribeMissingItemsUncached(bot, quest);
+        g_missingCache[key] = text;
+        return text;
+    }
+
     std::string ZoneName(uint32 zoneId)
     {
         if (AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId))
@@ -595,7 +643,6 @@ namespace
 
     void SendPinSync(Player* owner, Player* bot, bool force);  // defined below
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
-    std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
 
     /// Mark the turn-in NPCs where the owner is already done and the companion is not.
     ///
@@ -880,7 +927,7 @@ namespace
     /// "Large Candle 0/8" - what the companion still owes for a quest, spelled
     /// out. A bare "missing items" whisper told the player nothing they could act
     /// on: not which item, not how many are already in the bags.
-    std::string DescribeMissingItems(Player* bot, Quest const* quest)
+    std::string DescribeMissingItemsUncached(Player* bot, Quest const* quest)
     {
         std::string out;
 
@@ -1748,6 +1795,29 @@ namespace
     /// both the command output and the debug log can use it.
     SyncReport SyncCompanion(Player* owner)
     {
+        // Measured, not guessed: Debug >= 2 logs how long a whole pass takes, which is
+        // the number that matters when asking what this module costs the server.
+        g_missingCache.clear();     // bag contents can change between passes
+
+        auto const startedAt = std::chrono::steady_clock::now();
+        struct PassTimer
+        {
+            std::chrono::steady_clock::time_point start;
+            Player* owner;
+
+            ~PassTimer()
+            {
+                if (g_cfg.debug < 2)
+                    return;
+
+                auto const us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+
+                LOG_INFO("server.loading", "[CompanionQuestSync] pass for {} took {} us",
+                         owner ? owner->GetName() : "?", us);
+            }
+        } timer{ startedAt, owner };
+
         SyncReport report;
 
         Player* bot = ResolveCompanion(owner, report);
@@ -1776,6 +1846,12 @@ namespace
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
         uint64 const digest = QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull);
+
+        // Hand-ins run before the digest short-circuit: a companion standing too far
+        // from its giver changes nothing in either log, so the digest keeps matching and
+        // the step would never be retried - the quest would sit COMPLETE until something
+        // else moved. The routine carries its own throttles, so repeating it is cheap.
+        DeliverHandIns(owner, bot);
 
         auto const memo = g_passMemo.find(ownerGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -1813,7 +1889,6 @@ namespace
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
         SendQuestPins(owner, bot);
-        DeliverHandIns(owner, bot);
         MarkOwnErrands(owner, bot);
 
         for (uint32 const questId : ownerQuests)
@@ -2521,7 +2596,23 @@ public:
 
         // Only owners get a tally (the sweep skips bot sessions), so a companion
         // logging out finds nothing and stays quiet.
-        auto itr = g_session.find(player->GetGUID().GetCounter());
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+
+        // Drop the per-player state with the player. Bot-keyed maps are bounded by the
+        // bot count, but owner-keyed ones would otherwise sit on strings for every
+        // character that had ever bound a companion - small, and still worth not
+        // carrying across sessions (a stale pin sync line would also suppress the first
+        // reconciliation of the next login).
+        g_passMemo.erase(ownerGuid);
+        g_lastPinSync.erase(ownerGuid);
+        g_pinSyncAt.erase(ownerGuid);
+        g_markedNpcs.erase(ownerGuid);
+        g_sessionRefused.erase(ownerGuid);
+        g_whisperQueue.erase(ownerGuid);
+        g_lastWhisperAt.erase(ownerGuid);
+        g_pinnedQuests.erase(ownerGuid);
+
+        auto itr = g_session.find(ownerGuid);
         if (itr == g_session.end())
             return;
 
