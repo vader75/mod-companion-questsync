@@ -20,6 +20,8 @@ local FLIP_Y = false                  -- set true with /wlpins flip if pins land
 
 local WLPins = CreateFrame("Frame")
 WLPins.debug = false
+WLPins.offsetX = 0
+WLPins.offsetY = 0
 WLPins.pins = {}                      -- [{x=, y=, colour=, label=, at=, zone=}]
 WLPins.frames = {}
 
@@ -59,6 +61,8 @@ end
 
 local function SaveDB()
     WLPinsDB = WLPinsDB or {}
+    WLPinsDB.offsetX = WLPins.offsetX
+    WLPinsDB.offsetY = WLPins.offsetY
     WLPinsDB.pins = {}
     for i, pin in ipairs(WLPins.pins) do
         WLPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at,
@@ -69,6 +73,8 @@ end
 
 local function LoadDB()
     WLPinsDB = WLPinsDB or { pins = {} }
+    WLPins.offsetX = WLPinsDB.offsetX or 0
+    WLPins.offsetY = WLPinsDB.offsetY or 0
     for _, saved in ipairs(WLPinsDB.pins or {}) do
         table.insert(WLPins.pins, {
             x = saved.x, y = saved.y, at = saved.at, label = saved.label, zone = saved.zone,
@@ -162,8 +168,12 @@ function WLPins:Redraw()
         local f = PinFrame(i)
         f.pin = pin
 
-        local px = (pin.x / 100) * w
-        local py = (FLIP_Y and (1 - pin.y / 100) or (pin.y / 100)) * h
+        -- calibration: the detail frame carries a margin the terrain texture does
+        -- not, so pure percentages land a few percent right and low. /wlpins offset
+        -- moves every pin by whole percent until they sit on the roads they belong to.
+        local px = ((pin.x + WLPins.offsetX) / 100) * w
+        local py = (FLIP_Y and (1 - (pin.y + WLPins.offsetY) / 100)
+                             or ((pin.y + WLPins.offsetY) / 100)) * h
         f:ClearAllPoints()
         f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
         f:Show()
@@ -240,6 +250,19 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r vertical flip " ..
             (FLIP_Y and "on" or "off") .. " (pins move to the other side of the map).")
 
+    elseif string.find(msg, "^offset") then
+        local ox, oy = string.match(msg, "^offset%s+(-?%d+)%s*(-?%d+)")
+        if ox and oy then
+            WLPins.offsetX, WLPins.offsetY = tonumber(ox), tonumber(oy)
+            SaveDB(); WLPins:Redraw()
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffWLPins|r calibration offset %d, %d.", WLPins.offsetX, WLPins.offsetY))
+        else
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffWLPins|r offset is %d, %d - change it with /wlpins offset -7 -3",
+                WLPins.offsetX, WLPins.offsetY))
+        end
+
     elseif msg == "test" then
         AddPin(48, 52, { r = 1, g = 0.82, b = 0.16 }, "TEST PIN")
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test pin at 48, 52 - press M and look mid-map.")
@@ -266,6 +289,7 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins flip  - pins mirrored top/bottom? flip them")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins test  - draw a pin at 48,52 to prove drawing works")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins debug - log every whisper the addon hears")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
         DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
     end
 end
