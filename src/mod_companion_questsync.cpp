@@ -665,6 +665,25 @@ namespace
 
     std::string DescribeMissingItemsUncached(Player* bot, Quest const* quest);  // defined below
 
+    /// Could this player ever have taken this quest, by class and race alone?
+    ///
+    /// Deliberately not Player::CanTakeQuest: that also checks level, reputation and the
+    /// prerequisite chain, and an abandoned quest often fails those precisely because it
+    /// was abandoned. Class and race are the only gates that say "this quest was never
+    /// the owner's to hold".
+    bool OwnerFitsQuestMask(Player* owner, Quest const* quest)
+    {
+        uint32 const classMask = quest->GetRequiredClasses();
+        if (classMask && !(classMask & (1u << (owner->getClass() - 1))))
+            return false;
+
+        uint32 const raceMask = quest->GetAllowableRaces();
+        if (raceMask && !(raceMask & (1u << (owner->getRace() - 1))))
+            return false;
+
+        return true;
+    }
+
     /// One bag scan per (bot, quest) per pass instead of three. The delivery routine,
     /// the owner-visible markers and the turn-in reporter all ask the same question
     /// about the same quest, and each answer walks the companion's bags.
@@ -2161,6 +2180,90 @@ namespace
         // else moved. The routine carries its own throttles, so repeating it is cheap.
         DeliverHandIns(owner, bot);
 
+        // Extras are cleared before the memo, not after. A pass that ends "clean" with an
+        // unchanged digest short-circuits every later pass, so a drop that waits out a
+        // grace period never got a second look: the quest stayed on the companion forever
+        // while the heartbeat cheerfully reported "0 dropped".
+
+        // Follow the owner out of a quest, not just into one.
+        //
+        // The old version of this only asked whether the owner held the quest right
+        // now, so a copy the owner had already handed in looked "extra" and was thrown
+        // away - the opposite of the intent, and enough to strand a companion mid-chain.
+        // A quest counts as abandoned only when the owner neither holds it nor has been
+        // rewarded for it, and only after a grace period, so a quest the owner accepted
+        // a moment ago is never yanked out from under the accept hook.
+        if (g_cfg.dropExtraBotQuests)
+        {
+            uint32 const nowTs = static_cast<uint32>(time(nullptr));
+            uint32 const botGuid = bot->GetGUID().GetCounter();
+
+            std::set<uint32> stillExtra;
+
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            {
+                uint32 const questId = bot->GetQuestSlotQuestId(slot);
+                if (!questId || bot->IsQuestRewarded(questId))
+                    continue;
+
+                if (std::find(ownerQuests.begin(), ownerQuests.end(), questId) != ownerQuests.end())
+                    continue;
+
+                // Already handed in by the owner: the companion is catching up, not
+                // carrying a stray copy. Leave it alone - that is the whole point of
+                // the module.
+                if (owner->IsQuestRewarded(questId))
+                    continue;
+
+                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+
+                // A quest the owner could never take was not mirrored from them, so it is
+                // not theirs to abandon. Test the masks against the owner, not for their
+                // presence: AllowableRaces is set on almost every quest (1101 is simply
+                // "Alliance"), so treating any mask as a lock exempted the entire game and
+                // no extra was ever dropped.
+                if (!OwnerFitsQuestMask(owner, quest))
+                    continue;
+
+                std::pair<uint32, uint32> const key{ botGuid, questId };
+                uint32& since = g_extraSince[key];
+                if (!since)
+                    since = nowTs;
+
+                if (nowTs - since < g_cfg.dropExtraGrace)
+                {
+                    stillExtra.insert(questId);
+                    continue;                                   // wait out the grace period
+                }
+
+                bot->SetQuestSlot(slot, 0);
+                bot->TakeQuestSourceItem(questId, false);
+                bot->RemoveActiveQuest(questId, false);
+                ++report.dropped;
+
+                g_extraSince.erase(key);
+
+                SayToOwner(bot, owner, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
+                                      "it made no sense to keep gathering for it on my own.", 120);
+
+                if (g_cfg.debug >= 1)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} - dropped quest {} ('{}'), owner no longer has it",
+                             bot->GetName(), questId, quest->GetTitle());
+            }
+
+            // Forget the clock for copies that came back (owner re-accepted the quest).
+            for (auto itr = g_extraSince.begin(); itr != g_extraSince.end(); )
+            {
+                if (itr->first.first == botGuid && !stillExtra.count(itr->first.second))
+                    itr = g_extraSince.erase(itr);
+                else
+                    ++itr;
+            }
+        }
+
+
         auto const memo = g_passMemo.find(ownerGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
         {
@@ -2217,81 +2320,6 @@ namespace
                 ++itr;
             else
                 itr = notified.erase(itr);
-        }
-
-        // Follow the owner out of a quest, not just into one.
-        //
-        // The old version of this only asked whether the owner held the quest right
-        // now, so a copy the owner had already handed in looked "extra" and was thrown
-        // away - the opposite of the intent, and enough to strand a companion mid-chain.
-        // A quest counts as abandoned only when the owner neither holds it nor has been
-        // rewarded for it, and only after a grace period, so a quest the owner accepted
-        // a moment ago is never yanked out from under the accept hook.
-        if (g_cfg.dropExtraBotQuests)
-        {
-            uint32 const nowTs = static_cast<uint32>(time(nullptr));
-            uint32 const botGuid = bot->GetGUID().GetCounter();
-
-            std::set<uint32> stillExtra;
-
-            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
-            {
-                uint32 const questId = bot->GetQuestSlotQuestId(slot);
-                if (!questId || bot->IsQuestRewarded(questId))
-                    continue;
-
-                if (std::find(ownerQuests.begin(), ownerQuests.end(), questId) != ownerQuests.end())
-                    continue;
-
-                // Already handed in by the owner: the companion is catching up, not
-                // carrying a stray copy. Leave it alone - that is the whole point of
-                // the module.
-                if (owner->IsQuestRewarded(questId))
-                    continue;
-
-                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-                if (!quest)
-                    continue;
-
-                // A quest the owner could never take (class or race locked) was not
-                // mirrored from them, so it is not theirs to abandon.
-                if (quest->GetRequiredClasses() || quest->GetAllowableRaces())
-                    continue;
-
-                std::pair<uint32, uint32> const key{ botGuid, questId };
-                uint32& since = g_extraSince[key];
-                if (!since)
-                    since = nowTs;
-
-                if (nowTs - since < g_cfg.dropExtraGrace)
-                {
-                    stillExtra.insert(questId);
-                    continue;                                   // wait out the grace period
-                }
-
-                bot->SetQuestSlot(slot, 0);
-                bot->TakeQuestSourceItem(questId, false);
-                bot->RemoveActiveQuest(questId, false);
-                ++report.dropped;
-
-                g_extraSince.erase(key);
-
-                SayToOwner(bot, owner, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
-                                      "it made no sense to keep gathering for it on my own.", 120);
-
-                if (g_cfg.debug >= 1)
-                    LOG_INFO("server.loading", "[CompanionQuestSync] {} - dropped quest {} ('{}'), owner no longer has it",
-                             bot->GetName(), questId, quest->GetTitle());
-            }
-
-            // Forget the clock for copies that came back (owner re-accepted the quest).
-            for (auto itr = g_extraSince.begin(); itr != g_extraSince.end(); )
-            {
-                if (itr->first.first == botGuid && !stillExtra.count(itr->first.second))
-                    itr = g_extraSince.erase(itr);
-                else
-                    ++itr;
-            }
         }
 
         report.botQuestCount = CountQuestLog(bot);
@@ -2942,7 +2970,8 @@ public:
     // scripts listed for each hook), which is why the login greeting silently
     // did nothing before.
     CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
-        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT }) { }
+        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
+          PLAYERHOOK_ON_QUEST_ABANDON }) { }
 
     void OnPlayerLogin(Player* player) override
     {
@@ -3010,6 +3039,55 @@ public:
     /// companion. The 20 s sweep stays as the safety net (logins, level gates,
     /// anything the hook could not do), but this removes the wait - and it runs
     /// regardless of combat, which the sweep deliberately no longer blocks.
+    /// Mirror an abandon as instantly as an accept.
+    ///
+    /// The sweep also notices a quest the owner no longer holds, but it has to wait out
+    /// a grace period and only ticks while the player is in world - drop a quest and log
+    /// out and the companion kept gathering for nothing. This runs in the same call the
+    /// client made, so the copy goes at the same moment.
+    void OnPlayerQuestAbandon(Player* player, uint32 questId) override
+    {
+        if (!g_cfg.enable || !g_cfg.dropExtraBotQuests || !g_tableReady || !questId)
+            return;
+
+        if (!player || !player->GetSession() || player->GetSession()->IsBot())
+            return;
+
+        // The owner still holds it? Then nothing was abandoned (a partial drop or a
+        // branch swap can fire this while the quest stays in the log).
+        if (player->GetQuestStatus(questId) != QUEST_STATUS_NONE)
+            return;
+
+        SyncReport report;
+        Player* bot = ResolveCompanion(player, report);
+        if (!bot)
+            return;
+
+        bool holds = false;
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE && !holds; ++slot)
+            holds = bot->GetQuestSlotQuestId(slot) == questId;
+
+        if (!holds)
+            return;
+
+        if (bot->IsQuestRewarded(questId))
+            return;
+
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+
+        bot->RemoveActiveQuest(questId, false);
+        g_extraSince.erase({ bot->GetGUID().GetCounter(), questId });
+
+        if (quest)
+        {
+            SayToOwner(bot, player, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
+                                  "it made no sense to keep gathering for it on my own.", 120);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} dropped '{}' ({}) - {} abandoned it",
+                     bot->GetName(), quest->GetTitle(), questId, player->GetName());
+        }
+    }
+
     void OnPlayerQuestAccept(Player* player, Quest const* quest) override
     {
         if (!g_cfg.enable || !g_tableReady || !quest)
