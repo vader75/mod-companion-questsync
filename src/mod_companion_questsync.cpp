@@ -73,7 +73,8 @@ namespace
         bool enable             = true;
         bool autoSync           = true;
         bool syncCompletion     = true;
-        bool dropExtraBotQuests = false;
+        bool dropExtraBotQuests = true;   // the companion follows the owner out of a quest too
+        uint32 dropExtraGrace     = 120;  // seconds before an extra quest counts as abandoned
         bool requireGrouped     = true;
         bool skipInCombat       = true;
         bool skipTimedQuests    = true;
@@ -161,6 +162,7 @@ namespace
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
     std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
     std::map<std::pair<uint32, uint32>, std::string> g_poiCache;      // (zone, quest) -> "map X, Y"
+    std::map<std::pair<uint32, uint32>, uint32> g_extraSince;         // (bot, quest) -> first seen extra
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -284,7 +286,8 @@ namespace
         g_cfg.enable             = sConfigMgr->GetOption<bool>("CompanionQuestSync.Enable", true);
         g_cfg.autoSync           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoSync", true);
         g_cfg.syncCompletion     = sConfigMgr->GetOption<bool>("CompanionQuestSync.SyncCompletion", true);
-        g_cfg.dropExtraBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropExtraBotQuests", false);
+        g_cfg.dropExtraBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropExtraBotQuests", true);
+        g_cfg.dropExtraGrace     = sConfigMgr->GetOption<uint32>("CompanionQuestSync.DropExtraGraceSeconds", 120);
         g_cfg.requireGrouped     = sConfigMgr->GetOption<bool>("CompanionQuestSync.RequireGrouped", true);
         g_cfg.skipInCombat       = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipInCombat", true);
         g_cfg.skipTimedQuests    = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipTimedQuests", true);
@@ -688,6 +691,36 @@ namespace
     }
 
     void SendPinSync(Player* owner, Player* bot, bool force);  // defined below
+    /// Put the companion at its owner's side, offset away from `toward`.
+    ///
+    /// Stepping the bot to the *quest giver* meant a visible blink to somebody
+    /// else's coordinates, which reads as a bug because nothing the player did
+    /// caused it. A step to a couple of yards beside the owner reads as "the
+    /// companion caught up" - and still lands in interaction range whenever the
+    /// owner is standing at the giver, which is the normal turn-in.
+    void StepBesideOwner(Player* owner, Player* bot, float towardX, float towardY)
+    {
+        float dx = owner->GetPositionX() - towardX;
+        float dy = owner->GetPositionY() - towardY;
+        float len = std::sqrt(dx * dx + dy * dy);
+
+        if (len < 0.5f)                                  // owner is standing on the giver
+        {
+            float const o = owner->GetOrientation() + 3.14159265f;
+            dx = std::cos(o);
+            dy = std::sin(o);
+            len = 1.0f;
+        }
+
+        float const x = owner->GetPositionX() + 2.0f * dx / len;
+        float const y = owner->GetPositionY() + 2.0f * dy / len;
+        float z = owner->GetPositionZ();
+
+        bot->UpdateGroundPositionZ(x, y, z);
+        bot->StopMoving();
+        bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+    }
+
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
 
     /// Mark the turn-in NPCs where the owner is already done and the companion is not.
@@ -1347,6 +1380,12 @@ namespace
         if (owner->GetDistance(bot) > 80.0f)
             return;
 
+        // Only worth stepping when the player is at the giver themselves: the point
+        // is to let the companion interact from the owner's side, not to drag it
+        // across the zone to an NPC the player is not standing at.
+        if (owner->GetDistance(npc) > 10.0f)
+            return;
+
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_walkAt[botGuid];
@@ -1355,19 +1394,12 @@ namespace
 
         last = now;
 
-        float const angle = npc->GetAngle(bot);
-        float x = npc->GetPositionX() + 2.5f * std::cos(angle);
-        float y = npc->GetPositionY() + 2.5f * std::sin(angle);
-        float z = npc->GetPositionZ();
-
-        bot->UpdateGroundPositionZ(x, y, z);
-        bot->StopMoving();
-        bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+        StepBesideOwner(owner, bot, npc->GetPositionX(), npc->GetPositionY());
         bot->SetFacingToObject(npc);
 
         if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] stepped {} to {} ({:.0f} yd)",
-                     bot->GetName(), npc->GetName(), toNpc);
+            LOG_INFO("server.loading", "[CompanionQuestSync] stepped {} to {}'s side ({:.0f} yd from {})",
+                     bot->GetName(), owner->GetName(), toNpc, npc->GetName());
     }
 
     /// Hand in the companion's own quests even when the player is nowhere near the giver.
@@ -1427,20 +1459,20 @@ namespace
             if (dist > 120.0f)
                 continue;
 
+            // Step to the OWNER, not to the giver: a blink to the NPC's coordinates
+            // from across the square is what looked strange. This only helps while
+            // the player is standing at the giver - the normal turn-in - so any
+            // other case waits for a pass where they are.
+            if (!owner || owner->GetDistance(spot.x, spot.y, spot.z) > 10.0f)
+                continue;
+
             uint32& stepAt = g_walkAt[botGuid];
             if (stepAt && nowTs - stepAt < 20)
                 continue;
 
             stepAt = nowTs;
 
-            float const angle = std::atan2(bot->GetPositionY() - spot.y, bot->GetPositionX() - spot.x);
-            float x = spot.x + 2.5f * std::cos(angle);
-            float y = spot.y + 2.5f * std::sin(angle);
-            float z = spot.z;
-
-            bot->UpdateGroundPositionZ(x, y, z);
-            bot->StopMoving();
-            bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+            StepBesideOwner(owner, bot, spot.x, spot.y);
 
             // Speak to the giver in THIS pass. Checking the distance on the next
             // one loses a race the bot cannot win: its follow strategy walks it
@@ -2187,8 +2219,21 @@ namespace
                 itr = notified.erase(itr);
         }
 
+        // Follow the owner out of a quest, not just into one.
+        //
+        // The old version of this only asked whether the owner held the quest right
+        // now, so a copy the owner had already handed in looked "extra" and was thrown
+        // away - the opposite of the intent, and enough to strand a companion mid-chain.
+        // A quest counts as abandoned only when the owner neither holds it nor has been
+        // rewarded for it, and only after a grace period, so a quest the owner accepted
+        // a moment ago is never yanked out from under the accept hook.
         if (g_cfg.dropExtraBotQuests)
         {
+            uint32 const nowTs = static_cast<uint32>(time(nullptr));
+            uint32 const botGuid = bot->GetGUID().GetCounter();
+
+            std::set<uint32> stillExtra;
+
             for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
             {
                 uint32 const questId = bot->GetQuestSlotQuestId(slot);
@@ -2198,13 +2243,54 @@ namespace
                 if (std::find(ownerQuests.begin(), ownerQuests.end(), questId) != ownerQuests.end())
                     continue;
 
+                // Already handed in by the owner: the companion is catching up, not
+                // carrying a stray copy. Leave it alone - that is the whole point of
+                // the module.
+                if (owner->IsQuestRewarded(questId))
+                    continue;
+
+                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+
+                // A quest the owner could never take (class or race locked) was not
+                // mirrored from them, so it is not theirs to abandon.
+                if (quest->GetRequiredClasses() || quest->GetAllowableRaces())
+                    continue;
+
+                std::pair<uint32, uint32> const key{ botGuid, questId };
+                uint32& since = g_extraSince[key];
+                if (!since)
+                    since = nowTs;
+
+                if (nowTs - since < g_cfg.dropExtraGrace)
+                {
+                    stillExtra.insert(questId);
+                    continue;                                   // wait out the grace period
+                }
+
                 bot->SetQuestSlot(slot, 0);
                 bot->TakeQuestSourceItem(questId, false);
                 bot->RemoveActiveQuest(questId, false);
                 ++report.dropped;
 
+                g_extraSince.erase(key);
+
+                SayToOwner(bot, owner, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
+                                      "it made no sense to keep gathering for it on my own.", 120);
+
                 if (g_cfg.debug >= 1)
-                    LOG_INFO("server.loading", "[CompanionQuestSync] {} - dropped quest {}", bot->GetName(), questId);
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} - dropped quest {} ('{}'), owner no longer has it",
+                             bot->GetName(), questId, quest->GetTitle());
+            }
+
+            // Forget the clock for copies that came back (owner re-accepted the quest).
+            for (auto itr = g_extraSince.begin(); itr != g_extraSince.end(); )
+            {
+                if (itr->first.first == botGuid && !stillExtra.count(itr->first.second))
+                    itr = g_extraSince.erase(itr);
+                else
+                    ++itr;
             }
         }
 

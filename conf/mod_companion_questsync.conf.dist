@@ -128,7 +128,25 @@ CompanionQuestSync.IntervalSeconds = 30
 CompanionQuestSync.LevelMode = 1
 CompanionQuestSync.SyncCompletion = 1
 CompanionQuestSync.ForceAccept = 0
-CompanionQuestSync.DropExtraBotQuests = 0
+CompanionQuestSync.DropExtraBotQuests = 1
+
+#    CompanionQuestSync.DropExtraGraceSeconds
+#        Description: How long a companion keeps a quest the owner does not have before
+#                     treating it as abandoned. Covers the gap between the owner
+#                     accepting a quest and it reaching the companion.
+#        Default:     120
+CompanionQuestSync.DropExtraGraceSeconds = 120
+#    CompanionQuestSync.PinSync
+#        Description: Keep the client addon's map reconciled with the companion.
+#                     Each pass sends one authoritative line - "Pin sync 3:
+#                     43,65,h=Kobold Candles|..." - split across several whispers when
+#                     there are too many entries for one, and the addon rebuilds its
+#                     pins from it. Any pin it does not mention is removed, which is
+#                     what cleans the map after a lost whisper or a session that ended
+#                     mid hand-in. Sent on login, on change, every ten minutes, and on
+#                     demand with .companionsync pins.
+#        Default:     1 (on)
+CompanionQuestSync.PinSync = 1
 CompanionQuestSync.RequireGrouped = 1
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1
@@ -139,7 +157,6 @@ CompanionQuestSync.KeepFreeSlots = 2
 CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TidyVendorJunk = 1
 CompanionQuestSync.MapPins = 1
-CompanionQuestSync.PinSync = 1
 CompanionQuestSync.TidySurplus = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
@@ -164,12 +181,6 @@ CompanionQuestSync.ItemKeepQuality = 2
 #        does not craft, and an empty slot is worth more than a few copper of water.
 #        Default: 1
 #
-#    CompanionQuestSync.PinSync
-#        Whisper the companion's pin set to the owner's addon (WLPins): one
-#        line per change, and again every ten minutes. This is the transport
-#        for the map pins, MapPins decides what goes into it. 0 keeps the
-#        pins but stops the whispers. Default: 1
-#
 #    CompanionQuestSync.MapPins
 #        Push the areas of the companion's open quests onto the owner's world map,
 #        for quests the owner does not hold themselves (the cases where the client
@@ -189,4 +200,4 @@ CompanionQuestSync.AnnounceAtStartup = 1
 CompanionQuestSync.AnnounceOnLogin = 1
 CompanionQuestSync.HeartbeatSeconds = 300
 CompanionQuestSync.Debug = 0
-
+
