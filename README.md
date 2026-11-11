@@ -10,14 +10,31 @@ Every 30 seconds (and instantly on quest accept) the module reconciles one playe
 
 | Behaviour | Detail |
 |---|---|
-| **Mirror quests** | Adds the owner's quests to the companion, through the normal `AddQuest` path — eligibility, class/race locks and prerequisites still apply |
+| **Mirror quests** | Adds the owner's quests to the companion through the normal `AddQuest` path — eligibility and class/race locks still apply. Prerequisites the owner has already finished are credited first, so a chained quest is not refused for a link the companion never walked |
 | **Instant on accept** | `OnPlayerQuestAccept` mirrors the quest in the same call, no 20 s wait |
 | **Mirror completion** | When the owner's copy is `COMPLETE`, the companion's is too — but never for a quest that delivers items the companion does not actually hold (that copy could never be handed in) |
 | **Level alignment** | `LevelMode` 0/1/2: off, raise-only, or exactly the owner's level. Quests gate on `quest_template.MinLevel`, so this is what unblocks a low companion |
 | **Self-heal** | A copy left `COMPLETE` that can never be rewarded is reopened, so its own AI collects what it owes and hands in |
+| **Hands in the turn-in** | When the companion owes a hand-in it is stepped beside the ender and asked to reward *in the same pass* — its follow AI walks it back to its owner within seconds, so a check on the next pass missed the window |
+| **Knows what is grey** | A quest 5–8 levels below the companion is dropped by its own quest-log cleaner, so the module declines it once ("I have levelled past 'X' – finish that one without me") instead of handing it back every pass |
 | **Bag management** | Sells vendor trash (via playerbots), wears upgrades, fills empty bag slots with a 16-slot bag, and only then bins disposable items — below `ItemKeepQuality`, never quest items, starters, equippable gear or anything a live quest needs |
-| **Explains itself** | Whispers the owner what it cannot take and why, what it still owes (`Large Candle 0/8`), where the turn-in NPC is (map coordinates), and keeps asking for help every five minutes while a quest is unfinished. Rate-limited, queued, never spammy |
+| **Explains itself** | Whispers the owner what it cannot take and why, what it still owes (`Large Candle 0/8`), where the turn-in NPC is (map coordinates), and keeps asking for help every five minutes while a quest is unfinished. Rate-limited and queued, and re-checked before they are spoken so it never complains about a level it has already reached |
 | **Observability** | Startup banner, login greeting, `.companionsync` commands, a 5-minute heartbeat in the log, and a one-line session summary on logout |
+
+## Prerequisites
+
+`Player::SatisfyQuestPreviousQuest` requires every predecessor to be **rewarded**,
+which a copied active log can never satisfy for a companion adopted after the chain
+was walked — the normal case: quest first, companion second. Before adding a quest
+the module walks the same `prevQuests` chain the core walks and calls
+`Player::SetRewardedQuest` for the ancestors **the owner has already rewarded**.
+
+That marks the rewarded set and its save flag only: no XP, no gold, no item, no
+reward spell, no quest-log slot. Nothing is credited that the owner has not rewarded,
+so a shared log cannot put the companion ahead of its owner. One consequence is
+worth knowing: a level-1 companion adopted by a level-60 owner inherits that chain
+history silently. Parity is the point, but `character_queststatus_rewarded` for a
+companion is not a record of what it played.
 
 ## Requirements
 
@@ -66,6 +83,7 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | `ItemKeepQuality` | 2 | Never bin this quality or better (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | Fill empty bag slots with this bag item |
 | `MapPins` | 1 | Push companion quest areas to the owner's map |
+| `PinSync` | 1 | Whisper the pin set to the owner's addon (`MapPins` decides what is in it) |
 | `ForceAccept` | 0 | Insert quests bypassing eligibility (for broken chains only) |
 | `DropExtraBotQuests` | 0 | Remove companion quests the owner does not have |
 | `Debug` | 0 | 0 silent, 1 changes, 2 + heartbeat |
@@ -90,6 +108,23 @@ copy the companion owns but you have finished, green for a quest you share, blue
 for a ready turn-in.
 
 Client-side only — no server change, no core edit. See `addon/WLPins/README.md`.
+
+## Testing
+
+The behaviour here is verified on a live realm by a simulation harness that lives
+with the realm sources rather than in this repo (`tests/companion-sim/` in the
+`wow-legends` project). It resets a character to level 1, quests it, adds a
+companion mid-chain, and then measures level pinning, quest copy, completion sync,
+item debt, class locks, hand-ins and grey-quest declines against the module's own
+log:
+
+```
+python tests/companion-sim/run.py --fresh-companion --all
+```
+
+`--fresh-companion` performs the order this module needs after `.companion forget`
+(forget → restart the worldserver → create) and rotates the companion class, because
+a forgotten companion keeps its rewarded quest history.
 
 ## Licence
 

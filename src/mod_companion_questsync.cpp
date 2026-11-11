@@ -164,13 +164,35 @@ namespace
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
-    std::map<uint32, std::vector<std::string>> g_pendingNotices;  // bot guid -> lines
+
+    /// A whisper waiting for the rate-limit window. `questId` is non-zero for
+    /// refusals, so the queue can re-check the world before it speaks: a refusal
+    /// held back for 45 s is often obsolete by the time it is sent (the level
+    /// caught up, the quest arrived), and telling the player about a solved
+    /// problem reads worse than saying nothing.
+    struct QueuedWhisper
+    {
+        std::string text;
+        uint32 questId = 0;      // 0 = no revalidation possible, only age applies
+        uint32 queuedAt = 0;
+    };
+
+    struct PendingNotice
+    {
+        uint32 questId = 0;
+        std::string text;
+    };
+
+    std::map<uint32, std::vector<PendingNotice>> g_pendingNotices;  // bot guid -> lines
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
-    std::map<uint32, std::deque<std::string>> g_whisperQueue;  // owner guid -> waiting texts
+    std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
     std::map<std::pair<uint32, uint32>, std::string> g_openLatch;  // last owed-strings logged
     std::map<std::pair<uint32, uint32>, uint32> g_turnInHintAt;     // (bot, quest) -> unix time
     std::map<std::pair<uint32, uint32>, uint32> g_rewardProdAt;     // (bot, quest) -> unix time
+    std::map<std::pair<uint32, uint32>, uint32> g_addedAt;          // (bot, quest) -> when we added it
+    std::map<std::pair<uint32, uint32>, uint32> g_addedCount;       // (bot, quest) -> log size at add
+    std::map<std::pair<uint32, uint32>, uint32> g_vanishLogged;      // (bot, quest) -> unix time
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
 
     bool AnyPlayerInWorld()
@@ -241,6 +263,7 @@ namespace
         uint32 dropped = 0;
         uint32 classRaceLocked = 0;
         uint32 reopened = 0;      // COMPLETE copies that could never be handed in
+        uint32 prereqs = 0;       // ancestors credited so a chained quest is takeable
         uint32 ownerQuestCount = 0;
         uint32 botQuestCount = 0;
         uint8 levelFrom = 0;
@@ -390,14 +413,30 @@ namespace
 
         if (!bot->SatisfyQuestPreviousQuest(quest, false))
         {
-            // Name it: "prerequisite quest missing" tells the player nothing about
-            // which quest to finish on the companion before this one can be taken.
-            Quest const* prev = quest->GetPrevQuestId() > 0
-                                     ? sObjectMgr->GetQuestTemplate(uint32(quest->GetPrevQuestId()))
-                                     : nullptr;
+            // Name the *first* predecessor the companion is actually missing.
+            // GetPrevQuestId() is only one entry of prevQuests (a chain can list
+            // several), so naming it unconditionally sent players after the wrong
+            // quest whenever a quest had more than one ancestor.
+            Quest const* missing = nullptr;
 
-            return { prev ? "I have not finished '" + prev->GetTitle() + "' yet"
-                          : std::string("a prerequisite quest is missing"),
+            for (int32 const prevId : quest->prevQuests)
+            {
+                if (prevId <= 0)
+                    continue;
+
+                Quest const* prev = sObjectMgr->GetQuestTemplate(uint32(prevId));
+                if (prev && !bot->IsQuestRewarded(uint32(prevId)))
+                {
+                    missing = prev;
+                    break;
+                }
+            }
+
+            if (!missing && quest->GetPrevQuestId() > 0)
+                missing = sObjectMgr->GetQuestTemplate(uint32(quest->GetPrevQuestId()));
+
+            return { missing ? "I have not finished '" + missing->GetTitle() + "' yet"
+                             : std::string("a prerequisite quest is missing"),
                      false };
         }
 
@@ -419,7 +458,8 @@ namespace
     /// wall of them when several quests fail at once, and always something the
     /// player can act on. Unthrottled per-quest whispering is what makes a rough
     /// levelling session feel like an error console.
-    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45)
+    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
+                    uint32 validWhileMissing = 0)
     {
         if (!owner || !owner->GetSession())
             return false;
@@ -434,8 +474,13 @@ namespace
             // request used to be dropped here when the window was busy, so a player
             // who was mid-fight simply never heard it again.
             auto& queue = g_whisperQueue[ownerGuid];
-            if (queue.size() < 3 && std::find(queue.begin(), queue.end(), text) == queue.end())
-                queue.push_back(text);
+            bool dup = false;
+            for (auto const& entry : queue)
+                if (entry.text == text)
+                    dup = true;
+
+            if (queue.size() < 3 && !dup)
+                queue.push_back({ text, validWhileMissing, now });
 
             if (g_cfg.debug >= 2)
                 LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", text);
@@ -471,7 +516,8 @@ namespace
         // Queue rather than whisper: one level-up can refuse half a dozen quests
         // in a single pass, and six whispers in a row is noise. FlushNotices turns
         // the batch into one sentence that ends with a next step.
-        g_pendingNotices[botGuid].push_back("'" + quest->GetTitle() + "': " + refusal.reason);
+        g_pendingNotices[botGuid].push_back({ quest->GetQuestId(),
+                                              "'" + quest->GetTitle() + "': " + refusal.reason });
 
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} notified owner about '{}' ({})", bot->GetName(), quest->GetTitle(), quest->GetQuestId());
@@ -1047,8 +1093,34 @@ namespace
         if (last && now - last < 45)
             return;
 
+        // Drop what no longer applies before speaking. The queue exists to survive
+        // the rate limit, but the world moves on inside that window: a "I need
+        // level 5 first" held for 45 s usually lands *after* the companion has the
+        // quest, which reads like a broken module rather than a busy one.
+        while (!itr->second.empty())
+        {
+            QueuedWhisper const& front = itr->second.front();
+
+            bool stale = front.queuedAt && now > front.queuedAt && now - front.queuedAt > 120;
+            if (!stale && front.questId)
+                stale = bot->GetQuestStatus(front.questId) != QUEST_STATUS_NONE ||
+                        bot->IsQuestRewarded(front.questId);
+
+            if (!stale)
+                break;
+
+            if (g_cfg.debug >= 2)
+                LOG_INFO("server.loading", "[CompanionQuestSync] dropped a stale whisper: {}",
+                         front.text);
+
+            itr->second.pop_front();
+        }
+
+        if (itr->second.empty())
+            return;
+
         last = now;
-        bot->Whisper(itr->second.front(), LANG_UNIVERSAL, owner);
+        bot->Whisper(itr->second.front().text, LANG_UNIVERSAL, owner);
         itr->second.pop_front();
     }
 
@@ -1059,8 +1131,28 @@ namespace
         if (itr == g_pendingNotices.end() || itr->second.empty())
             return;
 
-        std::vector<std::string> const lines = itr->second;
+        std::vector<PendingNotice> const queued = itr->second;
         g_pendingNotices.erase(itr);
+
+        // Re-check each refusal at flush time: a batch built during a level-up is
+        // often stale by the time the rate limit allows it out.
+        std::vector<std::string> lines;
+        for (auto const& notice : queued)
+        {
+            if (notice.questId && (bot->GetQuestStatus(notice.questId) != QUEST_STATUS_NONE ||
+                                   bot->IsQuestRewarded(notice.questId)))
+            {
+                if (g_cfg.debug >= 2)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] dropped a stale notice: {} ({})",
+                             notice.text, notice.questId);
+                continue;
+            }
+
+            lines.push_back(notice.text);
+        }
+
+        if (lines.empty())
+            return;
 
         std::string text = "A few quests I cannot take yet: ";
         for (size_t i = 0; i < lines.size() && i < 3; ++i)
@@ -1120,7 +1212,7 @@ namespace
                 poiAt = now;
                 SayToOwner(bot, owner, "I still have '" + quest->GetTitle() +
                                       "' to finish for us - the area is on the map at " + where +
-                                      ". Want to head that way?", 45);
+                                      ". Want to head that way?", 45, questId);
                 return;
             }
 
@@ -1133,7 +1225,7 @@ namespace
             SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
                                   "' before we move on? I still owe " + owed +
                                   " - I will gather them as we go" +
-                                  (where.empty() ? "." : " (" + where + ")."), 45);
+                                  (where.empty() ? "." : " (" + where + ")."), 45, questId);
             return;                                  // one request per pass
         }
     }
@@ -1350,9 +1442,30 @@ namespace
             bot->StopMoving();
             bot->NearTeleportTo(x, y, z, bot->GetOrientation());
 
+            // Speak to the giver in THIS pass. Checking the distance on the next
+            // one loses a race the bot cannot win: its follow strategy walks it
+            // back to its owner within a few seconds, so the next pass measures
+            // 40+ yards again and steps it once more, forever. That loop is what
+            // "the companion never hands anything in" looked like in the log.
+            //
+            // The reward command is dispatched even when the re-read distance still
+            // looks far: `NearTeleportTo` does not necessarily have committed the
+            // new position this tick (measured: 16 yd right after a 2.5 yd step),
+            // and the bot's own reward action re-checks the range when it runs. Log
+            // both numbers so a genuinely inert teleport stays visible.
+            float const afterStep = bot->GetDistance(spot.x, spot.y, spot.z);
+
+            g_rewardProdAt[{ botGuid, questId }] = nowTs;
+
+#ifdef MOD_PLAYERBOTS
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
+#endif
+
             if (g_cfg.debug >= 1)
-                LOG_INFO("server.loading", "[CompanionQuestSync] stepped {} to {} for '{}' ({:.0f} yd)",
-                         bot->GetName(), spot.name, quest->GetTitle(), dist);
+                LOG_INFO("server.loading", "[CompanionQuestSync] asked {} to hand in '{}' ({}) - {:.0f} yd at dispatch",
+                         bot->GetName(), quest->GetTitle(), questId, afterStep);
+
             return;
         }
     }
@@ -1408,6 +1521,102 @@ namespace
         SayToOwner(bot, owner, "I cleared some junk out of my bags to make room - nothing worth keeping.", 120);
     }
 
+    /// Credit the companion for prerequisites its owner already finished.
+    ///
+    /// `CanTakeQuest` -> `SatisfyQuestPreviousQuest` requires every listed
+    /// predecessor to be *rewarded*. Copying the owner's active log can never
+    /// satisfy that for a companion adopted after the chain was walked, which is
+    /// the normal case: quest first, companion second. This walks the same
+    /// `prevQuests` chain the core walks and marks the ancestors the owner has
+    /// already rewarded - nothing more. `SetRewardedQuest` touches only the
+    /// rewarded set and its save flag: no XP, no item, no spell, no log slot, so
+    /// a companion cannot be handed loot or a level it did not earn.
+    ///
+    /// Negative entries in `prevQuests` are "one of this exclusive group"; they
+    /// are left alone deliberately - credit for one sibling would be a guess.
+    uint32 CreditPrerequisites(Player* owner, Player* bot, Quest const* quest, SyncReport* report)
+    {
+        std::vector<uint32> pending;
+        for (int32 const prevId : quest->prevQuests)
+            if (prevId > 0)
+                pending.push_back(uint32(prevId));
+
+        std::set<uint32> visited;
+        uint32 credited = 0;
+
+        while (!pending.empty() && visited.size() < 40)
+        {
+            uint32 const prevId = pending.back();
+            pending.pop_back();
+
+            if (!prevId || !visited.insert(prevId).second)
+                continue;
+
+            Quest const* prev = sObjectMgr->GetQuestTemplate(prevId);
+            if (!prev)
+                continue;
+
+            for (int32 const grandId : prev->prevQuests)
+                if (grandId > 0)
+                    pending.push_back(uint32(grandId));
+
+            if (!owner->IsQuestRewarded(prevId) || bot->IsQuestRewarded(prevId))
+                continue;
+
+            bot->SetRewardedQuest(prevId);
+            ++credited;
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] {} credited '{}' ({}) - {} finished it; '{}' is takeable now",
+                         bot->GetName(), prev->GetTitle(), prevId, owner->GetName(), quest->GetTitle());
+        }
+
+        if (credited && report)
+            report->prereqs += credited;
+
+        return credited;
+    }
+
+    /// Is this quest grey for the companion? Same rule the playerbots quest-log
+    /// cleaner uses (DropObsoleteQuests drops anything more than 5-8 levels below
+    /// the bot, by level band).
+    bool IsGreyFor(Player* bot, Quest const* quest)
+    {
+        int32 const botLevel = int32(bot->GetLevel());
+        int32 questLevel = quest->GetQuestLevel();
+        if (questLevel == -1)
+            questLevel = botLevel;
+
+        int32 trivial = 5;
+        if (botLevel >= 40)
+            trivial = 8;
+        else if (botLevel >= 30)
+            trivial = 7;
+        else if (botLevel >= 20)
+            trivial = 6;
+
+        return (botLevel - questLevel) > trivial;
+    }
+
+    /// Tell the owner, once, that a quest is out of the companion's league.
+    ///
+    /// This is not a refusal to fix later: the companion's own cleaner would drop
+    /// the copy, the module would hand it back, and the player would watch the
+    /// quest be re-accepted every pass. Saying it once is better than a loop.
+    void NotifyOutgrown(Player* owner, Player* bot, Quest const* quest)
+    {
+        if (g_cfg.notifySkipped < 2)
+            return;
+
+        std::set<uint32>& seen = g_notified[bot->GetGUID().GetCounter()];
+        if (!seen.insert(quest->GetQuestId()).second)
+            return;
+
+        SayToOwner(bot, owner, "I have levelled past '" + quest->GetTitle() +
+                               "' - finish that one without me.", 45, quest->GetQuestId());
+    }
+
     /// Mirror one quest onto one companion. Shared by the periodic sweep and the
     /// accept hook, so the "slow" and "instant" paths can never drift apart.
     /// `report` is optional: the hook path only needs the notifications/log.
@@ -1417,7 +1626,10 @@ namespace
 
         // Nothing to do for a quest the companion already finished.
         if (bot->IsQuestRewarded(questId))
+        {
+            g_addedAt.erase({ bot->GetGUID().GetCounter(), questId });
             return;
+        }
 
         if (g_cfg.skipTimedQuests && quest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_TIMED))
         {
@@ -1431,8 +1643,67 @@ namespace
 
         if (botStatus == QUEST_STATUS_NONE)
         {
+            // The copy the module added before has gone again. Something removed it
+            // (the bot's own AI, a partial hand-in, a factory re-init), and without
+            // this line the only visible symptom is "+ 'X'" repeating every pass.
+            std::pair<uint32, uint32> const key{ bot->GetGUID().GetCounter(), questId };
+            auto const added = g_addedAt.find(key);
+            if (added != g_addedAt.end())
+            {
+                uint32 const now = static_cast<uint32>(time(nullptr));
+                uint32& logged = g_vanishLogged[key];
+                if (!logged || now - logged > 300)
+                {
+                    logged = now;
+
+                    uint32 const countNow = CountQuestLog(bot);
+
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] '{}' ({}) vanished from {}'s log after {}s "
+                             "(log {} -> {} quests, rewarded {}, level {}, {} hp{})",
+                             quest->GetTitle(), questId, bot->GetName(),
+                             added->second && now > added->second ? now - added->second : 0,
+                             g_addedCount[key], countNow,
+                             bot->IsQuestRewarded(questId) ? "yes" : "no",
+                             uint32(bot->GetLevel()), bot->GetHealth(),
+                             bot->IsInCombat() ? ", in combat" : "");
+                }
+            }
+
+            // Re-adding every pass is churn the player can see (a quest re-accepted
+            // over and over). Pace it: one attempt a minute per quest until the
+            // vanish line above says why the copy keeps going.
+            if (added != g_addedAt.end())
+            {
+                uint32 const now = static_cast<uint32>(time(nullptr));
+                if (added->second && now > added->second && now - added->second < 60)
+                {
+                    if (report)
+                        AddSkipped(*report, quest, "recently added - waiting for it to stick");
+
+                    return;
+                }
+            }
+
             if (!g_cfg.forceAccept)
             {
+                // A grey quest is dropped by the companion's own quest-log cleaner
+                // (playerbots' DropObsoleteQuests) within a pass or two, so adding it
+                // again just makes the player watch it be re-accepted. Don't fight
+                // the cleaner - say it once and move on.
+                if (IsGreyFor(bot, quest))
+                {
+                    if (report)
+                        AddSkipped(*report, quest, "grey for the companion - outgrown");
+
+                    NotifyOutgrown(owner, bot, quest);
+                    return;
+                }
+
+                // Before asking the core: give the companion the chain history the
+                // owner already has, or every chained quest is refused forever.
+                CreditPrerequisites(owner, bot, quest, report);
+
                 if (!bot->CanTakeQuest(quest, false))
                 {
                     // Name the gate that refused, so the player is not left
@@ -1522,6 +1793,11 @@ namespace
 
             if (report)
                 ++report->added;
+
+            // Remember when this landed: the next time the copy is missing, the
+            // vanish line can say how long it survived and how full the log was.
+            g_addedAt[{ bot->GetGUID().GetCounter(), questId }] = static_cast<uint32>(time(nullptr));
+            g_addedCount[{ bot->GetGUID().GetCounter(), questId }] = CountQuestLog(bot);
 
             if (g_cfg.debug >= 1)
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} + '{}' ({})", bot->GetName(), quest->GetTitle(), questId);
@@ -2179,6 +2455,9 @@ namespace
         if (report.classRaceLocked)
             line += ", " + std::to_string(report.classRaceLocked) + " class/race locked";
 
+        if (report.prereqs)
+            line += ", " + std::to_string(report.prereqs) + " prereq credited";
+
         if (report.levelFrom)
             line += ", levelled " + std::to_string(report.levelFrom) + " -> " + std::to_string(report.levelTo);
 
@@ -2295,10 +2574,22 @@ public:
         {
             if (!g_hbPasses && !g_hbAdded && !g_hbCompleted && !g_hbDropped)
             {
-                // Nothing to reconcile because nobody was in the world: say so
-                // instead of a row of zeroes that reads like the module stalled.
-                LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat: no players online in the last {}s - module idle.",
-                         g_cfg.heartbeatSeconds);
+                // Two different silences, and saying the wrong one is what made an
+                // idle-but-healthy module look dead: a player IS in the world here,
+                // there is simply no companion to reconcile (none bound, or dismissed).
+                if (AnyPlayerInWorld())
+                {
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] heartbeat: {}s window - a player is in the world and no companion is online; nothing to sync.",
+                             g_cfg.heartbeatSeconds);
+                }
+                else
+                {
+                    // Nothing to reconcile because nobody was in the world: say so
+                    // instead of a row of zeroes that reads like the module stalled.
+                    LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat: no players online in the last {}s - module idle.",
+                             g_cfg.heartbeatSeconds);
+                }
             }
             else
             {

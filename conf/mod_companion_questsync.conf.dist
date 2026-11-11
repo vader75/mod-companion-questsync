@@ -139,6 +139,7 @@ CompanionQuestSync.KeepFreeSlots = 2
 CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TidyVendorJunk = 1
 CompanionQuestSync.MapPins = 1
+CompanionQuestSync.PinSync = 1
 CompanionQuestSync.TidySurplus = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
@@ -163,6 +164,12 @@ CompanionQuestSync.ItemKeepQuality = 2
 #        does not craft, and an empty slot is worth more than a few copper of water.
 #        Default: 1
 #
+#    CompanionQuestSync.PinSync
+#        Whisper the companion's pin set to the owner's addon (WLPins): one
+#        line per change, and again every ten minutes. This is the transport
+#        for the map pins, MapPins decides what goes into it. 0 keeps the
+#        pins but stops the whispers. Default: 1
+#
 #    CompanionQuestSync.MapPins
 #        Push the areas of the companion's open quests onto the owner's world map,
 #        for quests the owner does not hold themselves (the cases where the client
@@ -182,4 +189,4 @@ CompanionQuestSync.AnnounceAtStartup = 1
 CompanionQuestSync.AnnounceOnLogin = 1
 CompanionQuestSync.HeartbeatSeconds = 300
 CompanionQuestSync.Debug = 0
-
+
