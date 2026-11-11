@@ -321,11 +321,25 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         local part, total, piece = string.match(text, "^Pin sync (%d+)/(%d+):%s*(.*)$")
         if part then
             WLPins.syncParts = WLPins.syncParts or {}
-            WLPins.syncParts[tonumber(part)] = piece
+
+            -- Abandon a torn set. If a part never arrives (rate limit, relog) the held
+            -- parts would sit there and pair with a later sync, leaving the map showing
+            -- half of one set and half of another. Ten seconds is longer than a
+            -- three-part burst ever takes.
+            local now = time()
+            for i = #WLPins.syncParts, 1, -1 do
+                if now - (WLPins.syncParts[i].at or 0) > 10 then
+                    table.remove(WLPins.syncParts, i)
+                end
+            end
+
+            WLPins.syncParts[tonumber(part)] = { text = piece, at = now }
 
             if #WLPins.syncParts == tonumber(total) then
                 local joined = {}
-                for i = 1, tonumber(total) do joined[i] = WLPins.syncParts[i] or "" end
+                for i = 1, tonumber(total) do
+                    joined[i] = WLPins.syncParts[i] and WLPins.syncParts[i].text or ""
+                end
                 WLPins.syncParts = nil
                 SyncPins(table.concat(joined, "|"))
             end

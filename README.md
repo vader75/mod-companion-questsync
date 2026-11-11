@@ -11,7 +11,7 @@ Every 30 seconds (and instantly on quest accept) the module reconciles one playe
 | Behaviour | Detail |
 |---|---|
 | **Mirror quests** | Adds the owner's quests to the companion through the normal `AddQuest` path — eligibility and class/race locks still apply. Prerequisites the owner has already finished are credited first, so a chained quest is not refused for a link the companion never walked |
-| **Instant on accept** | `OnPlayerQuestAccept` mirrors the quest in the same call, no 20 s wait |
+| **Instant on accept** | `OnPlayerQuestAccept` mirrors the quest in the same call, no 30 s wait |
 | **Mirror completion** | When the owner's copy is `COMPLETE`, the companion's is too — but never for a quest that delivers items the companion does not actually hold (that copy could never be handed in) |
 | **Level alignment** | `LevelMode` 0/1/2: off, raise-only, or exactly the owner's level. Quests gate on `quest_template.MinLevel`, so this is what unblocks a low companion |
 | **Self-heal** | A copy left `COMPLETE` that can never be rewarded is reopened, so its own AI collects what it owes and hands in |
@@ -97,15 +97,28 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 - Map pins are best effort: the 3.3.5 client decides whether to draw POIs for quests outside its own log, so the whisper always carries map coordinates as a fallback.
 - **One companion per player.** `FindCompanionGuid` returns a single `bot_guid` for an owner, and the sweep, heartbeat, whisper funnel and pin sync are all keyed on the owner guid. A second bound companion is not tracked: it will not be levelled, will not have quests mirrored, and will not appear on the map. Supporting more than one companion needs the binding lookup to return a list, a per-bot key through those paths, and a pin format that names the companion — the addon already understands a `@Companion` suffix on pin entries (`43,65,h=Kobold Candles@Beta`) so the wire format can grow without breaking existing clients. Until that work is done, document one companion and keep the binding table to one row per player.
 
-## Companion addon: coloured map pins
+## Companion addon: map pins
 
-`addon/WLPins/` is an optional 3.3.5a client addon that draws the companion's
-turn-ins on your world map. The client decides how quest areas look and will not
-draw one for a quest outside your own log, and the quest-POI packet carries no
-colour, so this cannot be done server-side. The addon reads the coordinates the
-module already whispers (`... map 82, 34`) and pins them in colour: gold for a
-copy the companion owns but you have finished, green for a quest you share, blue
-for a ready turn-in.
+`addon/WLPins/` is an optional 3.3.5a client addon that puts the companion's work on
+your world map. The client decides how quest areas look and will not draw one for a
+quest outside your own log, and the quest-POI packet carries no colour, so this
+cannot be done server-side.
+
+A marker is a coloured quest glyph in an outlined font, about 25 px, sitting on the
+point with the quest name beside it - no plate, no black label bar:
+
+| Glyph | Meaning |
+|---|---|
+| gold **?** | the companion can hand that quest in here |
+| green **!** | an area where it still has work to do |
+| blue **?** | an errand only the companion can run |
+
+The module sends one authoritative `Pin sync` line - split across several whispers
+when there are more entries than one can hold - on login, whenever the set changes,
+every ten minutes, and on demand with `.companionsync pins`. The addon treats it as
+the whole truth: any pin it does not mention is removed, so a marker cannot outlive
+the work it stood for. Tooltips carry the zone, the exact coordinates and
+right-click-to-remove.
 
 Client-side only — no server change, no core edit. See `addon/WLPins/README.md`.
 

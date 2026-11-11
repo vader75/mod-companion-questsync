@@ -1293,8 +1293,19 @@ namespace
         uint8 const ownerLevel = owner->GetLevel();
         uint8 const botLevel = bot->GetLevel();
 
-        bool const needsChange = (g_cfg.levelMode == 1) ? (botLevel < ownerLevel) : (botLevel != ownerLevel);
-        if (!needsChange)
+        // Raise only, in both modes. GiveLevel downwards strips spell ranks and can
+        // leave talents pointing at things the character no longer has, so a companion
+        // that out-levelled its owner keeps the level it earned and says so once at
+        // debug level instead - "exact" means "brought up to", not "demoted to".
+        if (botLevel > ownerLevel)
+        {
+            if (g_cfg.debug >= 1 && g_cfg.levelMode == 2)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} is level {} and stays there (owner is {}) - not demoting",
+                         bot->GetName(), uint32(botLevel), uint32(ownerLevel));
+            return;
+        }
+
+        if (botLevel == ownerLevel)
             return;
 
         report.levelFrom = botLevel;
@@ -2179,6 +2190,7 @@ namespace
         // the step would never be retried - the quest would sit COMPLETE until something
         // else moved. The routine carries its own throttles, so repeating it is cheap.
         DeliverHandIns(owner, bot);
+        RepairStrandedDelivery(owner, bot, report);   // retry-worthy: belongs above the memo
 
         // Extras are cleared before the memo, not after. A pass that ends "clean" with an
         // unchanged digest short-circuits every later pass, so a drop that waits out a
@@ -2296,7 +2308,6 @@ namespace
             return report;
         }
 
-        RepairStrandedDelivery(owner, bot, report);
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
         SendQuestPins(owner, bot);
@@ -3101,6 +3112,10 @@ public:
         Player* bot = ResolveCompanion(player, report);
         if (!bot)
             return;
+
+        // Bag contents are the thing this hook is about to change; a value cached by the
+        // last sweep would describe the state before the accept.
+        g_missingCache.clear();
 
         uint32 const questId = quest->GetQuestId();
         QuestStatus const before = bot->GetQuestStatus(questId);
