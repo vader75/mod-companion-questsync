@@ -570,7 +570,11 @@ local function CreateLauncher()
     local anchor = Minimap or UIParent
     launcher = CreateFrame("Button", "WLCompanionGroupLauncher", UIParent)
 launcher:SetSize(24, 24)
-launcher:SetPoint("TOPLEFT", anchor, "TOPLEFT", 6, -60)
+if WLCompanionGroupDB then
+    WLCompanionGroupDB.launcher = WLCompanionGroupDB.launcher or { x = 6, y = -60 }
+end
+local savedPos = (WLCompanionGroupDB and WLCompanionGroupDB.launcher) or { x = 6, y = -60 }
+launcher:SetPoint("TOPLEFT", anchor, "TOPLEFT", savedPos.x or 6, savedPos.y or -60)
 launcher:SetFrameStrata("HIGH")
 launcher:SetBackdrop({
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -612,11 +616,48 @@ end
 
 G.RefreshLauncherBadge = RefreshLauncherBadge
 
-launcher:SetScript("OnClick", function() G.Toggle() end)
+launcher:SetMovable(true)
+launcher:RegisterForDrag("LeftButton")
+launcher:SetClampedToScreen(true)
+
+launcher:SetScript("OnDragStart", function(self)
+    self.dragged = true
+    self:SetUserPlaced(false)
+    self:StartMoving()
+    GameTooltip:Hide()
+end)
+
+launcher:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+
+    -- Save the position relative to the minimap, so the button travels with the map if it is
+    -- ever moved or rescaled, and stays where the player put it across logins.
+    local anchor = Minimap or UIParent
+    local left, top = self:GetLeft(), self:GetTop()
+    local ax, ay = anchor:GetLeft(), anchor:GetTop()
+    local dx = (left and ax) and (left - ax) or 0
+    local dy = (top and ay) and (top - ay) or 0
+
+    self:ClearAllPoints()
+    self:SetPoint("TOPLEFT", anchor, "TOPLEFT", dx, dy)
+
+    if WLCompanionGroupDB then
+        WLCompanionGroupDB.launcher = { x = dx, y = dy }
+    end
+end)
+
+launcher:SetScript("OnClick", function(self)
+    if self.dragged then
+        self.dragged = nil
+        return
+    end
+    G.Toggle()
+end)
 launcher:SetScript("OnEnter", function(self)
     self:SetBackdropBorderColor(unpack(BORDER_HOVER))
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:AddLine("Companions", 1, 0.79, 0.30)
+    GameTooltip:AddLine("Drag to move - click to open", 0.6, 0.6, 0.6)
     local count = G.companions and #G.companions or 0
     if count > 0 then
         GameTooltip:AddLine(("%d bound - click to manage"):format(count), 1, 1, 1)
@@ -689,6 +730,17 @@ end)
 
 
 -- /wlcgstate - print what the launcher is, where it is, and what it is anchored to
+-- /wlcgreset - put the button back in the minimap's corner
+SLASH_WLCGRESET1 = "/wlcgreset"
+SlashCmdList["WLCGRESET"] = function()
+    if WLCompanionGroupDB then WLCompanionGroupDB.launcher = { x = 6, y = -60 } end
+    if launcher then
+        launcher:ClearAllPoints()
+        launcher:SetPoint("TOPLEFT", Minimap or UIParent, "TOPLEFT", 6, -60)
+    end
+    DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r minimap button back in the corner")
+end
+
 SLASH_WLCGSTATE1 = "/wlcgstate"
 SlashCmdList["WLCGSTATE"] = function()
     local s = WLCompanionGroupDB and WLCompanionGroupDB.state

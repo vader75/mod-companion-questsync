@@ -49,7 +49,11 @@ UIDropDownMenu_SetWidth = function() end
 UIDropDownMenu_Initialize = function() end
 UIDropDownMenu_AddButton = function() end
 UIDropDownMenu_SetText = function() end
-CreateFrame = function() return make_stub() end
+CreateFrame = function(kind, name, parent, template)
+    local frame = make_stub()
+    if name then _G[name] = frame end   -- the client publishes named frames as globals
+    return frame
+end
 GetLocale = function() return "enUS" end
 UnitName = function() return "Pilot" end
 UnitClass = function() return "Paladin", "PALADIN" end
