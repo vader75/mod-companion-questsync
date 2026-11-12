@@ -554,36 +554,77 @@ end
 
 G.OnCompanionsChanged = function()
     if frame and frame:IsShown() then G.Refresh() end
+    if G.RefreshLauncherBadge then G.RefreshLauncherBadge() end
 end
 
 -- ---------------------------------------------------------------------------
 -- launcher + startup
 -- ---------------------------------------------------------------------------
 
+-- A square plate, not a disc. The round tracking border the first version borrowed is the
+-- minimap's own language for "another tracker", and against the clock ring it read as a stray
+-- lens. A flat dark plate with a hairline border and the icon inset looks like a button that
+-- belongs to an interface, and it still sits in the minimap corner where people look for it.
 local launcher = CreateFrame("Button", "WLCompanionGroupLauncher", Minimap)
-launcher:SetSize(28, 28)
-launcher:SetPoint("TOPLEFT", Minimap, "TOPLEFT", 4, -62)
+launcher:SetSize(24, 24)
+launcher:SetPoint("TOPLEFT", Minimap, "TOPLEFT", 6, -60)
 launcher:SetFrameStrata("MEDIUM")
+launcher:SetBackdrop({
+    edgeFile = "Interface\Tooltips\UI-Tooltip-Border",
+    edgeSize = 9,
+    insets = { left = 2, right = 2, top = 2, bottom = 2 },
+})
+local BORDER_IDLE = { 0.32, 0.30, 0.27, 1 }
+local BORDER_HOVER = { 1, 0.79, 0.30, 1 }
+launcher:SetBackdropBorderColor(unpack(BORDER_IDLE))
+launcher:SetBackdropColor(0, 0, 0, 0)
 
-launcher.icon = launcher:CreateTexture(nil, "BACKGROUND")
-launcher.icon:SetAllPoints()
-launcher.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
-launcher.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+launcher.plate = launcher:CreateTexture(nil, "BACKGROUND")
+launcher.plate:SetPoint("TOPLEFT", 2, -2)
+launcher.plate:SetPoint("BOTTOMRIGHT", -2, 2)
+launcher.plate:SetTexture(0.03, 0.03, 0.04, 0.9)
 
-launcher.border = launcher:CreateTexture(nil, "OVERLAY")
-launcher.border:SetPoint("TOPLEFT", -1, 1)
-launcher.border:SetPoint("BOTTOMRIGHT", 1, -1)
-launcher.border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+launcher.icon = launcher:CreateTexture(nil, "ARTWORK")
+launcher.icon:SetPoint("TOPLEFT", 3, -3)
+launcher.icon:SetPoint("BOTTOMRIGHT", -3, 3)
+launcher.icon:SetTexture("Interface\Icons\Ability_Hunter_BeastCall")
+launcher.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+-- how many companions are bound, so the corner says something before the window does
+launcher.badge = launcher:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+launcher.badge:SetPoint("BOTTOMRIGHT", 3, -3)
+launcher.badge:SetJustifyH("RIGHT")
+launcher.badge:Hide()
+
+local function RefreshLauncherBadge()
+    local count = G.companions and #G.companions or 0
+    if count > 0 then
+        launcher.badge:SetText("|cffffd200" .. count .. "|r")
+        launcher.badge:Show()
+    else
+        launcher.badge:Hide()
+    end
+end
+
+G.RefreshLauncherBadge = RefreshLauncherBadge
 
 launcher:SetScript("OnClick", function() G.Toggle() end)
 launcher:SetScript("OnEnter", function(self)
+    self:SetBackdropBorderColor(unpack(BORDER_HOVER))
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:AddLine("Companions", 1, 0.79, 0.30)
-    GameTooltip:AddLine("Click to open", 1, 1, 1)
+    local count = G.companions and #G.companions or 0
+    if count > 0 then
+        GameTooltip:AddLine(("%d bound - click to manage"):format(count), 1, 1, 1)
+    else
+        GameTooltip:AddLine("None yet - click to add one", 1, 1, 1)
+    end
     GameTooltip:Show()
 end)
-launcher:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
+launcher:SetScript("OnLeave", function(self)
+    self:SetBackdropBorderColor(unpack(BORDER_IDLE))
+    GameTooltip:Hide()
+end)
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_ENTERING_WORLD")
