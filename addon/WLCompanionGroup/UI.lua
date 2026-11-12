@@ -61,6 +61,12 @@ end
 -- ---------------------------------------------------------------------------
 
 local function StatusText(companion)
+    -- a release is a server-side sequence (dismiss, wipe, rename, unbind, ledger); until the
+    -- roster drops the name, say so rather than looking like a button that did nothing
+    if G.releasing and G.releasing[companion.name] then
+        return COL_WARN .. "releasing - wiping and returning it to the pool..." .. COL_RESET
+    end
+
     if not G.HasFlag(companion, "o") then
         return COL_WARN .. "not in the world - Summon brings it back" .. COL_RESET
     end
@@ -131,12 +137,22 @@ local function CreateCard(index)
         G.Run(".companionsync pins")
         ToggleWorldMap()
     end, "Show this companion's quest markers on the world map.")
-    card.mapButton:SetPoint("RIGHT", -12, -12)
 
-    card.moreButton = Button(card, "...", 30, function(self)
-        G.CardMenu(self, card)
-    end, "Unbind (keep the bot) or release it back to the pool.")
-    card.moreButton:SetPoint("RIGHT", -60, -12)
+    -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
+    -- discover is a control that does not get used: the release never reached the server at all.
+    -- They are plain buttons now, release in warning colour because it cannot be undone.
+    card.untrackButton = Button(card, "Untrack", 62, function()
+        if card.companion then G.ConfirmUnbind(card.companion.name) end
+    end, "Stop following this companion's quests. The bot stays yours.")
+    card.untrackButton:SetPoint("BOTTOMRIGHT", -12, -12)
+
+    card.releaseButton = Button(card, "Release", 62, function()
+        if card.companion then G.ConfirmRelease(card.companion.name) end
+    end, "Wipe it and give the body back to the pool. This cannot be undone.")
+    card.releaseButton:SetPoint("BOTTOMRIGHT", -78, -12)
+    card.releaseButton:GetFontString():SetTextColor(1, 0.6, 0.6)
+
+    card.mapButton:SetPoint("BOTTOMRIGHT", -144, -12)
 
     return card
 end

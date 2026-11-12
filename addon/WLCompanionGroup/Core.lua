@@ -143,6 +143,19 @@ end
 
 function G.SetCompanions(rows)
     G.companions = rows or {}
+
+    -- a release is finished when the roster stops listing the name (or after two minutes, if
+    -- the server refused and said so in chat)
+    local now = time()
+    for name, asked in pairs(G.releasing) do
+        local still = false
+        for _, row in ipairs(G.companions) do
+            if row.name == name then still = true break end
+        end
+
+        if not still or now - asked > 120 then G.releasing[name] = nil end
+    end
+
     if G.OnCompanionsChanged then G.OnCompanionsChanged() end
 end
 
@@ -257,7 +270,19 @@ function G.Run(command)
     SendChatMessage(command, "SAY")
 end
 
+--- Companions whose release is in flight, with the moment it was asked for.
+---
+--- A release is a server-side sequence - dismiss, wait for the body to be offline, wipe,
+--- rename, unbind, write the ledger - and it takes a few seconds. Without this the card sat
+--- there looking like the button had done nothing, which reads as "queued" or broken.
+G.releasing = {}
+
 function G.Action(verb, name)
+    if verb == "release" and name and name ~= "" then
+        G.releasing[name] = time()
+        if G.Refresh then G.Refresh() end
+    end
+
     if name and name ~= "" then
         G.Run(".companionsync " .. verb .. " " .. name)
     else
