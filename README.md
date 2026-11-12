@@ -64,9 +64,17 @@ Re-run CMake (the module set changed) and rebuild `worldserver`. Copy `conf/mod_
 | `.companionsync status` | Levels, quest counts, and every quest the companion is behind on with the reason |
 | `.companionsync quests` | Every quest the companion carries: state, what it still owes by item and count, where it hands in, how far, and the objective area in map coordinates |
 | `.companionsync pins` | Re-send the map-pin set to the client addon |
-| `.companionsync level` | Force level alignment now |
+| `.companionsync level` | Align the level of **every** bound companion |
+| `.companionsync list` | What is bound, and what each companion is doing right now |
+| `.companionsync bind <name>` | Make an **online** bot one of your companions |
+| `.companionsync unbind <name>` | Stop tracking a companion; the bot stays yours |
 
-All of these are `SEC_PLAYER`; a player can only affect their own companion.
+All of these are `SEC_PLAYER`; a player can only affect their own companions.
+
+`bind` only accepts a bot that is **in the world**. Guids come from a pool, so a row
+written for a body that is not running is a promise the module cannot keep — the body can
+be released and re-issued to somebody else, and the row would follow the guid rather than
+the companion. Bring it out first (`.playerbots bot add <name>`), then bind it.
 
 ## Configuration
 
@@ -131,6 +139,27 @@ CompanionQuestSync.BindingTable = wowlegends_companion_multi
 
 then `.reload config`. `sql/multi-companion.sql` does all of that and carries your
 existing bindings across, so nothing is lost on the switch.
+
+### Membership, and what happens when a companion goes away
+
+Nothing else in the server writes the binding table — not `mod-wowlegends`, whose
+`.companion create` and `.companion forget` only touch its own `wowlegends_companion`. So
+the module validates every row whenever it fills its binding cache (once a minute per
+player) and drops what it cannot believe, telling the player which companion and why:
+
+| Found | Why it is dropped |
+|---|---|
+| the character is gone | the body was deleted or wiped; the row points at nothing |
+| released after it was bound | the body belongs to the pool again, and the pool re-issues bodies |
+| bound to another player | two sweeps would level and re-quest one character against each other |
+| the same bot twice | the sweep would act twice on one body |
+| a fifth companion | a group is five with the player |
+
+Releasing a companion with `.companion forget` therefore clears itself up: the release is
+recorded, and the next sweep drops the row and says so. Everything the module remembered
+about that body — memos, latches, "already told them" sets, queued whispers — is erased
+with it, because bot guids are recycled and the next companion to inherit one would
+otherwise inherit its predecessor's silences.
 
 **Four companions, no more.** A party is five with the owner, so four is the ceiling:
 a fifth row is ignored and logged rather than swept on every pass, and the same bot bound

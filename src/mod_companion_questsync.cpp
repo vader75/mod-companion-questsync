@@ -109,9 +109,20 @@ namespace
     // and recreated mid-session is a different bot_guid, and an unexpired "no
     // companion" answer would keep the module blind for the whole session - the
     // one drift it could not heal on its own.
+    /// A row the module refused to believe, and why. Kept so the sweep can tell the
+    /// player: a binding that silently disappears looks like a companion that will not
+    /// follow, which is the complaint this module exists to answer.
+    struct DroppedBinding
+    {
+        uint32 botGuid = 0;
+        std::string name;
+        std::string reason;
+    };
+
     struct BindingSet
     {
         std::vector<uint32> bots;   // every companion bound to one owner
+        std::vector<DroppedBinding> dropped;
         uint32 expires = 0;
     };
 
@@ -366,11 +377,89 @@ namespace
         return static_cast<bool>(result);
     }
 
-    /// Every companion bound to this owner, in binding-table order.
+    /// What columns this binding table actually has.
     ///
-    /// The table could always hold several rows; only the lookup assumed one. Reading
-    /// them all here is what lets a group of companions be tracked without a second
-    /// code path - the sweep simply loops.
+    /// `wowlegends_companion` and the multi table differ, and a hand-made table may differ
+    /// from both. Probing once is cheaper than a failed query on every cache fill, and it
+    /// lets the module work with the bare minimum: owner, bot, and optionally a name and a
+    /// creation time.
+    bool g_bindingHasName = false;
+    bool g_bindingHasCreatedAt = false;
+    bool g_bindingReleasedKnown = false;
+    bool g_crossOwnerWarned = false;
+
+    void ProbeBindingTable()
+    {
+        g_bindingHasName = static_cast<bool>(
+            CharacterDatabase.Query("SHOW COLUMNS FROM {} LIKE 'companion_name'", g_cfg.bindingTable));
+        g_bindingHasCreatedAt = static_cast<bool>(
+            CharacterDatabase.Query("SHOW COLUMNS FROM {} LIKE 'created_at'", g_cfg.bindingTable));
+        g_bindingReleasedKnown = static_cast<bool>(
+            CharacterDatabase.Query("SHOW TABLES LIKE 'wowlegends_companion_released'"));
+    }
+
+    /// Everything this module remembers about one companion, forgotten with it.
+    ///
+    /// Companion guids come from a pool and are reused. A memo, a latch or an
+    /// "already told them" set left behind by a released body would quietly apply to the
+    /// next companion that inherits the guid - which reads as the module ignoring work
+    /// rather than as a stale map.
+    template <typename Map>
+    void EraseByBot(Map& map, uint32 botGuid)
+    {
+        for (auto it = map.begin(); it != map.end();)
+        {
+            if (it->first.first == botGuid)
+                it = map.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    void PurgeCompanionState(uint32 botGuid)
+    {
+        g_passMemo.erase(botGuid);
+        g_seenQuests.erase(botGuid);
+        g_repairing.erase(botGuid);
+        g_notified.erase(botGuid);
+        g_pendingNotices.erase(botGuid);
+        g_sellAt.erase(botGuid);
+        g_lastWhisperByBot.erase(botGuid);
+
+        EraseByBot(g_nudgeAt, botGuid);
+        EraseByBot(g_openLatch, botGuid);
+        EraseByBot(g_turnInHintAt, botGuid);
+        EraseByBot(g_rewardProdAt, botGuid);
+        EraseByBot(g_addedAt, botGuid);
+        EraseByBot(g_addedCount, botGuid);
+        EraseByBot(g_vanishLogged, botGuid);
+        EraseByBot(g_extraSince, botGuid);
+    }
+
+    void DropBindingRow(uint32 ownerGuid, DroppedBinding const& drop)
+    {
+        CharacterDatabase.Execute("DELETE FROM {} WHERE owner_guid = {} AND bot_guid = {}",
+                                  g_cfg.bindingTable, ownerGuid, drop.botGuid);
+
+        PurgeCompanionState(drop.botGuid);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] owner {}: dropped binding to {} ({}) - {}",
+                 ownerGuid, drop.name, drop.botGuid, drop.reason);
+    }
+
+    /// Read and validate one owner's companions.
+    ///
+    /// Nothing else in the server writes this table, so a row that has stopped making
+    /// sense is only ever noticed here. Validation therefore runs whenever the cache is
+    /// filled (once a minute per owner) rather than on a timer of its own: that is the
+    /// moment the module is looking at the table anyway.
+    ///
+    /// The four ways a binding goes bad, all of them real:
+    ///   - the character behind it is gone (deleted, or the pool body was wiped)
+    ///   - it was released after it was bound, and the body belongs to the pool again
+    ///   - the same bot is bound to another owner, so two sweeps fight over one character
+    ///   - the live body carries a different name than the row (forget-then-create, where
+    ///     the body keeps its old name)
     bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
     {
         uint32 const now = static_cast<uint32>(time(nullptr));
@@ -385,34 +474,173 @@ namespace
         BindingSet set;
         set.expires = now + kBindingCacheSeconds;
 
-        QueryResult result = CharacterDatabase.Query("SELECT bot_guid FROM {} WHERE owner_guid = {}", g_cfg.bindingTable, ownerGuid);
-        if (result)
+        struct Row
+        {
+            uint32 botGuid = 0;
+            std::string name;
+            uint32 created = 0;
+        };
+
+        std::vector<Row> rows;
+
+        std::string const nameColumn = g_bindingHasName ? "companion_name" : "''";
+        std::string const createdColumn = g_bindingHasCreatedAt ? "UNIX_TIMESTAMP(created_at)" : "0";
+
+        std::string const query = "SELECT bot_guid, " + nameColumn + ", " + createdColumn +
+                                  " FROM " + g_cfg.bindingTable + " WHERE owner_guid = " + std::to_string(ownerGuid);
+
+        if (QueryResult result = CharacterDatabase.Query(query.c_str()))
         {
             do
             {
-                uint32 const botGuid = result->Fetch()[0].Get<uint32>();
-                if (!botGuid)
-                    continue;
+                Field* fields = result->Fetch();
+                Row row;
+                row.botGuid = fields[0].Get<uint32>();
+                row.name = fields[1].Get<std::string>();
+                row.created = fields[2].Get<uint32>();
 
-                // A bot seeded twice - or bound to two owners - makes two sweeps fight
-                // over one character: both level it, both re-quest it, both whisper.
-                if (std::find(set.bots.begin(), set.bots.end(), botGuid) != set.bots.end())
-                {
-                    LOG_ERROR("server.loading", "[CompanionQuestSync] owner {} binds bot {} more than once; ignoring the duplicate",
-                              ownerGuid, botGuid);
-                    continue;
-                }
-
-                if (set.bots.size() >= kMaxCompanions)
-                {
-                    LOG_ERROR("server.loading", "[CompanionQuestSync] owner {} binds more than {} companions; ignoring bot {} (a group is {} with the owner)",
-                              ownerGuid, uint32(kMaxCompanions), botGuid, uint32(kMaxCompanions + 1));
-                    continue;
-                }
-
-                set.bots.push_back(botGuid);
+                if (row.botGuid)
+                    rows.push_back(row);
             } while (result->NextRow());
         }
+
+        // Duplicates, then the cap. Both are seeding mistakes: a duplicate would have the
+        // sweep act twice on one body, and a fifth companion is more bots than a group.
+        std::vector<Row> unique;
+        for (Row const& row : rows)
+        {
+            bool dupe = false;
+            for (Row const& seen : unique)
+                if (seen.botGuid == row.botGuid)
+                    dupe = true;
+
+            std::string const shown = row.name.empty() ? std::to_string(row.botGuid) : row.name;
+
+            if (dupe)
+            {
+                set.dropped.push_back({ row.botGuid, shown, "it is bound twice" });
+                continue;
+            }
+
+            if (unique.size() >= kMaxCompanions)
+            {
+                set.dropped.push_back({ row.botGuid, shown, "it is past the four-companion cap" });
+                continue;
+            }
+
+            unique.push_back(row);
+        }
+        rows.swap(unique);
+
+        std::string list;
+        for (Row const& row : rows)
+        {
+            if (!list.empty())
+                list += ",";
+
+            list += std::to_string(row.botGuid);
+        }
+
+        std::map<uint32, std::string> liveNames;
+        std::map<uint32, uint32> releasedAt;
+        std::map<uint32, std::pair<uint32, uint32>> otherOwner;   // bot -> (owner, created)
+
+        if (!list.empty())
+        {
+            if (QueryResult chars = CharacterDatabase.Query("SELECT guid, name FROM characters WHERE guid IN ({})", list))
+            {
+                do
+                {
+                    Field* fields = chars->Fetch();
+                    liveNames[fields[0].Get<uint32>()] = fields[1].Get<std::string>();
+                } while (chars->NextRow());
+            }
+
+            if (g_bindingReleasedKnown)
+            {
+                if (QueryResult rel = CharacterDatabase.Query(
+                        "SELECT bot_guid, UNIX_TIMESTAMP(released_at) FROM wowlegends_companion_released WHERE bot_guid IN ({})", list))
+                {
+                    do
+                    {
+                        Field* fields = rel->Fetch();
+                        releasedAt[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
+                    } while (rel->NextRow());
+                }
+            }
+
+            if (QueryResult other = CharacterDatabase.Query(
+                    "SELECT bot_guid, owner_guid, " + createdColumn + " FROM " + g_cfg.bindingTable +
+                    " WHERE bot_guid IN (" + list + ") AND owner_guid <> " + std::to_string(ownerGuid)))
+            {
+                do
+                {
+                    Field* fields = other->Fetch();
+                    otherOwner[fields[0].Get<uint32>()] = { fields[1].Get<uint32>(), fields[2].Get<uint32>() };
+                } while (other->NextRow());
+            }
+        }
+
+        for (Row const& row : rows)
+        {
+            auto const live = liveNames.find(row.botGuid);
+            std::string const shown = live != liveNames.end() ? live->second
+                                     : (row.name.empty() ? std::to_string(row.botGuid) : row.name);
+
+            if (live == liveNames.end())
+            {
+                set.dropped.push_back({ row.botGuid, shown, "its character no longer exists" });
+                continue;
+            }
+
+            // Released after this binding was made: the body went back to the pool, and the
+            // pool re-issues bodies. Following it from here means following whoever holds
+            // it next.
+            if (row.created)
+            {
+                auto const released = releasedAt.find(row.botGuid);
+                if (released != releasedAt.end() && released->second >= row.created)
+                {
+                    set.dropped.push_back({ row.botGuid, shown, "it was released after you bound it" });
+                    continue;
+                }
+            }
+
+            // The same bot under two owners: two sweeps levelling and re-questing one
+            // character against each other, and two companions whispering with one name.
+            auto const other = otherOwner.find(row.botGuid);
+            if (other != otherOwner.end())
+            {
+                bool const theirs = (g_bindingHasCreatedAt && row.created)
+                    ? (other->second.second < row.created ||
+                       (other->second.second == row.created && other->second.first < ownerGuid))
+                    : other->second.first < ownerGuid;
+
+                if (theirs)
+                {
+                    set.dropped.push_back({ row.botGuid, shown, "it is bound to another player" });
+                    continue;
+                }
+
+                LOG_ERROR("server.loading",
+                          "[CompanionQuestSync] bot {} is bound to both {} and {}; {} keeps it - remove the other row",
+                          row.botGuid, ownerGuid, other->second.first,
+                          (g_bindingHasCreatedAt && row.created) ? "the older binding" : "the lower owner guid");
+            }
+            else if (!g_bindingHasCreatedAt && !g_crossOwnerWarned)
+            {
+                g_crossOwnerWarned = true;
+                LOG_ERROR("server.loading",
+                          "[CompanionQuestSync] binding table '{}' has no created_at column; two players binding "
+                          "the same bot cannot be settled by age. Add the column, or keep every bot single-owner.",
+                          g_cfg.bindingTable);
+            }
+
+            set.bots.push_back(row.botGuid);
+        }
+
+        for (DroppedBinding const& drop : set.dropped)
+            DropBindingRow(ownerGuid, drop);
 
         bots = set.bots;
         g_bindingCache[ownerGuid] = std::move(set);
@@ -2878,6 +3106,30 @@ namespace
         return ResolveCompanion(owner, report, botGuid);
     }
 
+    /// Tell the owner about bindings the module stopped believing, once.
+    void ReportDroppedBindings(Player* owner)
+    {
+        auto itr = g_bindingCache.find(owner->GetGUID().GetCounter());
+        if (itr == g_bindingCache.end() || itr->second.dropped.empty())
+            return;
+
+        std::vector<DroppedBinding> const dropped = itr->second.dropped;
+        itr->second.dropped.clear();
+
+        if (!owner->GetSession())
+            return;
+
+        ChatHandler handler(owner->GetSession());
+        for (DroppedBinding const& one : dropped)
+            handler.PSendSysMessage("|cffff8000Companion|r: no longer following |cffffff00{}|r: {}. "
+                                    "|cffffff00.companionsync list|r shows who is bound, "
+                                    "|cffffff00.companionsync bind <name>|r adds one.",
+                                    one.name, one.reason);
+
+        if (g_cfg.pinSync)
+            SendPinSync(owner, true);
+    }
+
     /// Sweep every companion bound to this owner.
     ///
     /// One pass per companion, aggregated into a single report so callers that only
@@ -2887,8 +3139,18 @@ namespace
     {
         SyncReport aggregate;
 
+        if (!g_cfg.enable)
+            return aggregate;
+
         std::vector<uint32> bots;
-        if (!g_cfg.enable || !FindCompanions(owner->GetGUID().GetCounter(), bots))
+        FindCompanions(owner->GetGUID().GetCounter(), bots);
+
+        // A binding the module refused to believe is news the player needs: a companion
+        // that silently stops being tracked reads as "it stopped following me", and the
+        // next thing they do is file a bug about the module rather than about the row.
+        ReportDroppedBindings(owner);
+
+        if (bots.empty())
             return aggregate;
 
         aggregate.hasCompanion = true;
@@ -3098,6 +3360,9 @@ private:
 
         g_tableReady = CheckBindingTable();
 
+        if (g_tableReady)
+            ProbeBindingTable();
+
         if (!g_tableReady)
         {
             if (!g_tableWarned || reload)
@@ -3151,6 +3416,9 @@ public:
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
+            { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
+            { "unbind", HandleUnbindCommand, SEC_PLAYER, Console::No },
+            { "list",   HandleListCommand,   SEC_PLAYER, Console::No },
             { "",       HandleSyncCommand,   SEC_PLAYER, Console::No },
         };
 
@@ -3160,6 +3428,223 @@ public:
         };
 
         return baseTable;
+    }
+
+    /// Trim what a player typed after the verb.
+    static std::string TrimArg(char const* args)
+    {
+        std::string name = args ? args : "";
+        name.erase(0, name.find_first_not_of(" \t"));
+        if (!name.empty())
+            name.erase(name.find_last_not_of(" \t") + 1);
+
+        return name;
+    }
+
+    /// .companionsync bind <name> - make an online bot one of your companions.
+    ///
+    /// Only a bot that is in the world can be bound. Guids are pooled: binding one that is
+    /// not running is a promise the module cannot keep, because the body can be released
+    /// and re-issued to someone else, and the row follows the guid rather than the
+    /// companion.
+    static bool HandleBindCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable || !g_tableReady)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: disabled, or the binding table "
+                                     "'{}' is missing.", g_cfg.bindingTable);
+            return true;
+        }
+
+        std::string const name = TrimArg(args);
+        if (name.empty())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: which bot? "
+                                     "|cffffff00.companionsync bind <name>|r");
+            return true;
+        }
+
+        Player* bot = ObjectAccessor::FindPlayerByName(name);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not in the world. "
+                                     "Bring it out first (|cffffff00.playerbots bot add {}|r), then bind it - "
+                                     "a body that is not running cannot be promised.", name, name);
+            return true;
+        }
+
+        if (bot == player || !bot->GetSession() || !bot->GetSession()->IsBot())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not a bot character, so it cannot "
+                                     "be a companion.", bot->GetName());
+            return true;
+        }
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+
+        std::vector<uint32> bound;
+        FindCompanions(ownerGuid, bound);
+
+        if (std::find(bound.begin(), bound.end(), botGuid) != bound.end())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is already your companion.", bot->GetName());
+            return true;
+        }
+
+        if (bound.size() >= kMaxCompanions)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: you already have {} companions, which is the "
+                                     "limit - a group of {} with you. |cffffff00.companionsync unbind <name>|r "
+                                     "first.", uint32(kMaxCompanions), uint32(kMaxCompanions + 1));
+            return true;
+        }
+
+        if (QueryResult other = CharacterDatabase.Query("SELECT owner_guid FROM {} WHERE bot_guid = {} AND owner_guid <> {}",
+                                                        g_cfg.bindingTable, botGuid, ownerGuid))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is bound to someone else; ask them to "
+                                     "release it first.", bot->GetName());
+            return true;
+        }
+
+        if (g_bindingHasName)
+        {
+            std::string escaped = bot->GetName();
+            CharacterDatabase.EscapeString(escaped);
+
+            CharacterDatabase.Execute("INSERT INTO {} (owner_guid, bot_guid, companion_name) VALUES ({}, {}, '{}')",
+                                      g_cfg.bindingTable, ownerGuid, botGuid, escaped);
+        }
+        else
+        {
+            CharacterDatabase.Execute("INSERT INTO {} (owner_guid, bot_guid) VALUES ({}, {})",
+                                      g_cfg.bindingTable, ownerGuid, botGuid);
+        }
+
+        InvalidateCompanionGuid(ownerGuid);
+        FindCompanions(ownerGuid, bound);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} bound {} ({}) - {} of {} companions",
+                 player->GetName(), bot->GetName(), botGuid, uint32(bound.size()), uint32(kMaxCompanions));
+
+        // Catch the new companion up now rather than on the next tick: it may be standing
+        // in a different zone with a different quest log, and the first thing the player
+        // does is look at it.
+        SyncCompanion(player);
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r is now your companion "
+                                 "({}/{}). Its quests follow yours from now on.",
+                                 bot->GetName(), uint32(bound.size()), uint32(kMaxCompanions));
+        return true;
+    }
+
+    /// .companionsync unbind <name> - stop tracking a companion. The bot keeps existing and
+    /// keeps being yours; it just stops being reconciled.
+    static bool HandleUnbindCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::string const name = TrimArg(args);
+        if (name.empty())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: which companion? "
+                                     "|cffffff00.companionsync unbind <name>|r");
+            return true;
+        }
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+
+        std::vector<uint32> bound;
+        FindCompanions(ownerGuid, bound);
+
+        uint32 botGuid = 0;
+        for (uint32 const candidate : bound)
+        {
+            Player* bot = FindCompanionPlayer(candidate);
+            if (bot && bot->GetName() == name)
+            {
+                botGuid = candidate;
+                break;
+            }
+        }
+
+        if (!botGuid && g_bindingHasName)
+        {
+            std::string escaped = name;
+            CharacterDatabase.EscapeString(escaped);
+
+            if (QueryResult row = CharacterDatabase.Query("SELECT bot_guid FROM {} WHERE owner_guid = {} AND companion_name = '{}'",
+                                                          g_cfg.bindingTable, ownerGuid, escaped))
+                botGuid = row->Fetch()[0].Get<uint32>();
+        }
+
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions. "
+                                     "|cffffff00.companionsync list|r shows who is.", name);
+            return true;
+        }
+
+        CharacterDatabase.Execute("DELETE FROM {} WHERE owner_guid = {} AND bot_guid = {}",
+                                  g_cfg.bindingTable, ownerGuid, botGuid);
+        PurgeCompanionState(botGuid);
+        InvalidateCompanionGuid(ownerGuid);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} unbound {} ({}) - it stays a bot, it just stops following",
+                 player->GetName(), name, botGuid);
+
+        if (g_cfg.pinSync)
+            SendPinSync(player, true);
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: stopped tracking |cffffff00{}|r. The bot is "
+                                 "still yours; it simply does not follow your quest log any more.", name);
+        return true;
+    }
+
+    /// .companionsync list - what is bound, and what each companion is doing.
+    static bool HandleListCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::vector<uint32> bound;
+        if (!g_cfg.enable || !FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound. "
+                                     "|cffffff00.companionsync bind <name>|r adds one.");
+            return true;
+        }
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} of {} bound.", uint32(bound.size()), uint32(kMaxCompanions));
+
+        for (uint32 const botGuid : bound)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+            {
+                handler->PSendSysMessage("  |cffaaaaaa?|r  guid {} - not in the world (summon it)", botGuid);
+                continue;
+            }
+
+            Group* group = player->GetGroup();
+            bool const grouped = group && group->IsMember(bot->GetGUID());
+
+            handler->PSendSysMessage("  |cffffff00{}|r  level {}, {} quest(s), {}{}{}",
+                                     bot->GetName(), uint32(bot->GetLevel()), uint32(CountQuestLog(bot)),
+                                     grouped ? "in your group" : "|cffff8000not in your group|r",
+                                     g_cfg.requireGrouped && !grouped ? " - skipped until it is" : "",
+                                     bot->GetLevel() != player->GetLevel() ? ", |cffffd200level differs - .companionsync level|r" : "");
+        }
+
+        return true;
     }
 
     static bool HandleSyncCommand(ChatHandler* handler, char const* /*args*/)
@@ -3511,7 +3996,14 @@ public:
         // character that had ever bound a companion - small, and still worth not
         // carrying across sessions (a stale pin sync line would also suppress the first
         // reconciliation of the next login).
-        g_passMemo.erase(ownerGuid);
+        // Companions keep their own state, and bot guids are pooled: erase what belongs to
+        // this player's companions as well, or the next body to inherit a guid inherits the
+        // memo, latches and "already told them" sets of the one that came before it.
+        std::vector<uint32> companions;
+        FindCompanions(ownerGuid, companions);
+        for (uint32 const botGuid : companions)
+            PurgeCompanionState(botGuid);
+
         g_lastPinSync.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);
