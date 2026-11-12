@@ -13,13 +13,16 @@ Every 30 seconds (and instantly on quest accept) the module reconciles one playe
 | **Mirror quests** | Adds the owner's quests to the companion through the normal `AddQuest` path — eligibility and class/race locks still apply. Prerequisites the owner has already finished are credited first, so a chained quest is not refused for a link the companion never walked |
 | **Instant on accept** | `OnPlayerQuestAccept` mirrors the quest in the same call, no 30 s wait |
 | **Mirror completion** | When the owner's copy is `COMPLETE`, the companion's is too — but never for a quest that delivers items the companion does not actually hold (that copy could never be handed in) |
-| **Level alignment** | `LevelMode` 0/1/2: off, raise-only, or exactly the owner's level. Quests gate on `quest_template.MinLevel`, so this is what unblocks a low companion |
+| **Level alignment** | `LevelMode` 0/1/2: off, raise-only, or exactly the owner's level. Quests gate on `quest_template.MinLevel`, so this is what unblocks a low companion. Alignment only ever **raises**: an out-levelled companion keeps the level it earned, because `GiveLevel` downwards strips spell ranks |
 | **Self-heal** | A copy left `COMPLETE` that can never be rewarded is reopened, so its own AI collects what it owes and hands in |
 | **Hands in the turn-in** | When the companion owes a hand-in it is stepped beside the ender and asked to reward *in the same pass* — its follow AI walks it back to its owner within seconds, so a check on the next pass missed the window |
 | **Knows what is grey** | A quest 5–8 levels below the companion is dropped by its own quest-log cleaner, so the module declines it once ("I have levelled past 'X' – finish that one without me") instead of handing it back every pass |
 | **Bag management** | Sells vendor trash (via playerbots), wears upgrades, fills empty bag slots with a 16-slot bag, and only then bins disposable items — below `ItemKeepQuality`, never quest items, starters, equippable gear or anything a live quest needs |
 | **Explains itself** | Whispers the owner what it cannot take and why, what it still owes (`Large Candle 0/8`), where the turn-in NPC is (map coordinates), and keeps asking for help every five minutes while a quest is unfinished. Rate-limited and queued, and re-checked before they are spoken so it never complains about a level it has already reached |
-| **Observability** | Startup banner, login greeting, `.companionsync` commands, a 5-minute heartbeat in the log, and a one-line session summary on logout |
+| **Follows you out** | A quest the owner abandons leaves the companion too — instantly through `OnPlayerQuestAbandon`, or after `DropExtraGraceSeconds` when the abandon cannot be seen. A quest the owner has already *handed in* is kept, because the companion is catching up; class- and race-locked quests are kept too, since they were never the owner's |
+| **Sweeps on login** | The first pass runs the moment you log in instead of waiting for the timer, so nothing shows yesterday's state |
+| **Reports its own failures** | A copy the companion failed on its own (a dead escort, an expired script) cannot be finished; it is reported once, and dropped only when `DropFailedBotQuests` is on |
+| **Observability** | Startup banner, login greeting, `.companionsync status` / `quests` / `pins`, a 5-minute heartbeat carrying free bag slots and any failures, and a one-line session summary on logout |
 
 ## Prerequisites
 
@@ -59,9 +62,11 @@ Re-run CMake (the module set changed) and rebuild `worldserver`. Copy `conf/mod_
 |---|---|
 | `.companionsync` | Reconcile now, and report what changed |
 | `.companionsync status` | Levels, quest counts, and every quest the companion is behind on with the reason |
+| `.companionsync quests` | Every quest the companion carries: state, what it still owes by item and count, where it hands in, how far, and the objective area in map coordinates |
+| `.companionsync pins` | Re-send the map-pin set to the client addon |
 | `.companionsync level` | Force level alignment now |
 
-All three are `SEC_PLAYER`; a player can only affect their own companion.
+All of these are `SEC_PLAYER`; a player can only affect their own companion.
 
 ## Configuration
 
@@ -70,8 +75,8 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | Key | Default | Meaning |
 |---|---|---|
 | `Enable` | 1 | Master switch |
-| `IntervalSeconds` | 20 | Sweep interval (min 5) |
-| `LevelMode` | 1 | 0 off, 1 raise-only, 2 exactly the owner's level |
+| `IntervalSeconds` | 30 | Sweep interval (min 5). The accept hook mirrors instantly, so this is only the safety net |
+| `LevelMode` | 1 | 0 off, 1 raise-only, 2 exactly the owner's level. Never lowers a companion |
 | `SyncCompletion` | 1 | Mirror the owner's `COMPLETE` status |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 every refusal |
 | `BindingTable` | `wowlegends_companion` | Owner → bot mapping table |
@@ -83,9 +88,13 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | `ItemKeepQuality` | 2 | Never bin this quality or better (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | Fill empty bag slots with this bag item |
 | `MapPins` | 1 | Push companion quest areas to the owner's map |
-| `PinSync` | 1 | Whisper the pin set to the owner's addon (`MapPins` decides what is in it) |
+| `PinSync` | 1 | Whisper the pin set to the owner's addon (`MapPins` decides what is in it), split across several whispers when it needs to be |
 | `ForceAccept` | 0 | Insert quests bypassing eligibility (for broken chains only) |
-| `DropExtraBotQuests` | 0 | Remove companion quests the owner does not have |
+| `DropExtraBotQuests` | 1 | Remove companion quests the owner abandoned (handed-in and class/race quests are kept) |
+| `DropExtraGraceSeconds` | 120 | How long a copy survives before it counts as abandoned |
+| `DropFailedBotQuests` | 0 | Also drop copies the companion failed on its own (reported either way) |
+| `SkipTimedQuests` | 1 | Do not mirror timed quests the companion cannot finish on schedule |
+| `PinSyncSeconds` | 600 | Longest gap between identical pin-sync lines |
 | `Debug` | 0 | 0 silent, 1 changes, 2 + heartbeat |
 
 ## Notes and limitations
@@ -93,7 +102,7 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 - **`AiPlayerbot.SyncQuestWithPlayer` should be 0** if you want companions to gather their own quest items. With it on, mod-playerbots "will not loot quest items" (its own wording) and completes the bot's copy the moment the owner hands in — which is the state this module exists to avoid.
 - Quests with `RequiredItemId` need those items in the companion's own bags to be rewarded; the module will not pretend otherwise.
 - Timed quests are skipped by default (`SkipTimedQuests`), as are quests the companion's class or race cannot take (reported once, not counted as failures).
-- The sweep is owner → companion only. A companion that races ahead is left alone unless `DropExtraBotQuests` is enabled.
+- The sweep is owner → companion only. A companion that races ahead is left alone unless `DropExtraBotQuests` is enabled, and even then only quests the owner neither holds nor has completed are dropped.
 - Map pins are best effort: the 3.3.5 client decides whether to draw POIs for quests outside its own log, so the whisper always carries map coordinates as a fallback.
 - **One companion per player.** `FindCompanionGuid` returns a single `bot_guid` for an owner, and the sweep, heartbeat, whisper funnel and pin sync are all keyed on the owner guid. A second bound companion is not tracked: it will not be levelled, will not have quests mirrored, and will not appear on the map. Supporting more than one companion needs the binding lookup to return a list, a per-bot key through those paths, and a pin format that names the companion — the addon already understands a `@Companion` suffix on pin entries (`43,65,h=Kobold Candles@Beta`) so the wire format can grow without breaking existing clients. Until that work is done, document one companion and keep the binding table to one row per player.
 
@@ -118,7 +127,9 @@ when there are more entries than one can hold - on login, whenever the set chang
 every ten minutes, and on demand with `.companionsync pins`. The addon treats it as
 the whole truth: any pin it does not mention is removed, so a marker cannot outlive
 the work it stood for. Tooltips carry the zone, the exact coordinates and
-right-click-to-remove.
+right-click-to-remove. `/wlpins life <minutes>` sets how long a pin lives (30 by
+default), `/wlpins offset X Y` calibrates the anchor, and `/wlpins debug` echoes every
+whisper the addon hears.
 
 Client-side only — no server change, no core edit. See `addon/WLPins/README.md`.
 
