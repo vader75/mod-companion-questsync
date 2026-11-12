@@ -2657,9 +2657,18 @@ namespace
         last = payload;
         g_pinSyncAt[ownerGuid] = now;
 
-        if (g_cfg.debug >= 1)
+        if (g_cfg.debug >= 2)
+        {
+            // The payload itself at debug 2: it is the only record of what the client was
+            // told, and the multi-companion test asserts on the @Name suffixes.
+            LOG_INFO("server.loading", "[CompanionQuestSync] pin sync -> {}: {} part(s), {} entries: {}",
+                     owner->GetName(), uint32(chunks.size()), entries, payload);
+        }
+        else if (g_cfg.debug >= 1)
+        {
             LOG_INFO("server.loading", "[CompanionQuestSync] pin sync -> {}: {} part(s), {} entries",
                      owner->GetName(), uint32(chunks.size()), entries);
+        }
     }
 
     void PrintReport(ChatHandler* handler, Player* owner, SyncReport const& report, bool manual)
