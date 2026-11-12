@@ -68,6 +68,8 @@ Re-run CMake (the module set changed) and rebuild `worldserver`. Copy `conf/mod_
 | `.companionsync list` | What is bound, and what each companion is doing right now |
 | `.companionsync bind <name>` | Make an **online** bot one of your companions |
 | `.companionsync unbind <name>` | Stop tracking a companion; the bot stays yours |
+| `.companionsync summon [name]` | Bring a companion out, or every one that is not out |
+| `.companionsync dismiss [name]` | Send a companion away, or all of them; it stays bound |
 
 All of these are `SEC_PLAYER`; a player can only affect their own companions.
 
@@ -139,6 +141,19 @@ CompanionQuestSync.BindingTable = wowlegends_companion_multi
 
 then `.reload config`. `sql/multi-companion.sql` does all of that and carries your
 existing bindings across, so nothing is lost on the switch.
+
+### Summoning and dismissing one companion at a time
+
+`.companion summon` belongs to mod-wowlegends and only knows its single companion, so a
+group had no way to call back one specific bot. `summon`/`dismiss` drive playerbots through
+the owner's own session — the same path mod-wowlegends uses — so its login hook still does
+the part that matters: join the group, follow, enable combat.
+
+The outcome is **verified**, not assumed: playerbots logs a body in on its own schedule, so
+ten seconds later the module checks whether the companion is really in the world and says
+so if it is not, with the next step (`unbind` then `bind` once the body is back). A silent
+no-op is the most expensive failure this module can have, and a summon that does nothing is
+exactly that. With no argument, both verbs act on the whole group.
 
 ### Membership, and what happens when a companion goes away
 

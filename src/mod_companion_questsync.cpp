@@ -3196,6 +3196,141 @@ namespace
     }
 }
 
+    /// Drive playerbots through the owner's own session, exactly as mod-wowlegends does.
+    ///
+    /// The playerbots command is SEC_PLAYER, so the owner is authorised for it, and its
+    /// OnBotLogin does the part that actually matters: put the bot in the group, switch
+    /// follow on, enable combat. Reimplementing that here would drift from it.
+    void DispatchPlayerbots(Player* owner, std::string const& sub)
+    {
+        if (!owner || !owner->GetSession())
+            return;
+
+        ChatHandler(owner->GetSession()).ParseCommands(".playerbots bot " + sub);
+    }
+
+    /// A summon is asynchronous - playerbots prepares the body and logs it in on its own
+    /// schedule - so the outcome is checked a few seconds later rather than assumed. A
+    /// silent no-op is the single most expensive failure this module can have: the player
+    /// asks for their companion, nothing happens, and there is nothing to go on.
+    struct PendingSummon
+    {
+        uint32 botGuid = 0;
+        uint32 ownerGuid = 0;
+        std::string name;
+        uint32 deadline = 0;
+        bool expectOnline = true;   // false for a dismiss
+    };
+
+    std::map<uint32, PendingSummon> g_pendingSummon;   // bot guid -> what we are waiting for
+
+    /// The name a companion answers to, online or not.
+    std::string CompanionNameFor(uint32 botGuid)
+    {
+        if (Player* bot = FindCompanionPlayer(botGuid))
+            return bot->GetName();
+
+        if (QueryResult row = CharacterDatabase.Query("SELECT name FROM characters WHERE guid = {}", botGuid))
+            return row->Fetch()[0].Get<std::string>();
+
+        return std::to_string(botGuid);
+    }
+
+    /// Which bound companion the player meant, by live name or by the name on the row.
+    uint32 ResolveCompanion(Player* player, std::string const& name, std::vector<uint32> const& bound)
+    {
+        for (uint32 const candidate : bound)
+        {
+            Player* bot = FindCompanionPlayer(candidate);
+            if (bot && bot->GetName() == name)
+                return candidate;
+        }
+
+        if (g_bindingHasName)
+        {
+            std::string escaped = name;
+            CharacterDatabase.EscapeString(escaped);
+
+            if (QueryResult row = CharacterDatabase.Query("SELECT bot_guid FROM {} WHERE owner_guid = {} AND companion_name = '{}'",
+                                                          g_cfg.bindingTable, player->GetGUID().GetCounter(), escaped))
+                return row->Fetch()[0].Get<uint32>();
+        }
+
+        return 0;
+    }
+
+    void CheckPendingSummons()
+    {
+        if (g_pendingSummon.empty())
+            return;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        for (auto it = g_pendingSummon.begin(); it != g_pendingSummon.end();)
+        {
+            if (now < it->second.deadline)
+            {
+                ++it;
+                continue;
+            }
+
+            PendingSummon const pending = it->second;
+            it = g_pendingSummon.erase(it);
+
+            Player* bot = FindCompanionPlayer(pending.botGuid);
+            bool const online = bot && bot->IsInWorld();
+            Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+
+            if (pending.expectOnline)
+            {
+                if (online)
+                {
+                    LOG_INFO("server.loading", "[CompanionQuestSync] summon came up: {} ({})", pending.name, pending.botGuid);
+
+                    if (owner && owner->GetSession() && g_cfg.requireGrouped)
+                    {
+                        Group* group = owner->GetGroup();
+                        if (!group || !group->IsMember(bot->GetGUID()))
+                        {
+                            ChatHandler handler(owner->GetSession());
+                            handler.PSendSysMessage("|cffff8000Companion|r: |cffffff00{}|r is out, but not in your party, so "
+                                                    "quest sync will skip it. Invite it (or drop |cffffff00RequireGrouped|r).",
+                                                    bot->GetName());
+                        }
+                    }
+                }
+                else
+                {
+                    LOG_ERROR("server.loading", "[CompanionQuestSync] summon did not come up: {} ({})",
+                              pending.name, pending.botGuid);
+
+                    if (owner && owner->GetSession())
+                    {
+                        ChatHandler handler(owner->GetSession());
+                        handler.PSendSysMessage("|cffff8000Companion|r: |cffffff00{}|r did not come out. If playerbots refused it, "
+                                                "the body may have been released - |cffffff00.companionsync unbind {}|r then "
+                                                "|cffffff00.companionsync bind {}|r once it is with you.",
+                                                pending.name, pending.name, pending.name);
+                    }
+                }
+            }
+            else if (online)
+            {
+                LOG_ERROR("server.loading", "[CompanionQuestSync] dismiss did not take: {} ({}) is still in the world",
+                          pending.name, pending.botGuid);
+
+                if (owner && owner->GetSession())
+                    ChatHandler(owner->GetSession()).PSendSysMessage(
+                        "|cffff8000Companion|r: |cffffff00{}|r is still with you; playerbots did not let it go.",
+                        pending.name);
+            }
+            else
+            {
+                LOG_INFO("server.loading", "[CompanionQuestSync] dismiss took: {} ({}) left", pending.name, pending.botGuid);
+            }
+        }
+    }
+
 class CompanionQuestSyncWorldScript : public WorldScript
 {
 public:
@@ -3220,7 +3355,14 @@ public:
 
     void OnUpdate(uint32 diff) override
     {
-        if (!g_cfg.enable || !g_cfg.autoSync || !g_tableReady)
+        if (!g_cfg.enable || !g_tableReady)
+            return;
+
+        // Summon and dismiss outcomes, independent of the sync timer: a player who asked
+        // for a companion should not wait for the next sweep to learn it did not work.
+        CheckPendingSummons();
+
+        if (!g_cfg.autoSync)
             return;
 
         // Heartbeat window (Debug >= 2): one summary line per window so a log
@@ -3403,6 +3545,7 @@ private:
     std::unordered_map<uint32, std::string> g_hbLines;
 };
 
+
 class CompanionQuestSyncCommandScript : public CommandScript
 {
 public:
@@ -3416,6 +3559,8 @@ public:
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
+            { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
+            { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
             { "unbind", HandleUnbindCommand, SEC_PLAYER, Console::No },
             { "list",   HandleListCommand,   SEC_PLAYER, Console::No },
@@ -3605,6 +3750,143 @@ public:
 
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: stopped tracking |cffffff00{}|r. The bot is "
                                  "still yours; it simply does not follow your quest log any more.", name);
+        return true;
+    }
+
+    /// .companionsync summon [name] - bring a companion out, or every companion that is not
+    /// out. No argument means "the whole group", which is what a player wants after a wipe.
+    static bool HandleSummonCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::vector<uint32> bound;
+        if (!g_cfg.enable || !FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound. "
+                                     "|cffffff00.companionsync bind <name>|r adds one.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        std::vector<uint32> targets;
+
+        if (want.empty())
+        {
+            for (uint32 const botGuid : bound)
+            {
+                Player* bot = FindCompanionPlayer(botGuid);
+                if (!bot || !bot->IsInWorld())
+                    targets.push_back(botGuid);
+            }
+
+            if (targets.empty())
+            {
+                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: all {} are already with you.", uint32(bound.size()));
+                return true;
+            }
+        }
+        else
+        {
+            uint32 const botGuid = ResolveCompanion(player, want, bound);
+            if (!botGuid)
+            {
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions. "
+                                         "|cffffff00.companionsync list|r shows who is.", want);
+                return true;
+            }
+
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (bot && bot->IsInWorld())
+            {
+                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} is already with you.", bot->GetName());
+                return true;
+            }
+
+            targets.push_back(botGuid);
+        }
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        for (uint32 const botGuid : targets)
+        {
+            std::string const name = CompanionNameFor(botGuid);
+
+            DispatchPlayerbots(player, "add " + name);
+            g_pendingSummon[botGuid] = { botGuid, ownerGuid, name, now + 10, true };
+
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: calling |cffffff00{}|r to your side.", name);
+        }
+
+        return true;
+    }
+
+    /// .companionsync dismiss [name] - send a companion away, or all of them. A dismissed
+    /// companion stays bound: its quest log keeps following the player's.
+    static bool HandleDismissCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::vector<uint32> bound;
+        if (!g_cfg.enable || !FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        std::vector<uint32> targets;
+
+        if (want.empty())
+        {
+            for (uint32 const botGuid : bound)
+                if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                    targets.push_back(botGuid);
+
+            if (targets.empty())
+            {
+                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: none of them are with you.");
+                return true;
+            }
+        }
+        else
+        {
+            uint32 const botGuid = ResolveCompanion(player, want, bound);
+            if (!botGuid)
+            {
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions. "
+                                         "|cffffff00.companionsync list|r shows who is.", want);
+                return true;
+            }
+
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+            {
+                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} is not with you.", CompanionNameFor(botGuid));
+                return true;
+            }
+
+            targets.push_back(botGuid);
+        }
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        for (uint32 const botGuid : targets)
+        {
+            std::string const name = CompanionNameFor(botGuid);
+
+            DispatchPlayerbots(player, "remove " + name);
+            g_pendingSummon[botGuid] = { botGuid, ownerGuid, name, now + 10, false };
+
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r stands down - "
+                                     "|cffffff00.companionsync summon {}|r calls it back.", name, name);
+        }
+
         return true;
     }
 
