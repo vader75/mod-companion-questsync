@@ -158,6 +158,21 @@ end
 local listener = CreateFrame("Frame")
 listener:RegisterEvent("CHAT_MSG_WHISPER")
 listener:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
+listener:RegisterEvent("CHAT_MSG_SYSTEM")
+
+-- Payloads arrive as system messages prefixed WLCG, not as whispers: a whisper needs a
+-- companion to speak it, and the roster matters most when nobody is out. They are hidden
+-- from the chat frame here so the player only ever sees the window.
+local function IsProtocolLine(text)
+    return type(text) == "string" and string.sub(text, 1, 4) == "WLCG"
+end
+
+if ChatFrame_AddMessageEventFilter then
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
+        if IsProtocolLine(message) then return true end
+        return false
+    end)
+end
 
 -- Parts of a chunked payload are held until the set is complete, then joined. Sharing
 -- this for both payloads keeps one place to fix if the server ever changes the grammar.
@@ -177,8 +192,25 @@ local function Join(parts, expected)
     return table.concat(ordered, "|")
 end
 
-listener:SetScript("OnEvent", function(_, _, message)
+listener:SetScript("OnEvent", function(_, event, message)
     local text = StripColors(message)
+
+    if event == "CHAT_MSG_SYSTEM" then
+        if not IsProtocolLine(message) then
+            -- the module answers button presses with a plain system line ("{} is not one of
+            -- your companions", "the pool has no free body"); surface the last one in the
+            -- panel so a refusal is visible without reading chat
+            local plain = StripColors(message)
+            if plain:find("Companion quest sync", 1, true) then
+                plain = plain:gsub("^Companion quest sync:?%s*", "")
+                G.lastServerMessage = plain
+
+                if G.OnServerMessage then G.OnServerMessage(plain) end
+            end
+            return
+        end
+        text = StripColors(string.sub(message, 6))   -- drop "WLCG|"
+    end
 
     -- companions
     local part, total, body = string.match(text, "^Comp%s+sync%s+(%d+)/(%d+):%s*(.*)$")
@@ -233,14 +265,17 @@ function G.Action(verb, name)
     end
 end
 
+--- Ask the server for a companion.
+---
+--- The panel does NOT refuse on an empty stock table. Stock arrives asynchronously, and a
+--- click that is swallowed locally because a payload was late looks exactly like a broken
+--- button - which is what it was. The server is the only authority on what the pool has, and
+--- it answers with a reason that is shown in chat and in the panel.
 function G.CreateCompanion(raceId, classId, name)
-    if not G.ValidName(name) then
-        G.Warn("a name is 2 to 12 letters")
-        return false
-    end
+    name = (name or ""):gsub("^%s+", ""):gsub("%s+$", "")
 
-    if G.StockFor(raceId, classId) <= 0 then
-        G.Warn("the pool has no free " .. G.RaceName(raceId) .. " " .. G.ClassName(classId) .. " body")
+    if not G.ValidName(name) then
+        G.Warn("a name is 2 to 12 letters, nothing else")
         return false
     end
 
