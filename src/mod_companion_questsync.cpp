@@ -76,6 +76,7 @@ namespace
         bool dropExtraBotQuests = true;   // the companion follows the owner out of a quest too
         uint32 dropExtraGrace     = 120;  // seconds before an extra quest counts as abandoned
         bool requireGrouped     = true;
+        bool allowCreate        = true;   // may this module mint a companion from the pool?
         bool skipInCombat       = true;
         bool skipTimedQuests    = true;
         bool forceAccept        = false;
@@ -185,6 +186,7 @@ namespace
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
+    std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
     std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
@@ -322,6 +324,7 @@ namespace
         g_cfg.dropExtraBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropExtraBotQuests", true);
         g_cfg.dropExtraGrace     = sConfigMgr->GetOption<uint32>("CompanionQuestSync.DropExtraGraceSeconds", 120);
         g_cfg.requireGrouped     = sConfigMgr->GetOption<bool>("CompanionQuestSync.RequireGrouped", true);
+        g_cfg.allowCreate        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AllowCreate", true);
         g_cfg.skipInCombat       = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipInCombat", true);
         g_cfg.skipTimedQuests    = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipTimedQuests", true);
         g_cfg.forceAccept        = sConfigMgr->GetOption<bool>("CompanionQuestSync.ForceAccept", false);
@@ -2935,6 +2938,29 @@ namespace
 
     /// Send the pin line when it changes, and again every ten minutes in case one
     /// was missed. A whisper, because that is the only channel the addon can read.
+    /// Who speaks the protocol lines (pin and companion payloads).
+    ///
+    /// Not the sync resolver: that one refuses a companion which is not grouped, which is
+    /// right for reconciling quests and wrong for sending a whisper. With RequireGrouped
+    /// on and a companion standing outside the party, every payload was computed and then
+    /// silently dropped - the map stayed empty and the addon showed nothing, with no error
+    /// anywhere. Any bound companion that has a session can speak.
+    Player* ResolveProtocolSpeaker(Player* owner)
+    {
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return nullptr;
+
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (bot && bot->IsInWorld() && bot->GetSession())
+                return bot;
+        }
+
+        return nullptr;
+    }
+
     void SendPinSync(Player* owner, bool force = false)
     {
         if (!g_cfg.pinSync || !owner)
@@ -3003,7 +3029,7 @@ namespace
 
             // Grey and quiet: the addon needs the line, the player does not need to read
             // it. Colour codes are stripped by WLPins before it parses.
-            if (Player* speaker = ResolveCompanion(owner, pinReport))
+            if (Player* speaker = ResolveProtocolSpeaker(owner))
                 speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
         }
 
@@ -3172,6 +3198,330 @@ namespace
         return std::to_string(botGuid);
     }
 
+    // -----------------------------------------------------------------------
+    // companion creation
+    //
+    // mod-wowlegends can mint one companion per player, into its own table. Several
+    // companions need their own bodies, so this module claims them itself: it reads the
+    // pool (AddClass accounts, the released ledger, the AHBot guid) exactly as that module
+    // does, and writes only to its own binding table. Nothing in mod-wowlegends changes
+    // behaviour, and none of its rows are touched.
+    // -----------------------------------------------------------------------
+
+    /// Account ids the playerbots pool considers AddClass bodies (account_type = 2).
+    std::string AddClassAccountCsv()
+    {
+        std::string csv;
+
+        if (QueryResult result = PlayerbotsDatabase.Query(
+                "SELECT account_id FROM playerbots_account_type WHERE account_type = 2"))
+        {
+            do
+            {
+                if (!csv.empty())
+                    csv.push_back(',');
+
+                csv += std::to_string(result->Fetch()[0].Get<uint32>());
+            } while (result->NextRow());
+        }
+
+        return csv;
+    }
+
+    /// One free body of this race and class, or 0.
+    ///
+    /// The guards are the pool's own: an AddClass account, offline, not guilded, not the
+    /// auction bot, not already bound here or in mod-wowlegends' table, and not released
+    /// in the last quarter of an hour (those are still being cleaned up).
+    uint32 PickPoolBody(uint8 race, uint8 clazz)
+    {
+        std::string const accounts = AddClassAccountCsv();
+        if (accounts.empty())
+            return 0;
+
+        std::string sql =
+            "SELECT c.guid FROM characters c "
+            "WHERE c.account IN (" + accounts + ") "
+            "AND c.race = " + std::to_string(uint32(race)) + " "
+            "AND c.class = " + std::to_string(uint32(clazz)) + " "
+            "AND c.online = 0 "
+            "AND c.guid NOT IN (SELECT guid FROM guild_member) "
+            "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
+            "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion) ";
+
+        uint32 const ahbot = sConfigMgr->GetOption<uint32>("AuctionHouseBot.GUID", 0);
+        if (ahbot)
+            sql += "AND c.guid <> " + std::to_string(ahbot) + " ";
+
+        // Our own ledger: a body released minutes ago may still be settling.
+        sql += "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion_pool "
+               "WHERE released_at > NOW() - INTERVAL 15 MINUTE) ";
+
+        sql += "LIMIT 1";
+
+        if (QueryResult result = CharacterDatabase.Query(sql.c_str()))
+            return result->Fetch()[0].Get<uint32>();
+
+        return 0;
+    }
+
+    /// Blank a body so a new owner starts from nothing, the way the pool expects.
+    void ResetPoolBody(uint32 botGuid)
+    {
+        CharacterDatabase.DirectExecute(
+            "DELETE ii FROM item_instance ii INNER JOIN character_inventory ci ON ci.item = ii.guid WHERE ci.guid = {}",
+            botGuid);
+        CharacterDatabase.DirectExecute("DELETE FROM item_instance WHERE owner_guid = {}", botGuid);
+        CharacterDatabase.DirectExecute("DELETE FROM character_inventory WHERE guid = {}", botGuid);
+
+        for (char const* table : { "character_queststatus", "character_queststatus_daily",
+                                   "character_queststatus_weekly", "character_queststatus_monthly",
+                                   "character_queststatus_seasonal", "character_queststatus_rewarded" })
+            CharacterDatabase.DirectExecute(fmt::format("DELETE FROM {} WHERE guid = {}", table, botGuid));
+
+        CharacterDatabase.DirectExecute(
+            "UPDATE characters SET level = 1, xp = 0, money = 0, rest_bonus = 0, at_login = 0, health = 100 "
+            "WHERE guid = {}", botGuid);
+    }
+
+    /// Rename a body and prove it stuck - a rename the database refused must never be
+    /// reported as done, because the next summon would then look for a name nobody has.
+    bool RenameBody(uint32 botGuid, std::string const& name)
+    {
+        std::string escaped = name;
+        CharacterDatabase.EscapeString(escaped);
+
+        CharacterDatabase.DirectExecute("UPDATE characters SET name = '{}' WHERE guid = {}", escaped, botGuid);
+        sCharacterCache->UpdateCharacterData(ObjectGuid::Create<HighGuid::Player>(botGuid), name);
+
+        if (QueryResult row = CharacterDatabase.Query("SELECT name FROM characters WHERE guid = {}", botGuid))
+            return row->Fetch()[0].Get<std::string>() == name;
+
+        return false;
+    }
+
+    bool NameTaken(std::string const& name)
+    {
+        std::string escaped = name;
+        CharacterDatabase.EscapeString(escaped);
+
+        return static_cast<bool>(CharacterDatabase.Query("SELECT guid FROM characters WHERE name = '{}'", escaped));
+    }
+
+    bool ValidCompanionName(std::string const& name)
+    {
+        if (name.size() < 2 || name.size() > 12)
+            return false;
+
+        for (char const c : name)
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+                return false;
+
+        return true;
+    }
+
+    /// How many free bodies the pool has per race and class: `race-class=count`, `|`
+    /// separated. The picker greys out what the pool cannot serve, which is the difference
+    /// between a dropdown that works and one that fails after the player has chosen.
+    std::string BuildPoolStockLine()
+    {
+        std::string const accounts = AddClassAccountCsv();
+        if (accounts.empty())
+            return std::string();
+
+        std::string sql =
+            "SELECT c.race, c.class, COUNT(*) FROM characters c "
+            "WHERE c.account IN (" + accounts + ") "
+            "AND c.online = 0 "
+            "AND c.guid NOT IN (SELECT guid FROM guild_member) "
+            "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
+            "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion) ";
+
+        uint32 const ahbot = sConfigMgr->GetOption<uint32>("AuctionHouseBot.GUID", 0);
+        if (ahbot)
+            sql += "AND c.guid <> " + std::to_string(ahbot) + " ";
+
+        sql += "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion_pool "
+               "WHERE released_at > NOW() - INTERVAL 15 MINUTE) ";
+
+        sql += "GROUP BY c.race, c.class ORDER BY c.race, c.class";
+
+        std::string line;
+
+        if (QueryResult result = CharacterDatabase.Query(sql.c_str()))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 const race = fields[0].Get<uint8>();
+                uint32 const clazz = fields[1].Get<uint8>();
+                uint32 const count = fields[2].Get<uint32>();
+
+                if (!count)
+                    continue;
+
+                if (!line.empty())
+                    line += "|";
+
+                line += std::to_string(race) + "-" + std::to_string(clazz) + "=" + std::to_string(count);
+            } while (result->NextRow());
+        }
+
+        return line;
+    }
+
+    /// Send a payload as a grey whisper, chunked like the pin and companion lines.
+    void SendChunkedPayload(Player* owner, std::string const& label, std::string const& payload,
+                            uint32 entries, std::string& last)
+    {
+        std::vector<std::string> chunks;
+        std::string current;
+        size_t start = 0;
+
+        while (start <= payload.size())
+        {
+            size_t const bar = payload.find('|', start);
+            std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+
+            if (!current.empty() && current.size() + entry.size() + 1 > 150)
+            {
+                chunks.push_back(current);
+                current.clear();
+            }
+
+            if (!current.empty())
+                current += "|";
+
+            current += entry;
+
+            if (bar == std::string::npos)
+                break;
+
+            start = bar + 1;
+        }
+
+        if (!current.empty())
+            chunks.push_back(current);
+
+        if (chunks.empty())
+            chunks.push_back(std::string());
+
+        Player* speaker = ResolveProtocolSpeaker(owner);
+
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            std::string line = label + " ";
+
+            if (chunks.size() > 1)
+                line += std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ": ";
+            else
+                line += std::to_string(entries) + ": ";
+
+            line += chunks[i];
+
+            if (speaker)
+                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+        }
+
+        last = payload;
+    }
+
+    void SendPoolStock(Player* owner, bool force = false)
+    {
+        if (!g_cfg.pinSync || !owner || !owner->GetSession() || !g_cfg.allowCreate)
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        std::string const payload = BuildPoolStockLine();
+
+        std::string& last = g_lastPoolStock[ownerGuid];
+        if (!force && payload == last)
+            return;
+
+        uint32 entries = 0;
+        for (char const c : payload)
+            if (c == '|')
+                ++entries;
+        if (!payload.empty())
+            ++entries;
+
+        SendChunkedPayload(owner, "Pool stock", payload, entries, last);
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] pool stock -> {}: {} combos: {}",
+                     owner->GetName(), entries, payload);
+    }
+
+    /// Mint one companion: claim a pool body, blank it, name it, bind it, call it out.
+    ///
+    /// Returns false with `error` set to something a player can act on. Every failure is
+    /// named, because "it did not work" from a button is useless.
+    bool CreateCompanion(Player* owner, uint8 race, uint8 clazz, std::string const& name,
+                         uint32& botGuid, std::string& error)
+    {
+        if (!ValidCompanionName(name))
+        {
+            error = "a name is 2 to 12 letters, nothing else";
+            return false;
+        }
+
+        if (NameTaken(name))
+        {
+            error = "the name " + name + " is already taken";
+            return false;
+        }
+
+        std::vector<uint32> bound;
+        if (FindCompanions(owner->GetGUID().GetCounter(), bound) && bound.size() >= kMaxCompanions)
+        {
+            error = "you already have the maximum of " + std::to_string(kMaxCompanions) + " companions";
+            return false;
+        }
+
+        botGuid = PickPoolBody(race, clazz);
+        if (!botGuid)
+        {
+            error = "the pool has no free body for that race and class right now";
+            return false;
+        }
+
+        std::string poolName;
+        if (QueryResult row = CharacterDatabase.Query("SELECT name FROM characters WHERE guid = {}", botGuid))
+            poolName = row->Fetch()[0].Get<std::string>();
+
+        ResetPoolBody(botGuid);
+
+        if (!RenameBody(botGuid, name))
+        {
+            error = "the body could not be renamed - try another name";
+            return false;
+        }
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+
+        if (g_bindingHasName)
+        {
+            std::string escaped = name;
+            CharacterDatabase.EscapeString(escaped);
+
+            CharacterDatabase.DirectExecute(
+                "INSERT INTO {} (owner_guid, bot_guid, companion_name) VALUES ({}, {}, '{}')",
+                g_cfg.bindingTable, ownerGuid, botGuid, escaped);
+        }
+        else
+        {
+            CharacterDatabase.DirectExecute(
+                "INSERT INTO {} (owner_guid, bot_guid) VALUES ({}, {})", g_cfg.bindingTable, ownerGuid, botGuid);
+        }
+
+        InvalidateCompanionGuid(ownerGuid);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} created companion {} (race {}, class {}) from pool body {} (was '{}')",
+                 owner->GetName(), name, uint32(race), uint32(clazz), botGuid, poolName);
+
+        return true;
+    }
+
     /// Does the owner carry a quest this companion does not? That is the one thing the
     /// window has to show that the quest-log view does not: work waiting on the *player*.
     bool OwnerHasQuestCompanionLacks(Player* owner, Player* bot)
@@ -3194,8 +3544,8 @@ namespace
 
     /// One line per companion, for the client.
     ///
-    ///     Comp sync 2: Healy,5,32,4,ogs,110|Soak,1,32,2,o,105
-    ///                  name,class,level,quests,flags,free slots
+    ///     Comp sync 2: Healy,5,1,32,4,ogs,110|Soak,9,2,32,2,o,105
+    ///                  name,class,race,level,quests,flags,free slots
     ///
     /// Flags: `o` in the world, `g` in your party, `s` same level as you, `b` behind (you
     /// carry a quest it has not got). Compact on purpose: this rides a whisper, and the
@@ -3217,6 +3567,7 @@ namespace
             std::string name;
             std::string flags;
             uint32 classId = 0;
+            uint32 raceId = 0;
             uint32 level = 0;
             uint32 quests = 0;
             uint32 freeSlots = 0;
@@ -3225,6 +3576,7 @@ namespace
             {
                 name = bot->GetName();
                 classId = uint32(bot->getClass());
+                raceId = uint32(bot->getRace());
                 level = bot->GetLevel();
                 quests = CountQuestLog(bot);
                 int32 const free = int32(bot->GetFreeInventorySpace());
@@ -3253,8 +3605,9 @@ namespace
             if (!line.empty())
                 line += "|";
 
-            line += SafePinName(name) + "," + std::to_string(classId) + "," + std::to_string(level) + "," +
-                    std::to_string(quests) + "," + (flags.empty() ? "-" : flags) + "," + std::to_string(freeSlots);
+            line += SafePinName(name) + "," + std::to_string(classId) + "," + std::to_string(raceId) + "," +
+                    std::to_string(level) + "," + std::to_string(quests) + "," +
+                    (flags.empty() ? "-" : flags) + "," + std::to_string(freeSlots);
         }
 
         return line;
@@ -3326,7 +3679,7 @@ namespace
 
             line += chunks[i];
 
-            if (Player* speaker = ResolveCompanion(owner, compReport))
+            if (Player* speaker = ResolveProtocolSpeaker(owner))
                 speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
         }
 
@@ -3432,6 +3785,208 @@ namespace
         }
     }
 
+    // -----------------------------------------------------------------------
+    // releasing a companion back to the pool
+    //
+    // The last piece that used to belong to mod-wowlegends. Nothing here reads or writes
+    // its tables: the ledger this module consults and writes is its own.
+    // -----------------------------------------------------------------------
+
+    bool g_poolLedgerReady = false;
+
+    void EnsurePoolLedger()
+    {
+        if (g_poolLedgerReady)
+            return;
+
+        CharacterDatabase.DirectExecute(
+            "CREATE TABLE IF NOT EXISTS wowlegends_companion_pool ("
+            " bot_guid INT UNSIGNED NOT NULL,"
+            " released_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            " reason VARCHAR(32) NOT NULL DEFAULT '',"
+            " PRIMARY KEY (bot_guid)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        g_poolLedgerReady = true;
+    }
+
+    void LedgerRelease(uint32 botGuid, char const* reason)
+    {
+        EnsurePoolLedger();
+
+        CharacterDatabase.DirectExecute(
+            "INSERT INTO wowlegends_companion_pool (bot_guid, released_at, reason) VALUES ({}, NOW(), '{}') "
+            "ON DUPLICATE KEY UPDATE released_at = NOW(), reason = '{}'",
+            botGuid, reason, reason);
+    }
+
+    /// A neutral name for a body that belongs to nobody. Unique per body, inside the
+    /// 12-character limit, and obviously not a player.
+    std::string PoolNameFor(uint32 botGuid)
+    {
+        // Two letters and the id: pool guids run to eight digits, and a character name is
+        // capped at twelve. "Zzpool" + guid would be fourteen and the rename would be
+        // refused - which is how a release could fail at the very last step.
+        return "Zz" + std::to_string(botGuid);
+    }
+
+    struct PendingRelease
+    {
+        uint32 ownerGuid = 0;
+        uint32 botGuid = 0;
+        std::string name;
+        uint32 deadline = 0;
+        bool needsDismiss = false;   // still in the world; send it away from the update tick
+    };
+
+    std::vector<PendingRelease> g_pendingRelease;
+
+    /// Tell the owner what happened to a release, once it is really done.
+    void ReportRelease(PendingRelease const& pending, bool ok, std::string const& why)
+    {
+        LOG_INFO("server.loading", "[CompanionQuestSync] release {} ({}) {}: {}",
+                 pending.name, pending.botGuid, ok ? "complete" : "FAILED", why);
+
+        Player* owner = ObjectAccessor::FindConnectedPlayer(
+            ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+
+        if (!owner || !owner->GetSession())
+            return;
+
+        ChatHandler handler(owner->GetSession());
+
+        if (ok)
+            handler.PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r has gone back to the pool. "
+                                    "The body is free for anyone; you can mint another any time.",
+                                    pending.name);
+        else
+            handler.PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r could not be released - {}. "
+                                    "Try |cffffff00.companionsync release {}|r again.",
+                                    pending.name, why, pending.name);
+    }
+
+    /// Finish a release once the body is out of the world, or give up and say so.
+    void CheckPendingReleases()
+    {
+        if (g_pendingRelease.empty())
+            return;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        for (auto it = g_pendingRelease.begin(); it != g_pendingRelease.end();)
+        {
+            PendingRelease pending = *it;
+
+            Player* bot = FindCompanionPlayer(pending.botGuid);
+            bool const online = bot && bot->IsInWorld();
+
+            // still in the world: send it away and give it time to actually go
+            if (online && pending.needsDismiss)
+            {
+                Player* owner = ObjectAccessor::FindConnectedPlayer(
+                    ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] release step 4: dismissing {} from the update tick", pending.name);
+
+                if (owner)
+                    DispatchPlayerbots(owner, "remove " + pending.name);
+
+                it->needsDismiss = false;
+                it->deadline = now + 15;
+                ++it;
+                continue;
+            }
+
+            if (online && now < pending.deadline)
+            {
+                ++it;
+                continue;
+            }
+
+            if (online)
+            {
+                // Still with us long after the dismiss: stop asking, tell the player.
+                it = g_pendingRelease.erase(it);
+                ReportRelease(pending, false, "it is still in the world");
+                continue;
+            }
+
+            it = g_pendingRelease.erase(it);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] release step 5: finalising {} ({})",
+                     pending.name, pending.botGuid);
+
+            ResetPoolBody(pending.botGuid);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] release step 6: body reset");
+
+            if (!RenameBody(pending.botGuid, PoolNameFor(pending.botGuid)))
+            {
+                ReportRelease(pending, false, "the body could not be renamed back");
+                continue;
+            }
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] release step 7: renamed, unbinding");
+
+            CharacterDatabase.DirectExecute("DELETE FROM {} WHERE bot_guid = {}",
+                                            g_cfg.bindingTable, pending.botGuid);
+            LedgerRelease(pending.botGuid, "release");
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] release step 8: ledger written");
+
+            PurgeCompanionState(pending.botGuid);
+            InvalidateCompanionGuid(pending.ownerGuid);
+
+            if (Player* owner = ObjectAccessor::FindConnectedPlayer(
+                    ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid)))
+            {
+                if (g_cfg.pinSync)
+                {
+                    SendPinSync(owner, true);
+                    SendCompSync(owner, true);
+                    SendPoolStock(owner, true);
+                }
+            }
+
+            ReportRelease(pending, true, "back in the pool");
+        }
+    }
+
+    /// Start a release: dismiss the body, then finish when it is really gone.
+    bool BeginRelease(Player* owner, uint32 botGuid, std::string& error)
+    {
+        LOG_INFO("server.loading", "[CompanionQuestSync] release step 1: begin (owner {}, bot {})",
+                 owner ? owner->GetGUID().GetCounter() : 0, botGuid);
+        for (PendingRelease const& pending : g_pendingRelease)
+            if (pending.botGuid == botGuid)
+            {
+                error = "that release is already under way";
+                return false;
+            }
+
+        std::string const name = CompanionNameFor(botGuid);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] release step 2: name resolved ({})", name);
+
+        // Never dispatch playerbots from here. `bot remove` deletes the bot synchronously,
+        // and doing that inside a chat command handler took the worldserver down: the player
+        // was disconnected and the process died with no dump. The dismiss is queued and sent
+        // from the update tick, where the rest of this module's work already happens.
+        Player* bot = FindCompanionPlayer(botGuid);
+        bool const online = bot && bot->IsInWorld();
+
+        if (online)
+            LOG_INFO("server.loading",
+                     "[CompanionQuestSync] release step 3: body is out, dismiss queued for the next tick");
+
+        g_pendingRelease.push_back({ owner->GetGUID().GetCounter(), botGuid, name,
+                                     static_cast<uint32>(time(nullptr)) + 15, online });
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} releasing {} ({})", owner->GetName(), name, botGuid);
+        return true;
+    }
+
     /// Sweep every companion bound to this owner.
     ///
     /// One pass per companion, aggregated into a single report so callers that only
@@ -3526,9 +4081,10 @@ public:
         if (!g_cfg.enable || !g_tableReady)
             return;
 
-        // Summon and dismiss outcomes, independent of the sync timer: a player who asked
-        // for a companion should not wait for the next sweep to learn it did not work.
+        // Summon, dismiss and release outcomes, independent of the sync timer: a player who
+        // asked for something should not wait for the next sweep to learn it did not work.
         CheckPendingSummons();
+        CheckPendingReleases();
 
         if (!g_cfg.autoSync)
             return;
@@ -3671,7 +4227,10 @@ private:
         g_tableReady = CheckBindingTable();
 
         if (g_tableReady)
+        {
             ProbeBindingTable();
+            EnsurePoolLedger();
+        }
 
         if (!g_tableReady)
         {
@@ -3719,6 +4278,181 @@ class CompanionQuestSyncCommandScript : public CommandScript
 public:
     CompanionQuestSyncCommandScript() : CommandScript("CompanionQuestSyncCommandScript") { }
 
+    // -----------------------------------------------------------------------
+    // .companionadmin - the same behaviour, for a named player, from the console
+    // -----------------------------------------------------------------------
+
+    static std::vector<std::string> SplitArgs(char const* args, size_t want)
+    {
+        std::string text = args ? args : "";
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+
+        while (pos < text.size() && tokens.size() < want)
+        {
+            size_t const start = text.find_first_not_of(" \t", pos);
+            if (start == std::string::npos)
+                break;
+
+            size_t const end = text.find_first_of(" \t", start);
+            tokens.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+            pos = end == std::string::npos ? text.size() : end;
+        }
+
+        return tokens;
+    }
+
+    /// The player a console command acts on, online or not.
+    ///
+    /// Support work happens when people are not logged in, and so does testing: a release
+    /// that only works while the owner is in the world is a release nobody can fix at 2am.
+    /// When the player is offline the body is not dismissed first (there is nothing to
+    /// dismiss) and the reset runs on the next tick.
+    static Player* ConsoleTarget(ChatHandler* handler, std::string const& name, uint32& ownerGuid)
+    {
+        Player* player = ObjectAccessor::FindPlayerByName(name);
+        if (player && player->IsInWorld())
+        {
+            ownerGuid = player->GetGUID().GetCounter();
+            return player;
+        }
+
+        std::string escaped = name;
+        CharacterDatabase.EscapeString(escaped);
+
+        if (QueryResult row = CharacterDatabase.Query("SELECT guid FROM characters WHERE name = '{}'", escaped))
+        {
+            ownerGuid = row->Fetch()[0].Get<uint32>();
+            handler->PSendSysMessage("|cffaaaaaaCompanion quest sync|r: %s is offline - acting on their saved companions.",
+                                     name.c_str());
+            return nullptr;
+        }
+
+        handler->PSendSysMessage("|cffff8000Companion quest sync|r: no character called %s.", name.c_str());
+        return nullptr;
+    }
+
+    static Player* ConsoleTarget(ChatHandler* handler, std::string const& name)
+    {
+        uint32 ignored = 0;
+        return ConsoleTarget(handler, name, ignored);
+    }
+
+    /// .companionadmin create <player> <race> <class> <name>
+    static bool HandleAdminCreate(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 4);
+        if (a.size() < 4)
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin create <player> <race> <class> <name>");
+            return true;
+        }
+
+        Player* player = ConsoleTarget(handler, a[0]);
+        if (!player)
+            return true;
+
+        uint8 const race = ParseRaceToken(a[1]);
+        uint8 const clazz = ParseClassToken(a[2]);
+        if (!race || !clazz)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: unknown race or class.");
+            return true;
+        }
+
+        uint32 botGuid = 0;
+        std::string error;
+        if (!CreateCompanion(player, race, clazz, a[3], botGuid, error))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s.", error.c_str());
+            return true;
+        }
+
+        SendCompSync(player, true);
+        SendPoolStock(player, true);
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: created %s (body %u) for %s.",
+                                 a[3].c_str(), botGuid, player->GetName().c_str());
+        return true;
+    }
+
+    /// .companionadmin release <player> <companion>
+    static bool HandleAdminRelease(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 2);
+        if (a.size() < 2)
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin release <player> <companion>");
+            return true;
+        }
+
+        Player* player = ConsoleTarget(handler, a[0]);
+        if (!player)
+            return true;
+
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s has no companions.", a[0].c_str());
+            return true;
+        }
+
+        uint32 const botGuid = ResolveCompanion(player, a[1], bound);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s is not one of %s's companions.",
+                                     a[1].c_str(), a[0].c_str());
+            return true;
+        }
+
+        std::string error;
+        if (!BeginRelease(player, botGuid, error))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s.", error.c_str());
+            return true;
+        }
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: releasing %s (body %u) for %s.",
+                                 a[1].c_str(), botGuid, player->GetName().c_str());
+        return true;
+    }
+
+    /// .companionadmin pool <player> - push the stock line to that player's client.
+    static bool HandleAdminPool(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 1);
+        if (a.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin pool <player>");
+            return true;
+        }
+
+        Player* player = ConsoleTarget(handler, a[0]);
+        if (!player)
+            return true;
+
+        SendPoolStock(player, true);
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: pool stock sent to %s.", a[0].c_str());
+        return true;
+    }
+
+    static ChatCommandTable GetAdminCommands()
+    {
+        static ChatCommandTable adminTable =
+        {
+            { "create",  HandleAdminCreate,  SEC_ADMINISTRATOR, Console::Yes },
+            { "release", HandleAdminRelease, SEC_ADMINISTRATOR, Console::Yes },
+            { "pool",    HandleAdminPool,    SEC_ADMINISTRATOR, Console::Yes },
+        };
+
+        static ChatCommandTable baseTable =
+        {
+            { "companionadmin", adminTable },
+        };
+
+        return baseTable;
+    }
+
     ChatCommandTable GetCommands() const override
     {
         static ChatCommandTable companionSyncTable =
@@ -3727,6 +4461,9 @@ public:
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
+            { "create", HandleCreateCommand, SEC_PLAYER, Console::No },
+            { "pool",   HandlePoolCommand,   SEC_PLAYER, Console::No },
+            { "release", HandleReleaseCommand, SEC_PLAYER, Console::No },
             { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -3739,6 +4476,10 @@ public:
         {
             { "companionsync", companionSyncTable },
         };
+
+        // admin verbs live in their own command so a player's table stays SEC_PLAYER
+        for (ChatCommand const& admin : GetAdminCommands())
+            baseTable.push_back(admin);
 
         return baseTable;
     }
@@ -3923,6 +4664,175 @@ public:
 
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: stopped tracking |cffffff00{}|r. The bot is "
                                  "still yours; it simply does not follow your quest log any more.", name);
+        return true;
+    }
+
+    /// Race and class by name or id, so a player can type and the addon can send numbers.
+    static uint8 ParseRaceToken(std::string token)
+    {
+        for (char& c : token)
+            c = char(std::tolower(c));
+
+        static std::map<std::string, uint8> const byName = {
+            { "human", 1 }, { "orc", 2 }, { "dwarf", 3 }, { "nightelf", 4 }, { "undead", 5 },
+            { "scourge", 5 }, { "tauren", 6 }, { "gnome", 7 }, { "troll", 8 },
+            { "bloodelf", 10 }, { "draenei", 11 },
+        };
+
+        auto const itr = byName.find(token);
+        if (itr != byName.end())
+            return itr->second;
+
+        uint32 const id = uint32(atoi(token.c_str()));
+        return id && id <= 11 ? uint8(id) : 0;
+    }
+
+    static uint8 ParseClassToken(std::string token)
+    {
+        for (char& c : token)
+            c = char(std::tolower(c));
+
+        static std::map<std::string, uint8> const byName = {
+            { "warrior", 1 }, { "paladin", 2 }, { "hunter", 3 }, { "rogue", 4 }, { "priest", 5 },
+            { "deathknight", 6 }, { "dk", 6 }, { "shaman", 7 }, { "mage", 8 }, { "warlock", 9 },
+            { "druid", 11 },
+        };
+
+        auto const itr = byName.find(token);
+        if (itr != byName.end())
+            return itr->second;
+
+        uint32 const id = uint32(atoi(token.c_str()));
+        return id && id <= 11 ? uint8(id) : 0;
+    }
+
+    /// .companionsync create <race> <class> <name> - mint a companion from the pool.
+    static bool HandleCreateCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable || !g_cfg.allowCreate)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: creating companions is disabled here.");
+            return true;
+        }
+
+        std::string text = args ? args : "";
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+
+        while (pos < text.size() && tokens.size() < 3)
+        {
+            size_t const start = text.find_first_not_of(" \t", pos);
+            if (start == std::string::npos)
+                break;
+
+            size_t const end = text.find_first_of(" \t", start);
+            tokens.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+            pos = end == std::string::npos ? text.size() : end;
+        }
+
+        if (tokens.size() < 3)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00.companionsync create <race> <class> <name>|r "
+                                     "- for example: create human priest Healy");
+            return true;
+        }
+
+        uint8 const race = ParseRaceToken(tokens[0]);
+        uint8 const clazz = ParseClassToken(tokens[1]);
+
+        if (!race || !clazz)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: I do not know that race or class. "
+                                     "Races: human, orc, dwarf, nightelf, undead, tauren, gnome, troll, bloodelf, draenei. "
+                                     "Classes: warrior, paladin, hunter, rogue, priest, deathknight, shaman, mage, warlock, druid.");
+            return true;
+        }
+
+        uint32 botGuid = 0;
+        std::string error;
+
+        if (!CreateCompanion(player, race, clazz, tokens[2], botGuid, error))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
+            return true;
+        }
+
+        std::vector<uint32> bound;
+        FindCompanions(player->GetGUID().GetCounter(), bound);
+
+        SendCompSync(player, true);
+        SendPoolStock(player, true);
+
+        DispatchPlayerbots(player, "add " + tokens[2]);
+        g_pendingSummon[botGuid] = { botGuid, player->GetGUID().GetCounter(), tokens[2],
+                                     static_cast<uint32>(time(nullptr)) + 10, true };
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r is yours - {}/{} companions. "
+                                 "Calling it to your side; its quests follow yours from now on.",
+                                 tokens[2], uint32(bound.size()), uint32(kMaxCompanions));
+        return true;
+    }
+
+    /// .companionsync pool - what the pool can still hand out, per race and class.
+    static bool HandlePoolCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        SendPoolStock(player, true);
+
+        std::string const line = BuildPoolStockLine();
+        if (line.empty())
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the pool is empty right now.");
+
+        return true;
+    }
+
+    /// .companionsync release <name> - hand a companion back to the pool for good.
+    static bool HandleReleaseCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::string const name = TrimArg(args);
+        if (name.empty())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: which companion? "
+                                     "|cffffff00.companionsync release <name>|r");
+            return true;
+        }
+
+        std::vector<uint32> bound;
+        if (!g_cfg.enable || !FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        uint32 const botGuid = ResolveCompanion(player, name, bound);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.",
+                                     name);
+            return true;
+        }
+
+        std::string error;
+        if (!BeginRelease(player, botGuid, error))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
+            return true;
+        }
+
+        handler->PSendSysMessage("|cffffff00Companion quest sync|r: releasing |cffffff00{}|r - it leaves the world, "
+                                 "is wiped back to level 1 and returns to the pool. This cannot be undone.",
+                                 CompanionNameFor(botGuid));
         return true;
     }
 
@@ -4427,6 +5337,7 @@ public:
         {
             SendPinSync(player, true);
             SendCompSync(player, true);
+            SendPoolStock(player, true);
         }
 
         // Sweep once immediately: the timer would leave the first thirty seconds of a
@@ -4464,6 +5375,7 @@ public:
 
         g_lastPinSync.erase(ownerGuid);
         g_lastCompSync.erase(ownerGuid);
+        g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);
         g_sessionRefused.erase(ownerGuid);

@@ -142,6 +142,36 @@ CompanionQuestSync.BindingTable = wowlegends_companion_multi
 then `.reload config`. `sql/multi-companion.sql` does all of that and carries your
 existing bindings across, so nothing is lost on the switch.
 
+### Creating and releasing companions
+
+Everything a companion needs happens in this module; `mod-wowlegends` is not required and
+is never written to. Creating claims a body from the playerbots pool (the same AddClass
+accounts that module uses), wipes it, names it, binds it and calls it out. Releasing does
+the reverse: dismiss, blank, rename to a neutral pool name (`Zz<guid>`), unbind, and record
+it in this module's own ledger.
+
+| Command | Effect |
+|---|---|
+| `.companionsync create <race> <class> <name>` | Mint a companion from the pool |
+| `.companionsync pool` | What the pool can still serve, per race and class |
+| `.companionsync release <name>` | Return a companion to the pool for good |
+
+```
+CompanionQuestSync.AllowCreate = 1
+```
+
+All three are hidden behind buttons in `WLCompanionGroup`, which is the intended way to
+reach them.
+
+**Independence.** The only reads of another module's data are the playerbots account list
+(`playerbots_account_type`) and — while it exists — `wowlegends_companion`, used to avoid
+claiming a body that module already owns. Both are `SELECT`s: if `mod-wowlegends` is absent,
+the lookups fail harmlessly and creation still works. Its tables are never written, its
+commands are never called, and its behaviour is unchanged.
+
+Releases are recorded in `wowlegends_companion_pool` (`bot_guid`, `released_at`, `reason`),
+created on first use and consulted for a 15-minute cooldown on re-claiming a body.
+
 ### What the client is told
 
 An addon cannot ask the server anything: commands go one way. Everything the client knows
