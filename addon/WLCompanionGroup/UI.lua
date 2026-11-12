@@ -565,10 +565,16 @@ end
 -- minimap's own language for "another tracker", and against the clock ring it read as a stray
 -- lens. A flat dark plate with a hairline border and the icon inset looks like a button that
 -- belongs to an interface, and it still sits in the minimap corner where people look for it.
-local launcher = CreateFrame("Button", "WLCompanionGroupLauncher", Minimap)
+local launcher
+
+local function CreateLauncher()
+    -- Parent to UIParent and anchor to the minimap: a child of Minimap inherits its draw
+    -- order and can end up behind the map itself on clients with a restyled minimap.
+    local anchor = Minimap or UIParent
+    launcher = CreateFrame("Button", "WLCompanionGroupLauncher", UIParent)
 launcher:SetSize(24, 24)
-launcher:SetPoint("TOPLEFT", Minimap, "TOPLEFT", 6, -60)
-launcher:SetFrameStrata("MEDIUM")
+launcher:SetPoint("TOPLEFT", anchor, "TOPLEFT", 6, -60)
+launcher:SetFrameStrata("HIGH")
 launcher:SetBackdrop({
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
     edgeSize = 9,
@@ -597,6 +603,7 @@ launcher.badge:SetJustifyH("RIGHT")
 launcher.badge:Hide()
 
 local function RefreshLauncherBadge()
+    if not (launcher and launcher.badge) then return end
     local count = G.companions and #G.companions or 0
     if count > 0 then
         launcher.badge:SetText("|cffffd200" .. count .. "|r")
@@ -625,6 +632,16 @@ launcher:SetScript("OnLeave", function(self)
     self:SetBackdropBorderColor(unpack(BORDER_IDLE))
     GameTooltip:Hide()
 end)
+
+    return launcher
+end
+
+-- A button that fails to build must not take the rest of the window with it, and it must not
+-- vanish silently: the first version died on a bad escape and the only symptom was no button.
+local built, failure = pcall(CreateLauncher)
+if not built then
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff6a6aWL Companion Group|r launcher failed: " .. tostring(failure))
+end
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_ENTERING_WORLD")
