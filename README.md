@@ -102,13 +102,20 @@ the first. What changes:
 - `.companionsync quests` and `.companionsync pins` walk the whole binding;
   `.companionsync status` still describes one companion and says how many are bound.
 
-What is not done yet:
+Also handled:
 
-- per-companion rekeying of the owner-keyed state maps (session tallies, marked NPCs,
-  pin-sync dedupe). With several companions those are shared, so a hand-in by one can
-  suppress a line from another in the same window;
-- one marker per location when two companions need the same giver;
-- the map still draws every companion's pins at once rather than a selected one.
+- the pin payload is built once per owner for every companion, merged by coordinate, so
+  two companions needing the same giver produce one marker reading "A + B";
+- turn-in markers are collected across companions and applied once, so one companion's
+  pass cannot clear another's marker;
+- the pass memo is keyed per companion;
+- the addon filters per companion with `/wlpins only <name>` and `/wlpins all`.
+
+Still open:
+
+- the owner-level session tally, whisper throttle and pin dedupe remain shared. Sharing
+  the throttle is deliberate (the player should not hear four bots at once), but the
+  session line sums every companion rather than naming them.
 
 Bind extra companions by adding rows to `wowlegends_companion`; the existing
 `.companion` commands manage one at a time.

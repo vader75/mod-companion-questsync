@@ -21,6 +21,7 @@ WLPins.offsetX = 0
 WLPins.offsetY = 0
 WLPins.pins = {}
 WLPins.frames = {}
+WLPins.only = nil   -- show one companion's pins, or all
 
 -- shape: "round" (hand-in) or "square" (work to do)
 local STYLE = {
@@ -100,16 +101,17 @@ local function LoadDB()
     end
 end
 
-local function AddPin(x, y, style, quest)
+local function AddPin(x, y, style, quest, companion)
     for _, pin in ipairs(WLPins.pins) do
         if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5 then
             pin.at, pin.style, pin.quest, pin.zone = time(), style, quest, CurrentZoneName()
+            pin.companion = companion
             SaveDB(); WLPins:Redraw()
             return
         end
     end
     table.insert(WLPins.pins, { x = x, y = y, at = time(), style = style,
-                                quest = quest, zone = CurrentZoneName() })
+                                quest = quest, companion = companion, zone = CurrentZoneName() })
     SaveDB(); WLPins:Redraw()
 end
 
@@ -126,10 +128,12 @@ local function SyncPins(payload)
             for _, pin in ipairs(WLPins.pins) do
                 if string.lower(pin.quest or "") == key then kept = pin.at end
             end
+            local title, companion = SplitCompanion(name)
             table.insert(fresh, {
                 x = tonumber(x), y = tonumber(y),
                 style = (style == "h") and STYLE.handin or STYLE.gather,
-                quest = name, at = kept or time(), zone = CurrentZoneName(),
+                quest = title, companion = companion,
+                at = kept or time(), zone = CurrentZoneName(),
             })
         end
     end
@@ -235,6 +239,12 @@ function WLPins:Redraw()
     end
 
     for i, pin in ipairs(self.pins) do
+        -- "/wlpins only <name>" narrows the map to one companion; the others are hidden
+        -- but kept, so clearing the filter brings them straight back.
+        if WLPins.only and pin.companion and WLPins.only ~= string.lower(pin.companion) then
+            if WLPins.frames[i] then WLPins.frames[i]:Hide() end
+            shown = shown + 0
+        else
         -- Reuse the frame at this index: creating a new one per redraw orphaned the old
         -- one, still parented to the map and still visible, so every zoom left another
         -- marker behind that nothing could hide.
@@ -282,6 +292,7 @@ function WLPins:Redraw()
         f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
         table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width })
 
+        end   -- /wlpins only
         shown = shown + 1
     end
 
@@ -365,7 +376,8 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
 
         local x, y = ParseCoords(text)
         if x and y then
-            AddPin(x, y, Classify(text), ParseQuestName(text) or "companion quest")
+            local title, companion = SplitCompanion(ParseQuestName(text) or "companion quest")
+            AddPin(x, y, Classify(text), title, companion)
         end
 
     elseif event == "WORLD_MAP_UPDATE" then
@@ -412,6 +424,22 @@ SlashCmdList["WLPINS"] = function(msg)
                 WLPins.offsetX, WLPins.offsetY))
         end
 
+    elseif string.find(msg, "^only") then
+        local name = string.match(msg, "^only%s+(%S+)")
+        if name then
+            WLPins.only = string.lower(name)
+            WLPins:Redraw()
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing only " .. name .. ".")
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing only " ..
+                (WLPins.only or "everyone") .. " - /wlpins only <name>, /wlpins all")
+        end
+
+    elseif msg == "all" then
+        WLPins.only = nil
+        WLPins:Redraw()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing every companion.")
+
     elseif string.find(msg, "^life") then
         local minutes = tonumber(string.match(msg, "^life%s+(%d+)"))
         if minutes and minutes > 0 then
@@ -452,6 +480,7 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins life [minutes] - how long a pin lives (default 30)")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins only <name> | all - one companion's pins or everyone's")
         DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
     end
 end

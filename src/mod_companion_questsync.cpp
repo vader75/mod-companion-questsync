@@ -754,7 +754,7 @@ namespace
         return "an unknown zone";
     }
 
-    void SendPinSync(Player* owner, Player* bot, bool force);  // defined below
+    void SendPinSync(Player* owner, bool force);  // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
     ///
@@ -796,14 +796,18 @@ namespace
     /// quest the player has finished but the companion still owes shows up with the
     /// turn-in icon on that NPC, which is as close to a differently coloured pin as
     /// this client allows. Only for NPCs the player can already see (80 yd).
-    void MarkOwnErrands(Player* owner, Player* bot)
+    /// Collect the NPCs this companion still needs, without touching their icons yet.
+    ///
+    /// Marking and clearing in one call is wrong with several companions: the second
+    /// companion's pass would clear the first one's markers, so a giver only one of
+    /// them needs flickered with every sweep. Collect into the owner's union here and
+    /// apply it once with ApplyMarks().
+    void MarkOwnErrands(Player* owner, Player* bot, std::set<uint64>& wanted)
     {
         if (!g_cfg.mapPins || !owner->PlayerTalkClass)
             return;
 
         std::string marked;
-        std::set<uint64> wanted;
-        uint32 const ownerGuid = owner->GetGUID().GetCounter();
 
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
         {
@@ -839,15 +843,22 @@ namespace
 
             WalkToGiver(owner, bot, npc);
 
-            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, npc->GetGUID());
             wanted.insert(npc->GetGUID().GetRawValue());
             marked += std::to_string(questId) + ",";
         }
+    }
 
-        // Clear the icons this module forced and no longer needs. Without this the
-        // turn-in "?" stayed over the giver after the companion had already handed the
-        // quest in - a marker for work that no longer exists, and a gold "?" at an NPC
-        // with nothing to offer, which read as a broken quest rather than a signpost.
+    /// Apply the owner's union of markers, then clear the ones no companion needs.
+    void ApplyMarks(Player* owner, std::set<uint64> const& wanted)
+    {
+        if (!g_cfg.mapPins || !owner->PlayerTalkClass)
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+
+        for (uint64 const guid : wanted)
+            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, ObjectGuid(guid));
+
         std::set<uint64>& previously = g_markedNpcs[ownerGuid];
         for (uint64 const stale : previously)
         {
@@ -859,9 +870,9 @@ namespace
 
         previously = wanted;
 
-        if (!marked.empty() && g_cfg.debug >= 2)
-            LOG_INFO("server.loading", "[CompanionQuestSync] marked the companion's turn-in(s) for {}",
-                     owner->GetName());
+        if (g_cfg.debug >= 2 && !wanted.empty())
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} turn-in marker(s) on {} map",
+                     uint32(wanted.size()), owner->GetName());
     }
 
     /// Put the companion's open quest areas on the owner's map.
@@ -2177,7 +2188,7 @@ namespace
 
     /// Copy the owner's quest log onto the companion. Returns what happened so
     /// both the command output and the debug log can use it.
-    SyncReport SyncCompanionFor(Player* owner, uint32 botGuid)
+    SyncReport SyncCompanionFor(Player* owner, uint32 botGuid, std::set<uint64>& marks)
     {
         // Measured, not guessed: Debug >= 2 logs how long a whole pass takes, which is
         // the number that matters when asking what this module costs the server.
@@ -2358,7 +2369,8 @@ namespace
         }
 
 
-        auto const memo = g_passMemo.find(ownerGuid);
+        // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
+        auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
         {
             // Nothing changed and the last pass had nothing left over: the same
@@ -2386,14 +2398,14 @@ namespace
             if (g_cfg.debug >= 1)
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} levelled; quest sync deferred to the next pass", bot->GetName());
 
-            g_passMemo[ownerGuid] = { digest, false };   // levels moved: always re-run
+            g_passMemo[botGuid] = { digest, false };   // levels moved: always re-run
             return report;
         }
 
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
         SendQuestPins(owner, bot);
-        MarkOwnErrands(owner, bot);
+        MarkOwnErrands(owner, bot, marks);
 
         for (uint32 const questId : ownerQuests)
         {
@@ -2443,11 +2455,10 @@ namespace
         }
 
         // Authoritative pin list, so a stale marker cannot survive a desync.
-        SendPinSync(owner, bot, false);
 
         bool const clean = report.added == 0 && report.completed == 0 && report.dropped == 0 &&
                            report.levelFrom == 0 && report.skipped.empty();
-        g_passMemo[ownerGuid] = { QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull), clean };
+        g_passMemo[botGuid] = { QuestLogDigest(owner) ^ (QuestLogDigest(bot) * 1099511628211ull), clean };
         return report;
     }
 
@@ -2459,69 +2470,111 @@ namespace
     /// h = it can hand that quest in now, g = it still has work there. A pin that
     /// is not in this line is not real, which is what lets the map clean up after a
     /// desync: a whisper lost to a rate limit, a logout, or an abandoned quest.
-    std::string BuildPinLine(Player* owner, Player* bot)
+    /// The whole map, for every companion bound to this owner.
+    ///
+    /// One payload per owner, not one per companion: the addon treats it as the whole
+    /// truth and deletes whatever it does not mention, so two companions sending their
+    /// own payloads would erase each other on every pass.
+    ///
+    /// Entries sharing a coordinate are merged into one marker with both quest names,
+    /// because a hand-in both companions need is one place to walk to, not two pins on
+    /// the same tile.
+    std::string BuildPinLine(Player* owner)
     {
-        std::string line;
-        uint32 count = 0;
-
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        struct Entry
         {
-            uint32 const questId = bot->GetQuestSlotQuestId(slot);
-            if (!questId)
+            std::string numbers;
+            char style;
+            std::string title;
+        };
+
+        std::vector<Entry> entries;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return std::string();
+
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
                 continue;
 
-            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-            if (!quest)
-                continue;
-
-            std::string coords;
-            char style = 'g';
-
-            if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
             {
-                EnderSpot const& spot = FindQuestEnder(questId);
+                uint32 const questId = bot->GetQuestSlotQuestId(slot);
+                if (!questId)
+                    continue;
 
-                // Only pin a giver standing in the same zone. Stormwind and Elwynn share
-                // map 0, so a map check alone let Morgan Pestle (Stormwind) be pinned on
-                // the Elwynn map at a plausible-looking but wrong spot - "26,39" for a
-                // hand-in that is two zones away.
-                if (spot.found && spot.map == bot->GetMapId() && spot.zone == bot->GetZoneId())
-                    coords = MapCoords(spot.x, spot.y, spot.zone);
+                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
 
-                style = 'h';
+                std::string coords;
+                char style = 'g';
+
+                if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
+                {
+                    EnderSpot const& spot = FindQuestEnder(questId);
+
+                    // Only pin a giver standing in the same zone. Stormwind and Elwynn
+                    // share map 0, so a map check alone let Morgan Pestle be pinned on
+                    // the Elwynn map at a plausible-looking but wrong spot.
+                    if (spot.found && spot.map == bot->GetMapId() && spot.zone == bot->GetZoneId())
+                        coords = MapCoords(spot.x, spot.y, spot.zone);
+
+                    style = 'h';
+                }
+
+                if (coords.empty())
+                    coords = PoiCoords(bot, quest);
+
+                if (coords.empty())
+                    continue;
+
+                // "map 43, 65" -> "43,65"
+                std::string numbers = coords.substr(4);
+                numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
+                                             [](char c) { return c == ' '; }), numbers.end());
+
+                if (numbers.empty())
+                    continue;
+
+                std::string title = quest->GetTitle();
+                if (title.size() > 22)
+                    title = title.substr(0, 20) + "..";
+
+                // a title cannot carry the separators, or the addon would split it
+                std::replace(title.begin(), title.end(), '|', '/');
+                std::replace(title.begin(), title.end(), '=', ':');
+
+                if (g_multiCompanion)
+                    title += "@" + bot->GetName();
+
+                bool merged = false;
+                for (Entry& existing : entries)
+                {
+                    if (existing.numbers != numbers || existing.style != style)
+                        continue;
+
+                    existing.title += " + " + title;
+                    merged = true;
+                    break;
+                }
+
+                if (!merged)
+                    entries.push_back({ numbers, style, title });
             }
+        }
 
-            if (coords.empty())
-                coords = PoiCoords(bot, quest);
+        std::string line;
 
-            if (coords.empty())
-                continue;
-
-            // "map 43, 65" -> "43,65"
-            std::string numbers = coords.substr(4);
-            numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
-                                         [](char c) { return c == ' '; }), numbers.end());
-
-            if (numbers.empty())
-                continue;
-
-            std::string title = quest->GetTitle();
-            if (title.size() > 22)
-                title = title.substr(0, 20) + "..";
-
-            // a title cannot carry the separators, or the addon would split it
-            std::replace(title.begin(), title.end(), '|', '/');
-            std::replace(title.begin(), title.end(), '=', ':');
-
+        for (Entry const& entry : entries)
+        {
             if (!line.empty())
                 line += "|";
 
-            line += numbers + "," + style + "=" + title;
-
-            // Several companions need to be told apart on one map.
-            if (g_multiCompanion)
-                line += "@" + bot->GetName();
-            ++count;
+            line += entry.numbers + "," + entry.style + "=" + entry.title;
         }
 
         return line;
@@ -2529,13 +2582,14 @@ namespace
 
     /// Send the pin line when it changes, and again every ten minutes in case one
     /// was missed. A whisper, because that is the only channel the addon can read.
-    void SendPinSync(Player* owner, Player* bot, bool force = false)
+    void SendPinSync(Player* owner, bool force = false)
     {
-        if (!g_cfg.pinSync || !owner || !bot)
+        if (!g_cfg.pinSync || !owner)
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::string const payload = BuildPinLine(owner, bot);
+        std::string const payload = BuildPinLine(owner);
+        SyncReport pinReport;   // only used to resolve a speaker
 
         std::string& last = g_lastPinSync[ownerGuid];
         uint32 const now = static_cast<uint32>(time(nullptr));
@@ -2596,7 +2650,8 @@ namespace
 
             // Grey and quiet: the addon needs the line, the player does not need to read
             // it. Colour codes are stripped by WLPins before it parses.
-            bot->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+            if (Player* speaker = ResolveCompanion(owner, pinReport))
+                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
         }
 
         last = payload;
@@ -2706,9 +2761,14 @@ namespace
         aggregate.hasCompanion = true;
         g_multiCompanion = bots.size() > 1;
 
+        // One union of turn-in markers for the owner, applied after every companion has
+        // contributed: applying them per companion let the second pass clear the first
+        // companion's marker, so a giver only one of them needed flickered each sweep.
+        std::set<uint64> marks;
+
         for (uint32 const botGuid : bots)
         {
-            SyncReport const one = SyncCompanionFor(owner, botGuid);
+            SyncReport const one = SyncCompanionFor(owner, botGuid, marks);
 
             aggregate.added += one.added;
             aggregate.completed += one.completed;
@@ -2728,6 +2788,11 @@ namespace
             if (one.companionOnline)
                 aggregate.lines.push_back(DescribeReport(one));
         }
+
+        ApplyMarks(owner, marks);
+
+        // One payload for the whole owner, after every companion has had its pass.
+        SendPinSync(owner, false);
 
         return aggregate;
     }
@@ -2996,22 +3061,21 @@ public:
         std::vector<uint32> bots;
         FindCompanions(player->GetGUID().GetCounter(), bots);
 
-        uint32 sent = 0;
+        uint32 online = 0;
         for (uint32 const guid : bots)
         {
             Player* bot = FindCompanionPlayer(guid);
-            if (!bot || !bot->IsInWorld())
-                continue;
-
-            SendPinSync(player, bot, true);
-            ++sent;
+            if (bot && bot->IsInWorld())
+                ++online;
         }
 
-        if (!sent)
+        if (!online)
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
             return true;
         }
+
+        SendPinSync(player, true);
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: map pins resent - the addon rebuilds from that line.");
         return true;
     }
@@ -3258,9 +3322,8 @@ public:
 
         // Reconcile the map on the way in: a pin left behind by a session that ended
         // badly is cleared the moment the player logs back in.
-        if (uint32 botGuid = 0; g_cfg.pinSync && FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
-            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
-                SendPinSync(player, bot, true);
+        if (g_cfg.pinSync)
+            SendPinSync(player, true);
 
         // Sweep once immediately: the timer would leave the first thirty seconds of a
         // session showing whatever was true when the player last logged out.
