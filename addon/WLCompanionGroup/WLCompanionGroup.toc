@@ -2,7 +2,7 @@
 ## Title: |cffffc94dWL|r Companion Group
 ## Notes: Manage every companion bound to you - their state, their quests, and a button for each action. Fed by the server's Comp sync line; needs mod-companion-questsync.
 ## Author: Hermes
-## Version: 1.0.5
+## Version: 1.0.6
 ## SavedVariables: WLCompanionGroupDB
 
 Core.lua

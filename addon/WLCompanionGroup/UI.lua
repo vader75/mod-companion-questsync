@@ -500,13 +500,10 @@ local function CreateWindow()
     frame.empty:SetPoint("TOPLEFT", 20, -84)
     Wrap(frame.empty, WIDTH - 44)
     frame.empty:SetSpacing(4)
-    frame.empty:SetText(COL_MUTED .. "No companions yet." .. COL_RESET .. "
-
-" ..
+    frame.empty:SetText(COL_MUTED .. "No companions yet." .. COL_RESET .. "\n\n" ..
         COL_MUTED .. "Press " .. COL_RESET .. "|cffffff00+ Add companion|r" .. COL_MUTED ..
         ", pick a race and a class, then " .. COL_RESET .. "|cffffff00Create|r" .. COL_MUTED .. "." ..
-        COL_RESET .. "
-" ..
+        COL_RESET .. "\n" ..
         COL_MUTED .. "Four is the most: a party of five, counting you." .. COL_RESET)
 
     local footer = CreateFrame("Frame", nil, frame)
