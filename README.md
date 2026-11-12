@@ -1,12 +1,12 @@
 # mod-companion-questsync
 
-Keep a playerbots companion on the same quest log — and the same level — as its owner, so the two can quest together without the bot falling behind on chains or being locked out of quests by level.
+Keep playerbots companions on the same quest log — and the same level — as their owner, so they can quest together without the bots falling behind on chains or being locked out of quests by level. One companion, or several: see *Several companions*.
 
 Built for AzerothCore 3.3.5a with [mod-playerbots](https://github.com/liyunfan1223/mod-playerbots) and the WOW Legends realm, works with any module that stores an owner → bot binding in a table.
 
 ## What it does
 
-Every 30 seconds (and instantly on quest accept) the module reconciles one player's quest log onto the companion bound to them:
+Every 30 seconds (and instantly on quest accept) the module reconciles a player's quest log onto every companion bound to them:
 
 | Behaviour | Detail |
 |---|---|
@@ -15,7 +15,7 @@ Every 30 seconds (and instantly on quest accept) the module reconciles one playe
 | **Mirror completion** | When the owner's copy is `COMPLETE`, the companion's is too — but never for a quest that delivers items the companion does not actually hold (that copy could never be handed in) |
 | **Level alignment** | `LevelMode` 0/1/2: off, raise-only, or exactly the owner's level. Quests gate on `quest_template.MinLevel`, so this is what unblocks a low companion. Alignment only ever **raises**: an out-levelled companion keeps the level it earned, because `GiveLevel` downwards strips spell ranks |
 | **Self-heal** | A copy left `COMPLETE` that can never be rewarded is reopened, so its own AI collects what it owes and hands in |
-| **Hands in the turn-in** | When the companion owes a hand-in it is stepped beside the ender and asked to reward *in the same pass* — its follow AI walks it back to its owner within seconds, so a check on the next pass missed the window |
+| **Hands in the turn-in** | When the companion owes a hand-in it is stepped **beside the player, angled away from the giver** — still inside interaction range whenever the player is at the giver, and a hop the player caused reads as "caught up" where a hop to somebody else's coordinates reads as a bug. The reward (`r`) is asked for in the same pass, because its follow AI walks it back within seconds |
 | **Knows what is grey** | A quest 5–8 levels below the companion is dropped by its own quest-log cleaner, so the module declines it once ("I have levelled past 'X' – finish that one without me") instead of handing it back every pass |
 | **Bag management** | Sells vendor trash (via playerbots), wears upgrades, fills empty bag slots with a 16-slot bag, and only then bins disposable items — below `ItemKeepQuality`, never quest items, starters, equippable gear or anything a live quest needs |
 | **Explains itself** | Whispers the owner what it cannot take and why, what it still owes (`Large Candle 0/8`), where the turn-in NPC is (map coordinates), and keeps asking for help every five minutes while a quest is unfinished. Rate-limited and queued, and re-checked before they are spoken so it never complains about a level it has already reached |
@@ -43,7 +43,7 @@ companion is not a record of what it played.
 
 - AzerothCore 3.3.5a (built and tested against the WOW Legends 1.7.0 sources, core `82d3bf23`)
 - [mod-playerbots](https://github.com/liyunfan1223/mod-playerbots) — optional at compile time, required for the bag/AI features
-- A table mapping `owner_guid` → `bot_guid` (default `wowlegends_companion`; set `CompanionQuestSync.BindingTable` to yours). That default allows one companion per player — see *Several companions* for the multi-companion table
+- A table mapping `owner_guid` → `bot_guid`. The shipped default `wowlegends_companion` allows **one companion per player** (its `owner_guid` is the primary key); for several, use the table in *Several companions* and point `CompanionQuestSync.BindingTable` at it
 
 The module's own quest logic needs nothing but the core; without mod-playerbots it compiles and syncs quests, but cannot sell or equip.
 
@@ -79,6 +79,9 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | `LevelMode` | 1 | 0 off, 1 raise-only, 2 exactly the owner's level. Never lowers a companion |
 | `SyncCompletion` | 1 | Mirror the owner's `COMPLETE` status |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 every refusal |
+| `AutoSync` | 1 | Run the sweep on a timer; `.companionsync` still works with it off |
+| `RequireGrouped` | 1 | Only sync a companion that is in the player's party. With several companions, an ungrouped one is skipped |
+| `HeartbeatSeconds` | 300 | Heartbeat window (`Debug` 2); carries one line per companion |
 | `BindingTable` | `wowlegends_companion` | Owner → bot mapping table. On this branch point it at a table whose `owner_guid` is **not** unique, or only one companion is ever tracked |
 | `TidyInventory` | 1 | Managed bag space |
 | `KeepFreeSlots` | 2 | Slots to keep free |
@@ -151,12 +154,17 @@ Also handled:
 
 Still open:
 
-- the owner-level session tally, whisper throttle and pin dedupe remain shared. Sharing
-  the throttle is deliberate (the player should not hear four bots at once), but the
-  session line sums every companion rather than naming them.
+- the owner-level **session** tally sums every companion (one line per session) instead
+  of naming them, and the **whisper throttle** is shared — deliberately, since the player
+  should not hear four bots at once;
+- `RequireGrouped` is per companion, so every companion has to be in the party or it is
+  skipped. `.playerbots bot add <name>` does not always group what it adds; check
+  `group_member` if one companion looks ignored;
+- verified with two companions. Four is the design target and nothing caps it, but the
+  whisper budget and the label layout have not been exercised at that width.
 
-Bind extra companions by adding rows to `wowlegends_companion`; the existing
-`.companion` commands manage one at a time.
+Add rows to `wowlegends_companion_multi` (or whichever table `BindingTable` names). The
+`.companion` commands in mod-wowlegends still manage one companion at a time.
 
 ## Notes and limitations
 
@@ -165,7 +173,9 @@ Bind extra companions by adding rows to `wowlegends_companion`; the existing
 - Timed quests are skipped by default (`SkipTimedQuests`), as are quests the companion's class or race cannot take (reported once, not counted as failures).
 - The sweep is owner → companion only. A companion that races ahead is left alone unless `DropExtraBotQuests` is enabled, and even then only quests the owner neither holds nor has completed are dropped.
 - Map pins are best effort: the 3.3.5 client decides whether to draw POIs for quests outside its own log, so the whisper always carries map coordinates as a fallback.
-- **One companion per player.** `FindCompanionGuid` returns a single `bot_guid` for an owner, and the sweep, heartbeat, whisper funnel and pin sync are all keyed on the owner guid. A second bound companion is not tracked: it will not be levelled, will not have quests mirrored, and will not appear on the map. Supporting more than one companion needs the binding lookup to return a list, a per-bot key through those paths, and a pin format that names the companion — the addon already understands a `@Companion` suffix on pin entries (`43,65,h=Kobold Candles@Beta`) so the wire format can grow without breaking existing clients. Until that work is done, document one companion and keep the binding table to one row per player.
+- **Several companions need the multi table.** The binding lookup returns every row, but the shipped
+  `wowlegends_companion` cannot hold more than one row per owner. See *Several companions* above for the
+  table and the config switch; with the default table the module behaves exactly as it did before.
 
 ## Companion addon: map pins
 
@@ -204,12 +214,21 @@ item debt, class locks, hand-ins and grey-quest declines against the module's ow
 log:
 
 ```
-python tests/companion-sim/run.py --fresh-companion --all
+python tests/companion-sim/run.py --fresh-companion --all     # single companion
+python tests/companion-sim/multi_companion.py                 # several companions
 ```
 
 `--fresh-companion` performs the order this module needs after `.companion forget`
 (forget → restart the worldserver → create) and rotates the companion class, because
 a forgotten companion keeps its rewarded quest history.
+
+`multi_companion.py` seeds the multi table, logs the pilot in, adds both bots through the
+client and asserts, from the module's own log, that both are swept, that an accept
+reaches both, that an abandon drops from both, that whispers name the speaker, that the
+pin payload merges their markers, and that the heartbeat carries one line each. It needs
+`BindingTable` pointed at the multi table, and it clears the test quest from the owner and
+both companions before each check — a companion that already holds the quest produces no
+`+` line and looks like a failure.
 
 ## Licence
 
