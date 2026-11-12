@@ -49,9 +49,21 @@ local function Button(parent, label, width, onClick, tooltip)
     return button
 end
 
-local function Label(parent, text, x, y)
+-- 3.3.5 only wraps a font string whose width is set explicitly. Anchor a string to both
+-- horizontal edges and the client simply clips it with an ellipsis, which is how a whole
+-- instruction became "Press + Add companion, choose a race and a class, and press Creat...".
+-- Every sentence in this window goes through here so it wraps at word boundaries instead.
+local function Wrap(fontString, width)
+    fontString:SetWidth(width)
+    fontString:SetJustifyH("LEFT")
+    fontString:SetNonSpaceWrap(false)  -- break at spaces, never mid-word
+    return fontString
+end
+
+local function Label(parent, text, x, y, width)
     local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     label:SetPoint("TOPLEFT", x, y)
+    if width then Wrap(label, width) end
     label:SetText(COL_MUTED .. text .. COL_RESET)
     return label
 end
@@ -119,7 +131,7 @@ local function CreateCard(index)
 
     card.status = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     card.status:SetPoint("TOPLEFT", 16, -54)
-    card.status:SetWidth(WIDTH - 28 - TEXT_RIGHT_INSET - 24)
+    Wrap(card.status, WIDTH - 28 - TEXT_RIGHT_INSET - 24)
     card.status:SetJustifyH("LEFT")
 
     card.primary = Button(card, "Summon", 84, function()
@@ -221,8 +233,7 @@ local function CreateAddPanel()
 
     addPanel.hint = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     addPanel.hint:SetPoint("TOPLEFT", 18, -34)
-    addPanel.hint:SetPoint("TOPRIGHT", -18, -34)
-    addPanel.hint:SetJustifyH("LEFT")
+    Wrap(addPanel.hint, WIDTH - 64)
     addPanel.hint:SetText(COL_MUTED ..
         "A free body is taken from the pool, wiped to level 1, named and called to your side." .. COL_RESET)
 
@@ -300,11 +311,11 @@ local function CreateAddPanel()
     -- row 3: pool answer and the server's reply
     stockLabel = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     stockLabel:SetPoint("TOPLEFT", 20, -186)
+    Wrap(stockLabel, WIDTH - 64)
 
     serverLine = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     serverLine:SetPoint("TOPLEFT", 20, -208)
-    serverLine:SetPoint("TOPRIGHT", -20, -208)
-    serverLine:SetJustifyH("LEFT")
+    Wrap(serverLine, WIDTH - 64)
     serverLine:SetText(COL_MUTED .. "the server's answer appears here" .. COL_RESET)
 
     -- row 4: actions
@@ -482,16 +493,21 @@ local function CreateWindow()
     for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
 
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.hint:SetJustifyH("LEFT")
     frame.hint:SetPoint("TOPLEFT", 18, -300)
+    Wrap(frame.hint, WIDTH - 36)
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.empty:SetPoint("TOPLEFT", 20, -84)
-    frame.empty:SetPoint("TOPRIGHT", -20, -84)
-    frame.empty:SetJustifyH("LEFT")
-    frame.empty:SetText(COL_MUTED ..
-        "No companions yet.\n\nPress |cffffff00+ Add companion|r, choose a race and a class, and press Create. " ..
-        "Four is the most - a group of five with you." .. COL_RESET)
+    Wrap(frame.empty, WIDTH - 44)
+    frame.empty:SetSpacing(4)
+    frame.empty:SetText(COL_MUTED .. "No companions yet." .. COL_RESET .. "
+
+" ..
+        COL_MUTED .. "Press " .. COL_RESET .. "|cffffff00+ Add companion|r" .. COL_MUTED ..
+        ", pick a race and a class, then " .. COL_RESET .. "|cffffff00Create|r" .. COL_MUTED .. "." ..
+        COL_RESET .. "
+" ..
+        COL_MUTED .. "Four is the most: a party of five, counting you." .. COL_RESET)
 
     local footer = CreateFrame("Frame", nil, frame)
     footer:SetPoint("BOTTOMLEFT", 14, 14)
