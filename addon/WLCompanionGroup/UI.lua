@@ -157,32 +157,6 @@ local function CreateCard(index)
     return card
 end
 
-function G.CardMenu(anchor, card)
-    if not G.cardMenu then
-        G.cardMenu = CreateFrame("Frame", "WLCGCardMenu", UIParent, "UIDropDownMenuTemplate")
-    end
-
-    UIDropDownMenu_Initialize(G.cardMenu, function()
-        local companion = card and card.companion
-        if not companion then return end
-
-        UIDropDownMenu_AddButton({
-            text = "Stop tracking (keep the bot)", notCheckable = true,
-            func = function() G.ConfirmUnbind(companion.name) end,
-        })
-        UIDropDownMenu_AddButton({
-            text = "|cffff6a6aRelease back to the pool|r", notCheckable = true,
-            func = function() G.ConfirmRelease(companion.name) end,
-        })
-        UIDropDownMenu_AddButton({
-            text = "Quest log in chat", notCheckable = true,
-            func = function() G.Run(".companionsync quests") end,
-        })
-    end)
-
-    ToggleDropDownMenu(1, nil, G.cardMenu, anchor, 0, 0)
-end
-
 -- ---------------------------------------------------------------------------
 -- add panel
 -- ---------------------------------------------------------------------------

@@ -161,6 +161,12 @@ CompanionQuestSync.PinSyncSeconds = 600
 #        Default:     0 (report only)
 CompanionQuestSync.DropFailedBotQuests = 0
 CompanionQuestSync.RequireGrouped = 1
+
+# May this module mint a companion from the playerbots pool itself?
+# It claims a free AddClass body, blanks it, names it, binds it and calls it out - so a
+# player can have several companions without touching mod-wowlegends. Set to 0 to keep
+# creation entirely in that module.
+CompanionQuestSync.AllowCreate = 1
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1
 CompanionQuestSync.BindingTable = "wowlegends_companion"
@@ -213,4 +219,4 @@ CompanionQuestSync.AnnounceAtStartup = 1
 CompanionQuestSync.AnnounceOnLogin = 1
 CompanionQuestSync.HeartbeatSeconds = 300
 CompanionQuestSync.Debug = 0
-
+
