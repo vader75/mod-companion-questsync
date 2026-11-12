@@ -655,6 +655,12 @@ boot:SetScript("OnEvent", function(self, event, arg1)
     if not WLCompanionGroupDB then InitDB() end
     if not frame then CreateWindow() end
 
+    -- One line, once per login, so "is it even loaded?" is answerable from chat instead of
+    -- from guesswork: the addon version the client actually read, and whether the minimap
+    -- button exists.
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r Companion Group |cff9d9d9dv1.0.4|r loaded - "
+        .. "minimap button %s"):format(launcher and "|cff20ff20ready|r" or "|cffff6a6aMISSING|r"))
+
     local pos = WLCompanionGroupDB.pos
     frame:ClearAllPoints()
     frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
