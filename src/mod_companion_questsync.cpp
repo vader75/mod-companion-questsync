@@ -109,7 +109,14 @@ namespace
     // and recreated mid-session is a different bot_guid, and an unexpired "no
     // companion" answer would keep the module blind for the whole session - the
     // one drift it could not heal on its own.
-    std::unordered_map<uint32, std::pair<uint32, uint32>> g_bindingCache;
+    struct BindingSet
+    {
+        std::vector<uint32> bots;   // every companion bound to one owner
+        uint32 expires = 0;
+    };
+
+    std::unordered_map<uint32, BindingSet> g_bindingCache;
+    bool g_multiCompanion = false;   // owner has more than one companion
     uint32 constexpr kBindingCacheSeconds = 60;
 
     // Sweep memo: hash of both quest logs plus both levels, with a "last pass
@@ -273,6 +280,7 @@ namespace
         uint32 botQuestCount = 0;
         int32 botFreeSlots = -1;  // -1 when the companion is offline
         uint32 failed = 0;        // copies the companion failed on its own
+        std::vector<std::string> lines;   // one heartbeat line per companion
         uint8 levelFrom = 0;
         uint8 levelTo = 0;
         uint8 ownerLevel = 0;
@@ -350,27 +358,50 @@ namespace
         return static_cast<bool>(result);
     }
 
-    bool FindCompanionGuid(uint32 ownerGuid, uint32& botGuid)
+    /// Every companion bound to this owner, in binding-table order.
+    ///
+    /// The table could always hold several rows; only the lookup assumed one. Reading
+    /// them all here is what lets a group of companions be tracked without a second
+    /// code path - the sweep simply loops.
+    bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
     {
         uint32 const now = static_cast<uint32>(time(nullptr));
 
         auto itr = g_bindingCache.find(ownerGuid);
-        if (itr != g_bindingCache.end() && itr->second.second > now)
+        if (itr != g_bindingCache.end() && itr->second.expires > now)
         {
-            botGuid = itr->second.first;
-            return botGuid != 0;
+            bots = itr->second.bots;
+            return !bots.empty();
         }
+
+        BindingSet set;
+        set.expires = now + kBindingCacheSeconds;
 
         QueryResult result = CharacterDatabase.Query("SELECT bot_guid FROM {} WHERE owner_guid = {}", g_cfg.bindingTable, ownerGuid);
-        if (!result)
+        if (result)
         {
-            g_bindingCache[ownerGuid] = { 0, now + kBindingCacheSeconds };
-            return false;
+            do
+            {
+                uint32 const botGuid = result->Fetch()[0].Get<uint32>();
+                if (botGuid)
+                    set.bots.push_back(botGuid);
+            } while (result->NextRow());
         }
 
-        botGuid = result->Fetch()[0].Get<uint32>();
-        g_bindingCache[ownerGuid] = { botGuid, now + kBindingCacheSeconds };
-        return botGuid != 0;
+        bots = set.bots;
+        g_bindingCache[ownerGuid] = std::move(set);
+        return !bots.empty();
+    }
+
+    /// The first bound companion, for the paths that only ever needed one.
+    bool FindCompanionGuid(uint32 ownerGuid, uint32& botGuid)
+    {
+        std::vector<uint32> bots;
+        if (!FindCompanions(ownerGuid, bots))
+            return false;
+
+        botGuid = bots.front();
+        return true;
     }
 
     void InvalidateCompanionGuid(uint32 ownerGuid)
@@ -474,6 +505,13 @@ namespace
         if (!owner || !owner->GetSession())
             return false;
 
+        // With several companions the player cannot tell who is speaking, so the name
+        // goes in front. With one it would be noise, and the module is careful not to be
+        // noisy.
+        std::string const spoken = (g_multiCompanion && bot)
+            ? bot->GetName() + ": " + text
+            : text;
+
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
@@ -486,24 +524,24 @@ namespace
             auto& queue = g_whisperQueue[ownerGuid];
             bool dup = false;
             for (auto const& entry : queue)
-                if (entry.text == text)
+                if (entry.text == spoken)
                     dup = true;
 
             if (queue.size() < 3 && !dup)
-                queue.push_back({ text, validWhileMissing, now });
+                queue.push_back({ spoken, validWhileMissing, now });
 
             if (g_cfg.debug >= 2)
-                LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", text);
+                LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", spoken);
             return false;
         }
 
         last = now;
-        bot->Whisper(text, LANG_UNIVERSAL, owner);
+        bot->Whisper(spoken, LANG_UNIVERSAL, owner);
 
         // Log what was actually said. Without this the log only ever recorded what was
         // held back, so a report about wording could not be checked against it.
         if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered: {}", bot->GetName(), text);
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered: {}", bot->GetName(), spoken);
 
         return true;
     }
@@ -717,6 +755,7 @@ namespace
     }
 
     void SendPinSync(Player* owner, Player* bot, bool force);  // defined below
+    Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
     ///
     /// Stepping the bot to the *quest giver* meant a visible blink to somebody
@@ -2092,10 +2131,9 @@ namespace
 
     /// Resolve the owner's companion and check it is a live bot we may touch.
     /// Returns nullptr (with what we learned recorded in `report`) if not.
-    Player* ResolveCompanion(Player* owner, SyncReport& report)
+    Player* ResolveCompanion(Player* owner, SyncReport& report, uint32 botGuid)
     {
-        uint32 botGuid = 0;
-        if (!FindCompanionGuid(owner->GetGUID().GetCounter(), botGuid))
+        if (!botGuid)
             return nullptr;
 
         report.hasCompanion = true;
@@ -2139,7 +2177,7 @@ namespace
 
     /// Copy the owner's quest log onto the companion. Returns what happened so
     /// both the command output and the debug log can use it.
-    SyncReport SyncCompanion(Player* owner)
+    SyncReport SyncCompanionFor(Player* owner, uint32 botGuid)
     {
         // Measured, not guessed: Debug >= 2 logs how long a whole pass takes, which is
         // the number that matters when asking what this module costs the server.
@@ -2166,7 +2204,7 @@ namespace
 
         SyncReport report;
 
-        Player* bot = ResolveCompanion(owner, report);
+        Player* bot = ResolveCompanion(owner, report, botGuid);
         if (!bot)
             return report;
 
@@ -2479,6 +2517,10 @@ namespace
                 line += "|";
 
             line += numbers + "," + style + "=" + title;
+
+            // Several companions need to be told apart on one map.
+            if (g_multiCompanion)
+                line += "@" + bot->GetName();
             ++count;
         }
 
@@ -2638,6 +2680,57 @@ namespace
 
         return line;
     }
+
+    Player* ResolveCompanion(Player* owner, SyncReport& report)
+    {
+        uint32 botGuid = 0;
+        if (!FindCompanionGuid(owner->GetGUID().GetCounter(), botGuid))
+            return nullptr;
+
+        return ResolveCompanion(owner, report, botGuid);
+    }
+
+    /// Sweep every companion bound to this owner.
+    ///
+    /// One pass per companion, aggregated into a single report so callers that only
+    /// want "did anything happen" keep working. `lines` carries one heartbeat line per
+    /// companion, which is the only way several can be told apart in the log.
+    SyncReport SyncCompanion(Player* owner)
+    {
+        SyncReport aggregate;
+
+        std::vector<uint32> bots;
+        if (!g_cfg.enable || !FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return aggregate;
+
+        aggregate.hasCompanion = true;
+        g_multiCompanion = bots.size() > 1;
+
+        for (uint32 const botGuid : bots)
+        {
+            SyncReport const one = SyncCompanionFor(owner, botGuid);
+
+            aggregate.added += one.added;
+            aggregate.completed += one.completed;
+            aggregate.dropped += one.dropped;
+            aggregate.reopened += one.reopened;
+            aggregate.classRaceLocked += one.classRaceLocked;
+            aggregate.prereqs += one.prereqs;
+            aggregate.failed += one.failed;
+            aggregate.companionOnline = aggregate.companionOnline || one.companionOnline;
+            aggregate.ownerName = one.ownerName;
+            aggregate.ownerLevel = one.ownerLevel;
+            aggregate.ownerQuestCount = one.ownerQuestCount;
+
+            aggregate.skipped.insert(aggregate.skipped.end(), one.skipped.begin(), one.skipped.end());
+            aggregate.refusedIds.insert(aggregate.refusedIds.end(), one.refusedIds.begin(), one.refusedIds.end());
+
+            if (one.companionOnline)
+                aggregate.lines.push_back(DescribeReport(one));
+        }
+
+        return aggregate;
+    }
 }
 
 class CompanionQuestSyncWorldScript : public WorldScript
@@ -2733,12 +2826,22 @@ public:
                 g_hbDropped += report.dropped;
                 g_hbReopened += report.reopened;
                 g_hbLocked += report.classRaceLocked;
-                std::string line = DescribeReport(report);
+                std::vector<std::string> lines = report.lines;
+
+                if (lines.empty())
+                    lines.push_back(DescribeReport(report));
+
                 auto const hook = g_hbHookAdds.find(player->GetGUID().GetCounter());
                 if (hook != g_hbHookAdds.end() && hook->second)
-                    line += " (+" + std::to_string(hook->second) + " on accept)";
+                    lines.back() += " (+" + std::to_string(hook->second) + " on accept)";
 
-                g_hbLines[player->GetGUID().GetCounter()] = line;
+                // Several companions under one owner: keep them as separate lines so the
+                // log never blends two bots' quest counts into one meaningless row.
+                std::string joined;
+                for (std::string const& entry : lines)
+                    joined += (joined.empty() ? "" : " | ") + entry;
+
+                g_hbLines[player->GetGUID().GetCounter()] = joined;
             }
         }
 
@@ -2890,14 +2993,25 @@ public:
             return true;
         }
 
-        Player* bot = FindCompanionPlayer(botGuid);
-        if (!bot || !bot->IsInWorld())
+        std::vector<uint32> bots;
+        FindCompanions(player->GetGUID().GetCounter(), bots);
+
+        uint32 sent = 0;
+        for (uint32 const guid : bots)
+        {
+            Player* bot = FindCompanionPlayer(guid);
+            if (!bot || !bot->IsInWorld())
+                continue;
+
+            SendPinSync(player, bot, true);
+            ++sent;
+        }
+
+        if (!sent)
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
             return true;
         }
-
-        SendPinSync(player, bot, true);
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: map pins resent - the addon rebuilds from that line.");
         return true;
     }
@@ -2907,79 +3021,88 @@ public:
     /// The log answers this for whoever reads the log. The player has no window into a
     /// character that is not theirs, so without this the only way to learn that the
     /// companion is two candles short of a hand-in is to wait for a whisper.
+    /// .companionsync quests - what every bound companion is carrying.
+    ///
+    /// The log answers this for whoever reads the log. The player has no window into a
+    /// character that is not theirs, so without this the only way to learn that a
+    /// companion is two candles short of a hand-in is to wait for a whisper. Walks the
+    /// whole binding, so four companions are one command.
     static bool HandleQuestsCommand(ChatHandler* handler, char const* /*args*/)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
 
-        uint32 botGuid = 0;
-        if (!g_cfg.enable || !FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+        std::vector<uint32> bots;
+        if (!g_cfg.enable || !FindCompanions(player->GetGUID().GetCounter(), bots))
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
             return true;
         }
 
-        Player* bot = FindCompanionPlayer(botGuid);
-        if (!bot || !bot->IsInWorld())
+        for (uint32 const botGuid : bots)
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
-            return true;
-        }
-
-        handler->PSendSysMessage("|cff20ff20{}|r is carrying {} quest(s), {} free bag slot(s):",
-                                 bot->GetName(), CountQuestLog(bot), uint32(bot->GetFreeInventorySpace()));
-
-        uint32 listed = 0;
-
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
-        {
-            uint32 const questId = bot->GetQuestSlotQuestId(slot);
-            if (!questId)
-                continue;
-
-            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-            if (!quest)
-                continue;
-
-            ++listed;
-
-            QuestStatus const status = bot->GetQuestStatus(questId);
-            std::string const owed = DescribeMissingItems(bot, quest);
-
-            std::string line = "  " + quest->GetTitle() + " (" + std::to_string(questId) + ") ";
-
-            if (status == QUEST_STATUS_FAILED)
-                line += "|cffff6060failed|r";
-            else if (status == QUEST_STATUS_COMPLETE)
-                line += owed.empty() ? "|cff20ff20ready to hand in|r" : "|cffd0a060complete, still owes|r";
-            else
-                line += "in progress";
-
-            if (!owed.empty())
-                line += " - owes " + owed;
-            else if (status != QUEST_STATUS_COMPLETE)
-                line += " - everything gathered";
-
-            EnderSpot const& spot = FindQuestEnder(questId);
-            if (spot.found)
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
             {
-                if (spot.zone && spot.zone != bot->GetZoneId())
-                    line += " - hand in at " + spot.name + " in " + ZoneName(spot.zone);
-                else if (status == QUEST_STATUS_COMPLETE)
-                    line += " - hand in at " + spot.name + " (" +
-                            std::to_string(uint32(bot->GetDistance(spot.x, spot.y, spot.z))) + " yd)";
+                handler->PSendSysMessage("|cffff8000{}|r is not online.", botGuid);
+                continue;
             }
 
-            std::string const area = PoiCoords(bot, quest);
-            if (!area.empty())
-                line += " [" + area + "]";
+            handler->PSendSysMessage("|cff20ff20{}|r is carrying {} quest(s), {} free bag slot(s):",
+                                     bot->GetName(), CountQuestLog(bot), uint32(bot->GetFreeInventorySpace()));
 
-            handler->SendSysMessage(line);
+            uint32 listed = 0;
+
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            {
+                uint32 const questId = bot->GetQuestSlotQuestId(slot);
+                if (!questId)
+                    continue;
+
+                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+
+                ++listed;
+
+                QuestStatus const status = bot->GetQuestStatus(questId);
+                std::string const owed = DescribeMissingItems(bot, quest);
+
+                std::string line = "  " + quest->GetTitle() + " (" + std::to_string(questId) + ") ";
+
+                if (status == QUEST_STATUS_FAILED)
+                    line += "|cffff6060failed|r";
+                else if (status == QUEST_STATUS_COMPLETE)
+                    line += owed.empty() ? "|cff20ff20ready to hand in|r" : "|cffd0a060complete, still owes|r";
+                else
+                    line += "in progress";
+
+                if (!owed.empty())
+                    line += " - owes " + owed;
+                else if (status != QUEST_STATUS_COMPLETE)
+                    line += " - everything gathered";
+
+                EnderSpot const& spot = FindQuestEnder(questId);
+                if (spot.found)
+                {
+                    if (spot.zone && spot.zone != bot->GetZoneId())
+                        line += " - hand in at " + spot.name + " in " + ZoneName(spot.zone);
+                    else if (status == QUEST_STATUS_COMPLETE)
+                        line += " - hand in at " + spot.name + " (" +
+                                std::to_string(uint32(bot->GetDistance(spot.x, spot.y, spot.z))) + " yd)";
+                }
+
+                std::string const area = PoiCoords(bot, quest);
+                if (!area.empty())
+                    line += " [" + area + "]";
+
+                handler->SendSysMessage(line);
+            }
+
+            if (!listed)
+                handler->PSendSysMessage("  nothing open - it is waiting for you to pick something up.");
         }
-
-        if (!listed)
-            handler->PSendSysMessage("  nothing open - it is waiting for you to pick something up.");
 
         return true;
     }
@@ -3013,6 +3136,12 @@ public:
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
             if (bot->GetQuestSlotQuestId(slot))
                 ++botQuests;
+
+                std::vector<uint32> bound;
+        FindCompanions(player->GetGUID().GetCounter(), bound);
+        if (bound.size() > 1)
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} companions bound - this line covers {}; |cffffff00.companionsync quests|r covers them all.",
+                                     bound.size(), bot->GetName());
 
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r level {} with {} quest(s); you are level {} with {} quest(s). Auto sync {}, level mode {}. |cffffff00.companionsync quests|r lists them.",
                                  bot->GetName(), uint32(bot->GetLevel()), botQuests,

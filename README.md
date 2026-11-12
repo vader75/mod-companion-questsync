@@ -88,6 +88,31 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | `DropExtraBotQuests` | 0 | Remove companion quests the owner does not have |
 | `Debug` | 0 | 0 silent, 1 changes, 2 + heartbeat |
 
+## Several companions (experimental branch)
+
+`feat/multi-companion` tracks every row in the binding table for an owner, not just
+the first. What changes:
+
+- the sweep loops per companion, aggregating the pass report;
+- the heartbeat writes one line per companion, joined with ` | `, so two bots' quest
+  counts are never blended into one row;
+- whispers are prefixed with the companion's name when more than one is bound — with a
+  single companion the prefix is suppressed, because it would be noise;
+- pin entries carry `@Name`, so the addon can tell two companions apart on one map;
+- `.companionsync quests` and `.companionsync pins` walk the whole binding;
+  `.companionsync status` still describes one companion and says how many are bound.
+
+What is not done yet:
+
+- per-companion rekeying of the owner-keyed state maps (session tallies, marked NPCs,
+  pin-sync dedupe). With several companions those are shared, so a hand-in by one can
+  suppress a line from another in the same window;
+- one marker per location when two companions need the same giver;
+- the map still draws every companion's pins at once rather than a selected one.
+
+Bind extra companions by adding rows to `wowlegends_companion`; the existing
+`.companion` commands manage one at a time.
+
 ## Notes and limitations
 
 - **`AiPlayerbot.SyncQuestWithPlayer` should be 0** if you want companions to gather their own quest items. With it on, mod-playerbots "will not loot quest items" (its own wording) and completes the bot's copy the moment the owner hands in — which is the state this module exists to avoid.
