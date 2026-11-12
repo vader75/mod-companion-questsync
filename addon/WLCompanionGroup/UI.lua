@@ -1,14 +1,21 @@
 -- WLCompanionGroup/UI.lua
 --
--- The window. Everything here is clicked: cards for the companions you have, a panel for
--- minting a new one, and a small menu for the two destructive actions. Nothing in this
--- file expects the player to type a command.
+-- The window. Two regions: a roster of cards (one per companion) and an overlay panel for
+-- minting a new one. Every action is a button; nothing here expects typing except the name.
+--
+-- Layout rules that keep it from turning into soup:
+--   * a card has exactly three text baselines (name, race/class/level, status) and one
+--     column of buttons pinned to the right, so text never runs under a button;
+--   * the status line is width-limited rather than allowed to wrap into the buttons;
+--   * the panel uses a labelled grid: label above control, controls on a 24 px rhythm.
 
 local addonName, G = ...
 
-local WIDTH, HEIGHT = 620, 470
-local CARD_HEIGHT = 92
+local WIDTH, HEIGHT = 660, 540
+local CARD_HEIGHT = 98
+local CARD_GAP = 8
 local MAX_CARDS = 4
+local TEXT_RIGHT_INSET = 236        -- leaves room for the button column
 
 local COL_MUTED = "|cff9d9d9d"
 local COL_GOOD  = "|cff20ff20"
@@ -16,18 +23,18 @@ local COL_WARN  = "|cffffd200"
 local COL_BAD   = "|cffff6a6a"
 local COL_RESET = "|r"
 
-local frame, cards, footer
-local addPanel, raceDropdown, classDropdown, nameBox, stockLabel, createButton
-local pick = { race = 1, class = 2 }   -- Human Paladin is a safe first guess for Alliance
+local frame, cards, addPanel
+local raceDropdown, classDropdown, nameBox, stockLabel, serverLine, createButton
+local pick = { race = 1, class = 5 }
 
 local function InitDB()
     WLCompanionGroupDB = WLCompanionGroupDB or {}
-    WLCompanionGroupDB.pos = WLCompanionGroupDB.pos or { point = "CENTER", x = 0, y = 80 }
+    WLCompanionGroupDB.pos = WLCompanionGroupDB.pos or { point = "CENTER", x = 0, y = 60 }
 end
 
 local function Button(parent, label, width, onClick, tooltip)
     local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    button:SetSize(width or 64, 20)
+    button:SetSize(width or 64, 22)
     button:SetText(label)
     button:GetFontString():SetFontObject(GameFontNormalSmall)
     button:SetScript("OnClick", onClick)
@@ -42,27 +49,31 @@ local function Button(parent, label, width, onClick, tooltip)
     return button
 end
 
+local function Label(parent, text, x, y)
+    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("TOPLEFT", x, y)
+    label:SetText(COL_MUTED .. text .. COL_RESET)
+    return label
+end
+
 -- ---------------------------------------------------------------------------
 -- cards
 -- ---------------------------------------------------------------------------
 
 local function StatusText(companion)
-    local parts = {}
-
     if not G.HasFlag(companion, "o") then
-        parts[#parts + 1] = COL_WARN .. "not in the world - summon it" .. COL_RESET
-        return table.concat(parts, "")
+        return COL_WARN .. "not in the world - Summon brings it back" .. COL_RESET
     end
 
-    parts[#parts + 1] = ("%s%d quest%s%s"):format(COL_MUTED, companion.quests,
-        companion.quests == 1 and "" or "s", COL_RESET)
+    local parts = {}
+    parts[#parts + 1] = ("%d quest%s"):format(companion.quests, companion.quests == 1 and "" or "s")
 
     if companion.free > 0 then
-        parts[#parts + 1] = ("%s%d free slots%s"):format(COL_MUTED, companion.free, COL_RESET)
+        parts[#parts + 1] = ("%d free slots"):format(companion.free)
     end
 
     if not G.HasFlag(companion, "g") then
-        parts[#parts + 1] = COL_WARN .. "not in your party - sync skips it" .. COL_RESET
+        parts[#parts + 1] = COL_WARN .. "not in your party" .. COL_RESET
     end
 
     if not G.HasFlag(companion, "s") then
@@ -73,13 +84,13 @@ local function StatusText(companion)
         parts[#parts + 1] = COL_GOOD .. "waiting on you" .. COL_RESET
     end
 
-    return table.concat(parts, COL_MUTED .. "   " .. COL_RESET)
+    return COL_MUTED .. table.concat(parts, "  ·  ") .. COL_RESET
 end
 
 local function CreateCard(index)
     local card = CreateFrame("Frame", nil, frame)
     card:SetSize(WIDTH - 28, CARD_HEIGHT)
-    card:SetPoint("TOPLEFT", 14, -54 - (index - 1) * (CARD_HEIGHT + 6))
+    card:SetPoint("TOPLEFT", 14, -58 - (index - 1) * (CARD_HEIGHT + CARD_GAP))
 
     card.bg = card:CreateTexture(nil, "BACKGROUND")
     card.bg:SetAllPoints()
@@ -92,71 +103,63 @@ local function CreateCard(index)
 
     card.dot = card:CreateTexture(nil, "ARTWORK")
     card.dot:SetSize(9, 9)
-    card.dot:SetPoint("TOPLEFT", 14, -13)
+    card.dot:SetPoint("TOPLEFT", 16, -18)
 
     card.name = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    card.name:SetPoint("TOPLEFT", 30, -9)
+    card.name:SetPoint("TOPLEFT", 32, -12)
 
     card.subtitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    card.subtitle:SetPoint("TOPLEFT", 14, -28)
+    card.subtitle:SetPoint("TOPLEFT", 16, -32)
 
     card.status = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    card.status:SetPoint("TOPLEFT", 14, -47)
-    card.status:SetPoint("TOPRIGHT", -14, -47)
+    card.status:SetPoint("TOPLEFT", 16, -54)
+    card.status:SetWidth(WIDTH - 28 - TEXT_RIGHT_INSET - 24)
     card.status:SetJustifyH("LEFT")
 
-    card.primary = Button(card, "Summon", 68, function()
+    card.primary = Button(card, "Summon", 84, function()
         if not card.companion then return end
-        local verb = G.HasFlag(card.companion, "o") and "dismiss" or "summon"
-        G.Action(verb, card.companion.name)
+        G.Action(G.HasFlag(card.companion, "o") and "dismiss" or "summon", card.companion.name)
     end, "Call this companion out, or send it away. It stays bound either way.")
-    card.primary:SetPoint("BOTTOMRIGHT", -84, 8)
+    card.primary:SetPoint("RIGHT", -12, 18)
 
     card.levelButton = Button(card, "Level", 56, function()
         if card.companion then G.Action("level", card.companion.name) end
     end, "Bring its level up to yours.")
-    card.levelButton:SetPoint("BOTTOMRIGHT", -152, 8)
+    card.levelButton:SetPoint("RIGHT", -100, 18)
 
-    card.mapButton = Button(card, "Map", 48, function()
+    card.mapButton = Button(card, "Map", 44, function()
         G.Run(".companionsync pins")
         ToggleWorldMap()
     end, "Show this companion's quest markers on the world map.")
-    card.mapButton:SetPoint("BOTTOMRIGHT", -208, 8)
+    card.mapButton:SetPoint("RIGHT", -12, -12)
 
     card.moreButton = Button(card, "...", 30, function(self)
         G.CardMenu(self, card)
-    end, "Unbind (keep the bot) or release it back to the pool for good.")
-    card.moreButton:SetPoint("BOTTOMRIGHT", -14, 8)
+    end, "Unbind (keep the bot) or release it back to the pool.")
+    card.moreButton:SetPoint("RIGHT", -60, -12)
 
     return card
 end
 
---- The two rare, sharp actions live behind one small menu instead of on the card.
 function G.CardMenu(anchor, card)
     if not G.cardMenu then
-        local menu = CreateFrame("Frame", "WLCGCardMenu", UIParent, "UIDropDownMenuTemplate")
-        G.cardMenu = menu
+        G.cardMenu = CreateFrame("Frame", "WLCGCardMenu", UIParent, "UIDropDownMenuTemplate")
     end
 
-    UIDropDownMenu_Initialize(G.cardMenu, function(self, level)
+    UIDropDownMenu_Initialize(G.cardMenu, function()
         local companion = card and card.companion
         if not companion then return end
 
         UIDropDownMenu_AddButton({
-            text = "Stop tracking (keep the bot)",
-            notCheckable = true,
+            text = "Stop tracking (keep the bot)", notCheckable = true,
             func = function() G.ConfirmUnbind(companion.name) end,
         })
-
         UIDropDownMenu_AddButton({
-            text = "|cffff6a6aRelease to the pool|r",
-            notCheckable = true,
+            text = "|cffff6a6aRelease back to the pool|r", notCheckable = true,
             func = function() G.ConfirmRelease(companion.name) end,
         })
-
         UIDropDownMenu_AddButton({
-            text = "Open quest log view in chat",
-            notCheckable = true,
+            text = "Quest log in chat", notCheckable = true,
             func = function() G.Run(".companionsync quests") end,
         })
     end)
@@ -165,22 +168,18 @@ function G.CardMenu(anchor, card)
 end
 
 -- ---------------------------------------------------------------------------
--- add companion panel
+-- add panel
 -- ---------------------------------------------------------------------------
 
 local function RaceList()
     local list = {}
-    local races = G.PlayerRaces()
-
-    for _, raceId in ipairs(races) do
+    for _, raceId in ipairs(G.PlayerRaces()) do
         local stock = 0
         for classId in pairs(G.CLASSES) do
             stock = stock + G.StockFor(raceId, classId)
         end
-
         list[#list + 1] = { id = raceId, text = G.RaceName(raceId), stock = stock }
     end
-
     return list
 end
 
@@ -189,12 +188,10 @@ local function ClassList(raceId)
     for classId in pairs(G.CLASSES) do
         list[#list + 1] = { id = classId, text = G.ClassName(classId), stock = G.StockFor(raceId, classId) }
     end
-
     table.sort(list, function(a, b)
         if (a.stock > 0) ~= (b.stock > 0) then return a.stock > 0 end
         return a.text < b.text
     end)
-
     return list
 end
 
@@ -202,84 +199,95 @@ local function RefreshAddPanel()
     if not addPanel or not addPanel:IsShown() then return end
 
     local stock = G.StockFor(pick.race, pick.class)
+
     UIDropDownMenu_SetText(raceDropdown, G.RaceName(pick.race))
     UIDropDownMenu_SetText(classDropdown, G.ClassName(pick.class))
+    createButton:SetText("Create " .. G.RaceName(pick.race) .. " " .. G.ClassName(pick.class))
 
     if stock > 0 then
         stockLabel:SetText(("%s%d free in the pool%s"):format(COL_GOOD, stock, COL_RESET))
-        createButton:Enable()
+    elseif not next(G.stock) then
+        stockLabel:SetText(COL_MUTED .. "asking the server what the pool holds..." .. COL_RESET)
     else
-        stockLabel:SetText(COL_BAD .. "none free - pick another race or class" .. COL_RESET)
-        createButton:Disable()
+        stockLabel:SetText(COL_BAD .. "none free - the server will refuse this combination" .. COL_RESET)
     end
 end
 
+local DROPDOWN_TEXT_INSET = 16      -- UIDropDownMenuTemplate puts its text inside a button
+
 local function CreateAddPanel()
     addPanel = CreateFrame("Frame", nil, frame)
-    addPanel:SetPoint("TOPLEFT", 14, -54)
-    addPanel:SetPoint("BOTTOMRIGHT", -14, 52)
+    addPanel:SetPoint("TOPLEFT", 14, -58)
+    addPanel:SetPoint("BOTTOMRIGHT", -14, 56)
     addPanel:Hide()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
     addPanel.bg:SetAllPoints()
     addPanel.bg:SetTexture(1, 1, 1, 0.06)
 
-    local title = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOPLEFT", 14, -12)
-    title:SetText("New companion")
+    addPanel.title = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    addPanel.title:SetPoint("TOPLEFT", 18, -14)
+    addPanel.title:SetText("New companion")
 
-    local hint = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    hint:SetPoint("TOPLEFT", 14, -32)
-    hint:SetPoint("TOPRIGHT", -14, -32)
-    hint:SetJustifyH("LEFT")
-    hint:SetText(COL_MUTED .. "One click takes a free body from the pool, wipes it, names it and calls it out." .. COL_RESET)
+    addPanel.hint = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    addPanel.hint:SetPoint("TOPLEFT", 18, -34)
+    addPanel.hint:SetPoint("TOPRIGHT", -18, -34)
+    addPanel.hint:SetJustifyH("LEFT")
+    addPanel.hint:SetText(COL_MUTED ..
+        "A free body is taken from the pool, wiped to level 1, named and called to your side." .. COL_RESET)
+
+    -- row 1: race and class
+    Label(addPanel, "Race", 20, -62)
+    Label(addPanel, "Class", 216, -62)
 
     raceDropdown = CreateFrame("Frame", "WLCGRaceDropdown", addPanel, "UIDropDownMenuTemplate")
-    raceDropdown:SetPoint("TOPLEFT", 6, -52)
+    raceDropdown:SetPoint("TOPLEFT", 4, -74)
     UIDropDownMenu_SetWidth(raceDropdown, 150)
-    UIDropDownMenu_Initialize(raceDropdown, function(self, level)
+    UIDropDownMenu_Initialize(raceDropdown, function()
         for _, race in ipairs(RaceList()) do
             UIDropDownMenu_AddButton({
-                text = race.text .. (race.stock > 0 and ("  " .. COL_MUTED .. race.stock .. COL_RESET) or
-                                     ("  " .. COL_BAD .. "none" .. COL_RESET)),
+                text = race.text .. (race.stock > 0 and ("   " .. COL_MUTED .. race.stock .. COL_RESET)
+                                                       or ("   " .. COL_BAD .. "none" .. COL_RESET)),
                 value = race.id,
                 checked = (pick.race == race.id),
                 func = function()
                     pick.race = race.id
                     RefreshAddPanel()
-                    UIDropDownMenu_SetText(raceDropdown, G.RaceName(pick.race))
                 end,
             })
         end
     end)
 
     classDropdown = CreateFrame("Frame", "WLCGClassDropdown", addPanel, "UIDropDownMenuTemplate")
-    classDropdown:SetPoint("TOPLEFT", 196, -52)
+    classDropdown:SetPoint("TOPLEFT", 200, -74)
     UIDropDownMenu_SetWidth(classDropdown, 150)
-    UIDropDownMenu_Initialize(classDropdown, function(self, level)
+    UIDropDownMenu_Initialize(classDropdown, function()
         for _, class in ipairs(ClassList(pick.race)) do
             UIDropDownMenu_AddButton({
-                text = class.stock > 0 and (class.text .. "  " .. COL_MUTED .. class.stock .. COL_RESET)
-                                        or ("|cff5a5a5a" .. class.text .. COL_RESET),
+                text = class.stock > 0 and (class.text .. "   " .. COL_MUTED .. class.stock .. COL_RESET)
+                                       or ("|cff5a5a5a" .. class.text .. COL_RESET),
                 value = class.id,
                 checked = (pick.class == class.id),
                 disabled = class.stock <= 0,
                 func = function()
                     pick.class = class.id
                     RefreshAddPanel()
-                    UIDropDownMenu_SetText(classDropdown, G.ClassName(pick.class))
                 end,
             })
         end
     end)
 
+    -- row 2: name
+    Label(addPanel, "Name", 20, -132)
+
     nameBox = CreateFrame("EditBox", "WLCGNameBox", addPanel)
-    nameBox:SetSize(170, 22)
-    nameBox:SetPoint("TOPLEFT", 20, -96)
+    nameBox:SetSize(210, 24)
+    nameBox:SetPoint("TOPLEFT", 20, -148)
     nameBox:SetAutoFocus(false)
     nameBox:SetMaxLetters(12)
     nameBox:SetFontObject(GameFontNormal)
     nameBox:SetTextInsets(6, 6, 0, 0)
+    nameBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
     nameBox.bg = nameBox:CreateTexture(nil, "BACKGROUND")
     nameBox.bg:SetAllPoints()
@@ -294,23 +302,31 @@ local function CreateAddPanel()
     })
     nameBox.border:SetBackdropBorderColor(1, 1, 1, 0.2)
 
-    local suggest = Button(addPanel, "Suggest a name", 120, function()
+    local suggest = Button(addPanel, "Suggest", 80, function()
         nameBox:SetText(G.SuggestName())
-    end, "Fill in a name that nobody is using.")
-    suggest:SetPoint("TOPLEFT", 200, -96)
+    end, "Fill in a name nobody is using.")
+    suggest:SetPoint("TOPLEFT", 240, -148)
 
+    -- row 3: pool answer and the server's reply
     stockLabel = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    stockLabel:SetPoint("TOPLEFT", 20, -128)
+    stockLabel:SetPoint("TOPLEFT", 20, -186)
 
-    createButton = Button(addPanel, "Create companion", 150, function()
+    serverLine = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    serverLine:SetPoint("TOPLEFT", 20, -208)
+    serverLine:SetPoint("TOPRIGHT", -20, -208)
+    serverLine:SetJustifyH("LEFT")
+    serverLine:SetText(COL_MUTED .. "the server's answer appears here" .. COL_RESET)
+
+    -- row 4: actions
+    createButton = Button(addPanel, "Create", 190, function()
         if G.CreateCompanion(pick.race, pick.class, nameBox:GetText() or "") then
-            addPanel:Hide()
+            nameBox:ClearFocus()
         end
-    end, "Claim a body from the pool with the race, class and name above.")
+    end, "Claim a body from the pool with this race, class and name.")
     createButton:SetPoint("BOTTOMLEFT", 20, 16)
 
     local cancel = Button(addPanel, "Cancel", 80, function() addPanel:Hide() end)
-    cancel:SetPoint("BOTTOMLEFT", 178, 16)
+    cancel:SetPoint("BOTTOMLEFT", 218, 16)
 
     return addPanel
 end
@@ -319,19 +335,22 @@ function G.ShowAddPanel()
     if not addPanel then CreateAddPanel() end
 
     pick.race = G.PlayerRaces()[1] or 1
-    pick.class = 2
+    pick.class = 5
     nameBox:SetText(G.SuggestName())
+    serverLine:SetText(COL_MUTED .. "the server's answer appears here" .. COL_RESET)
 
     addPanel:Show()
-    UIDropDownMenu_SetText(raceDropdown, G.RaceName(pick.race))
-    UIDropDownMenu_SetText(classDropdown, G.ClassName(pick.class))
     RefreshAddPanel()
-
-    -- a fresh stock line, so the picker reflects what the pool has right now
     G.Run(".companionsync pool")
 end
 
 function G.OnStockChanged() RefreshAddPanel() end
+
+function G.OnServerMessage(text)
+    if addPanel and addPanel:IsShown() and serverLine then
+        serverLine:SetText(COL_WARN .. text .. COL_RESET)
+    end
+end
 
 -- ---------------------------------------------------------------------------
 -- window
@@ -341,7 +360,6 @@ function G.Refresh()
     if not frame then return end
 
     local count = #G.companions
-    frame.count:SetText(("%s%d of %d companions%s"):format(COL_MUTED, count, MAX_CARDS, COL_RESET))
 
     for i = 1, MAX_CARDS do
         local card = cards[i]
@@ -353,23 +371,21 @@ function G.Refresh()
             local r, g, b = G.ClassColor(companion.classId)
             local online = G.HasFlag(companion, "o")
 
-            card.name:SetText(online and companion.name or ("|cff808080" .. companion.name .. "|r"))
+            card.name:SetText(companion.name)
             card.name:SetTextColor(online and r or 0.5, online and g or 0.5, online and b or 0.5)
             card.dot:SetTexture(r, g, b, online and 1 or 0.3)
             card.stripe:SetTexture(r, g, b, online and 0.85 or 0.25)
 
-            card.subtitle:SetText(("%s%s  ·  %s  ·  level %d%s"):format(
+            card.subtitle:SetText(("%s%s · %s · level %d%s"):format(
                 COL_MUTED, G.RaceName(companion.raceId), G.ClassName(companion.classId),
                 companion.level, COL_RESET))
 
             card.status:SetText(StatusText(companion))
 
             card.primary:SetText(online and "Dismiss" or "Summon")
-            if companion.level > 0 and not G.HasFlag(companion, "s") then
-                card.levelButton:Show()
-            else
-                card.levelButton:Hide()
-            end
+
+            if companion.level > 0 and not G.HasFlag(companion, "s") then card.levelButton:Show()
+            else card.levelButton:Hide() end
 
             if online then card.mapButton:Show() else card.mapButton:Hide() end
 
@@ -381,7 +397,6 @@ function G.Refresh()
     end
 
     if count == 0 then frame.empty:Show() else frame.empty:Hide() end
-
     if addPanel and addPanel:IsShown() and count > 0 then addPanel:Hide() end
 end
 
@@ -402,7 +417,7 @@ local function CreateWindow()
 
     frame.bg = frame:CreateTexture(nil, "BACKGROUND")
     frame.bg:SetAllPoints()
-    frame.bg:SetTexture(0, 0, 0, 0.78)
+    frame.bg:SetTexture(0, 0, 0, 0.8)
 
     frame.border = CreateFrame("Frame", nil, frame)
     frame.border:SetAllPoints()
@@ -418,16 +433,12 @@ local function CreateWindow()
     frame.title:SetText("|cffffc94dCompanions|r")
 
     frame.count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.count:SetPoint("TOPLEFT", 16, -34)
+    frame.count:SetPoint("TOPLEFT", 16, -36)
 
-    local add = Button(frame, "+ Add companion", 118, function()
-        if addPanel and addPanel:IsShown() then
-            addPanel:Hide()
-        else
-            G.ShowAddPanel()
-        end
-    end, "Mint a new companion from the pool: pick a race and class, and we suggest a name.")
-    add:SetPoint("TOPRIGHT", -34, -14)
+    local add = Button(frame, "+ Add companion", 124, function()
+        if addPanel and addPanel:IsShown() then addPanel:Hide() else G.ShowAddPanel() end
+    end, "Mint a new companion from the pool.")
+    add:SetPoint("TOPRIGHT", -36, -14)
 
     frame.close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     frame.close:SetPoint("TOPRIGHT", -6, -6)
@@ -436,17 +447,16 @@ local function CreateWindow()
     for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.empty:SetPoint("TOPLEFT", 20, -80)
-    frame.empty:SetPoint("TOPRIGHT", -20, -80)
+    frame.empty:SetPoint("TOPLEFT", 20, -84)
+    frame.empty:SetPoint("TOPRIGHT", -20, -84)
     frame.empty:SetJustifyH("LEFT")
     frame.empty:SetText(COL_MUTED ..
-        "No companions yet.\n\nClick |cffffff00+ Add companion|r and pick a race and class - " ..
-        "a free body is taken from the pool, named, and called to your side. Four is the most, " ..
-        "a group of five with you." .. COL_RESET)
+        "No companions yet.\n\nPress |cffffff00+ Add companion|r, choose a race and a class, and press Create. " ..
+        "Four is the most - a group of five with you." .. COL_RESET)
 
-    footer = CreateFrame("Frame", nil, frame)
-    footer:SetPoint("BOTTOMLEFT", 14, 12)
-    footer:SetPoint("BOTTOMRIGHT", -14, 12)
+    local footer = CreateFrame("Frame", nil, frame)
+    footer:SetPoint("BOTTOMLEFT", 14, 14)
+    footer:SetPoint("BOTTOMRIGHT", -14, 14)
     footer:SetHeight(22)
 
     local summonAll = Button(footer, "Summon missing", 110, function() G.Action("summon") end,
@@ -454,7 +464,7 @@ local function CreateWindow()
     summonAll:SetPoint("LEFT", 0, 0)
 
     local dismissAll = Button(footer, "Dismiss all", 88, function() G.Action("dismiss") end,
-        "Send every companion away. They stay bound and keep following your quest log.")
+        "Send every companion away. They stay bound.")
     dismissAll:SetPoint("LEFT", 116, 0)
 
     local refresh = Button(footer, "Refresh", 70, function()
@@ -467,7 +477,6 @@ local function CreateWindow()
         "Print what each companion is carrying to chat.")
     quests:SetPoint("LEFT", 286, 0)
 
-    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
     return frame
 end
 
@@ -480,7 +489,7 @@ function G.Toggle()
     else
         local pos = WLCompanionGroupDB.pos
         frame:ClearAllPoints()
-        frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 80)
+        frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
         frame:Show()
         G.Refresh()
         G.Run(".companionsync pins")
@@ -535,5 +544,5 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 
     local pos = WLCompanionGroupDB.pos
     frame:ClearAllPoints()
-    frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 80)
+    frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
 end)
