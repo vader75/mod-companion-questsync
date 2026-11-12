@@ -147,6 +147,19 @@ CompanionQuestSync.DropExtraGraceSeconds = 120
 #                     demand with .companionsync pins.
 #        Default:     1 (on)
 CompanionQuestSync.PinSync = 1
+#    CompanionQuestSync.PinSyncSeconds
+#        Description: Longest gap between identical pin-sync lines. The line is also
+#                     re-sent whenever its contents change, so this is only the safety
+#                     net for a whisper the client never received.
+#        Default:     600
+CompanionQuestSync.PinSyncSeconds = 600
+
+#    CompanionQuestSync.DropFailedBotQuests
+#        Description: Drop a companion quest its own AI failed (a dead escort, a timed
+#                     script). The owner is told once either way; with this on, the copy
+#                     is also removed so the two logs can line up again.
+#        Default:     0 (report only)
+CompanionQuestSync.DropFailedBotQuests = 0
 CompanionQuestSync.RequireGrouped = 1
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1

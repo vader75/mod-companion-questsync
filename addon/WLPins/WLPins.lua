@@ -11,6 +11,7 @@
 --       black outline plate so nothing can be mistaken for map art.
 
 local ADDON = "WLPins"
+-- Pins are deleted, never recoloured, once they are this old. /wlpins life changes it.
 local PIN_LIFETIME = 30 * 60
 local FLIP_Y = false
 
@@ -90,6 +91,7 @@ local function LoadDB()
     WLPinsDB = WLPinsDB or { pins = {} }
     WLPins.offsetX = WLPinsDB.offsetX or 0
     WLPins.offsetY = WLPinsDB.offsetY or 0
+    PIN_LIFETIME = WLPinsDB.lifetime or PIN_LIFETIME
     for _, saved in ipairs(WLPinsDB.pins or {}) do
         table.insert(WLPins.pins, {
             x = saved.x, y = saved.y, at = saved.at, quest = saved.quest,
@@ -410,6 +412,19 @@ SlashCmdList["WLPINS"] = function(msg)
                 WLPins.offsetX, WLPins.offsetY))
         end
 
+    elseif string.find(msg, "^life") then
+        local minutes = tonumber(string.match(msg, "^life%s+(%d+)"))
+        if minutes and minutes > 0 then
+            PIN_LIFETIME = minutes * 60
+            SaveDB()
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffWL Companion Pins|r pins now expire after %d minute(s).", minutes))
+        else
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffWL Companion Pins|r pins live %d minute(s) - change it with /wlpins life 60",
+                math.floor(PIN_LIFETIME / 60)))
+        end
+
     elseif msg == "test" then
         AddPin(48, 52, STYLE.handin, "TEST PIN")
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test badge at 48, 52 - press M.")
@@ -436,6 +451,7 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  |cff66b3ffsquare blue ?|r  a turn-in only it can do")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins life [minutes] - how long a pin lives (default 30)")
         DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
     end
 end
