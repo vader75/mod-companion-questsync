@@ -658,10 +658,48 @@ boot:SetScript("OnEvent", function(self, event, arg1)
     -- One line, once per login, so "is it even loaded?" is answerable from chat instead of
     -- from guesswork: the addon version the client actually read, and whether the minimap
     -- button exists.
-    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r Companion Group |cff9d9d9dv1.0.4|r loaded - "
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r Companion Group |cff9d9d9dv1.0.5|r loaded - "
         .. "minimap button %s"):format(launcher and "|cff20ff20ready|r" or "|cffff6a6aMISSING|r"))
+
+    -- Record what was actually built. "Not on the map" has cost us hours of guessing; the
+    -- numbers below say whether the button exists, where it sits and what it is drawn over.
+    if WLCompanionGroupDB then
+        local s = {
+            version = "1.0.5",
+            launcher = launcher and "created" or "nil",
+            minimap = Minimap and (Minimap:GetWidth() .. "x" .. Minimap:GetHeight()) or "nil",
+        }
+        if launcher then
+            local point, _, relPoint, x, y = launcher:GetPoint(1)
+            s.shown = launcher:IsShown() and 1 or 0
+            s.width = launcher:GetWidth()
+            s.height = launcher:GetHeight()
+            s.strata = launcher:GetFrameStrata()
+            s.scale = launcher:GetEffectiveScale()
+            s.alpha = launcher:GetAlpha()
+            s.point = tostring(point) .. "->" .. tostring(relPoint)
+            s.x = math.floor((x or 0) * 10) / 10
+            s.y = math.floor((y or 0) * 10) / 10
+            s.parent = launcher:GetParent() and launcher:GetParent():GetName() or "?"
+        end
+        WLCompanionGroupDB.state = s
+    end
 
     local pos = WLCompanionGroupDB.pos
     frame:ClearAllPoints()
     frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
 end)
+
+
+-- /wlcgstate - print what the launcher is, where it is, and what it is anchored to
+SLASH_WLCGSTATE1 = "/wlcgstate"
+SlashCmdList["WLCGSTATE"] = function()
+    local s = WLCompanionGroupDB and WLCompanionGroupDB.state
+    if not s then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r no recorded state - try /reload")
+        return
+    end
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r launcher=%s minimap=%s parent=%s point=%s %.0f,%.0f shown=%s w=%s strata=%s alpha=%s")
+        :format(s.launcher or "?", s.minimap or "?", s.parent or "?", s.point or "?",
+                s.x or 0, s.y or 0, tostring(s.shown), tostring(s.width), s.strata or "?", tostring(s.alpha)))
+end
