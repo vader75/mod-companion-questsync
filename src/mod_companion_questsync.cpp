@@ -119,6 +119,12 @@ namespace
     bool g_multiCompanion = false;   // owner has more than one companion
     uint32 constexpr kBindingCacheSeconds = 60;
 
+    /// Four companions is the whole point of this branch - a party of five with the
+    /// owner - so that is the ceiling. A fifth row is almost certainly a seeding
+    /// mistake, and one more bot than the group can hold would be swept on every pass
+    /// for nothing.
+    size_t constexpr kMaxCompanions = 4;
+
     // Sweep memo: hash of both quest logs plus both levels, with a "last pass
     // was clean" flag. A clean pass over an unchanged pair cannot produce a
     // different result, so it is skipped instead of re-walked every 20 s. Any
@@ -176,6 +182,7 @@ namespace
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
+    std::unordered_map<uint32, uint32> g_lastWhisperByBot;  // bot guid -> unix time, for fairness
 
     /// A whisper waiting for the rate-limit window. `questId` is non-zero for
     /// refusals, so the queue can re-check the world before it speaks: a refusal
@@ -184,7 +191,8 @@ namespace
     /// problem reads worse than saying nothing.
     struct QueuedWhisper
     {
-        std::string text;
+        std::string text;        // as written, WITHOUT the speaker prefix
+        uint32 botGuid = 0;      // who said it: the flush speaks as this companion
         uint32 questId = 0;      // 0 = no revalidation possible, only age applies
         uint32 queuedAt = 0;
     };
@@ -383,8 +391,26 @@ namespace
             do
             {
                 uint32 const botGuid = result->Fetch()[0].Get<uint32>();
-                if (botGuid)
-                    set.bots.push_back(botGuid);
+                if (!botGuid)
+                    continue;
+
+                // A bot seeded twice - or bound to two owners - makes two sweeps fight
+                // over one character: both level it, both re-quest it, both whisper.
+                if (std::find(set.bots.begin(), set.bots.end(), botGuid) != set.bots.end())
+                {
+                    LOG_ERROR("server.loading", "[CompanionQuestSync] owner {} binds bot {} more than once; ignoring the duplicate",
+                              ownerGuid, botGuid);
+                    continue;
+                }
+
+                if (set.bots.size() >= kMaxCompanions)
+                {
+                    LOG_ERROR("server.loading", "[CompanionQuestSync] owner {} binds more than {} companions; ignoring bot {} (a group is {} with the owner)",
+                              ownerGuid, uint32(kMaxCompanions), botGuid, uint32(kMaxCompanions + 1));
+                    continue;
+                }
+
+                set.bots.push_back(botGuid);
             } while (result->NextRow());
         }
 
@@ -513,6 +539,7 @@ namespace
             : text;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint32 const botGuid = bot ? bot->GetGUID().GetCounter() : 0;
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
 
@@ -521,14 +548,19 @@ namespace
             // Hold it, do not lose it. The one-shot "help me finish this quest"
             // request used to be dropped here when the window was busy, so a player
             // who was mid-fight simply never heard it again.
+            //
+            // What is queued is the text alone plus WHO said it: the prefix is applied
+            // when it is spoken, by the companion that said it. Baking the name in here
+            // meant a line queued by one companion could be spoken by another and read
+            // "Soak: Healy: ...".
             auto& queue = g_whisperQueue[ownerGuid];
             bool dup = false;
             for (auto const& entry : queue)
-                if (entry.text == spoken)
+                if (entry.botGuid == botGuid && entry.text == text)
                     dup = true;
 
-            if (queue.size() < 3 && !dup)
-                queue.push_back({ spoken, validWhileMissing, now });
+            if (queue.size() < 4 && !dup)
+                queue.push_back({ text, botGuid, validWhileMissing, now });
 
             if (g_cfg.debug >= 2)
                 LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", spoken);
@@ -536,6 +568,9 @@ namespace
         }
 
         last = now;
+        if (botGuid)
+            g_lastWhisperByBot[botGuid] = now;
+
         bot->Whisper(spoken, LANG_UNIVERSAL, owner);
 
         // Log what was actually said. Without this the log only ever recorded what was
@@ -883,39 +918,50 @@ namespace
     /// quests, one packet, only when the set changes. Experimental by nature: if the
     /// client ignores POIs for quests it does not hold, the packet is simply dropped
     /// and the whisper carries map coordinates instead.
-    void SendQuestPins(Player* owner, Player* bot)
+    /// Quest area circles for the owner's map, across every companion at once.
+    ///
+    /// This used to be called once per companion with one bot's quest log, while the
+    /// "already sent" key was stored per owner. With two companions that key alternated
+    /// between their two sets, so the packet was re-sent on nearly every pass and the
+    /// client - which replaces its quest areas on receipt - only ever showed whichever
+    /// companion had passed last. The union is stable, sent once, and shows the whole
+    /// group's work.
+    void SendQuestPins(Player* owner, std::vector<uint32> const& bots)
     {
         if (!g_cfg.mapPins || !owner->GetSession())
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::vector<uint32> wanted;
+        std::set<uint32> wanted;
 
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        for (uint32 const botGuid : bots)
         {
-            uint32 const questId = bot->GetQuestSlotQuestId(slot);
-            if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
                 continue;
 
-            // Only skip what the owner has already been credited for. Their copy being
-            // COMPLETE does not draw the area any more (the objectives are done), and
-            // that is exactly the case where the companion still has work to do there.
-            if (owner->IsQuestRewarded(questId))
-                continue;
+            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            {
+                uint32 const questId = bot->GetQuestSlotQuestId(slot);
+                if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+                    continue;
 
-            if (!sObjectMgr->GetQuestPOIVector(questId))
-                continue;
+                // Only skip what the owner has already been credited for. Their copy being
+                // COMPLETE does not draw the area any more (the objectives are done), and
+                // that is exactly the case where the companion still has work to do there.
+                if (owner->IsQuestRewarded(questId))
+                    continue;
 
-            wanted.push_back(questId);
+                if (!sObjectMgr->GetQuestPOIVector(questId))
+                    continue;
+
+                wanted.insert(questId);
+            }
         }
 
-        std::string const key = [&wanted]()
-        {
-            std::string s;
-            for (uint32 id : wanted)
-                s += std::to_string(id) + ",";
-            return s;
-        }();
+        std::string key;
+        for (uint32 const id : wanted)
+            key += std::to_string(id) + ",";
 
         if (g_pinnedQuests[ownerGuid] == key)
             return;
@@ -925,10 +971,12 @@ namespace
         if (wanted.empty())
             return;
 
-        WorldPacket data(SMSG_QUEST_POI_QUERY_RESPONSE, 8 + wanted.size() * 40);
-        data << uint32(wanted.size());
+        std::vector<uint32> const list(wanted.begin(), wanted.end());
 
-        for (uint32 const questId : wanted)
+        WorldPacket data(SMSG_QUEST_POI_QUERY_RESPONSE, 8 + list.size() * 40);
+        data << uint32(list.size());
+
+        for (uint32 const questId : list)
         {
             QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(questId);
             data << uint32(questId);
@@ -960,7 +1008,7 @@ namespace
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] pushed {} quest area(s) to {} map",
-                     uint32(wanted.size()), owner->GetName());
+                     uint32(list.size()), owner->GetName());
     }
 
     /// Position is the other half of a desync: the two logs can match while the
@@ -1190,7 +1238,7 @@ namespace
     /// One whisper for everything refused since the last flush - at most three
     /// named, then a count - ending with what the player can actually do about it.
     /// Send whatever was held back by the rate limit, one per pass.
-    void FlushWhisperQueue(Player* owner, Player* bot)
+    void FlushWhisperQueue(Player* owner, Player* /*fallback*/)
     {
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
         auto itr = g_whisperQueue.find(ownerGuid);
@@ -1206,31 +1254,69 @@ namespace
         // the rate limit, but the world moves on inside that window: a "I need
         // level 5 first" held for 45 s usually lands *after* the companion has the
         // quest, which reads like a broken module rather than a busy one.
-        while (!itr->second.empty())
+        //
+        // Every check is against the companion that said it, never the one whose pass
+        // happens to be flushing: the old code asked the wrong bot about the wrong quest
+        // log and dropped lines that were still true.
+        auto& queue = itr->second;
+        for (auto entry = queue.begin(); entry != queue.end(); )
         {
-            QueuedWhisper const& front = itr->second.front();
+            Player* speaker = entry->botGuid ? FindCompanionPlayer(entry->botGuid) : nullptr;
 
-            bool stale = front.queuedAt && now > front.queuedAt && now - front.queuedAt > 120;
-            if (!stale && front.questId)
-                stale = bot->GetQuestStatus(front.questId) != QUEST_STATUS_NONE ||
-                        bot->IsQuestRewarded(front.questId);
+            bool stale = !speaker || !speaker->IsInWorld();
+            if (!stale && entry->queuedAt && now > entry->queuedAt)
+                stale = now - entry->queuedAt > 120;
+            if (!stale && entry->questId)
+                stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_NONE ||
+                        speaker->IsQuestRewarded(entry->questId);
 
             if (!stale)
-                break;
+            {
+                ++entry;
+                continue;
+            }
 
             if (g_cfg.debug >= 2)
-                LOG_INFO("server.loading", "[CompanionQuestSync] dropped a stale whisper: {}",
-                         front.text);
+                LOG_INFO("server.loading", "[CompanionQuestSync] dropped a stale whisper: {}", entry->text);
 
-            itr->second.pop_front();
+            entry = queue.erase(entry);
         }
 
-        if (itr->second.empty())
+        if (queue.empty())
             return;
 
+        // Whose turn? The owner gets one whisper per window, so a companion that has
+        // never been heard - or not for a while - goes first. Without this the same
+        // companion wins every window simply because its pass runs first, and with four
+        // companions the last one is never heard at all.
+        auto chosen = queue.begin();
+        for (auto entry = queue.begin(); entry != queue.end(); ++entry)
+        {
+            uint32 const entryHeard = g_lastWhisperByBot[entry->botGuid];
+            uint32 const chosenHeard = g_lastWhisperByBot[chosen->botGuid];
+
+            if (entryHeard < chosenHeard ||
+                (entryHeard == chosenHeard && entry->queuedAt < chosen->queuedAt))
+                chosen = entry;
+        }
+
+        Player* speaker = FindCompanionPlayer(chosen->botGuid);
+        if (!speaker)
+        {
+            queue.erase(chosen);
+            return;
+        }
+
+        std::string const spoken = g_multiCompanion ? speaker->GetName() + ": " + chosen->text
+                                                    : chosen->text;
+
         last = now;
-        bot->Whisper(itr->second.front().text, LANG_UNIVERSAL, owner);
-        itr->second.pop_front();
+        g_lastWhisperByBot[chosen->botGuid] = now;
+        speaker->Whisper(spoken, LANG_UNIVERSAL, owner);
+        queue.erase(chosen);
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered (queued): {}", speaker->GetName(), spoken);
     }
 
     void FlushNotices(Player* owner, Player* bot)
@@ -2404,7 +2490,6 @@ namespace
 
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
-        SendQuestPins(owner, bot);
         MarkOwnErrands(owner, bot, marks);
 
         for (uint32 const questId : ownerQuests)
@@ -2479,6 +2564,34 @@ namespace
     /// Entries sharing a coordinate are merged into one marker with both quest names,
     /// because a hand-in both companions need is one place to walk to, not two pins on
     /// the same tile.
+    /// A companion name as the pin grammar can survive it.
+    ///
+    /// The addon splits entries on `,` and `|` and the name on `@`, so a name carrying
+    /// any of those would take the whole payload apart. Truncated too: four companions
+    /// on one marker must still leave a label a player can read.
+    std::string SafePinName(std::string const& name)
+    {
+        std::string out;
+
+        for (char const c : name)
+        {
+            // The separators would split the payload grammar; control characters would
+            // split a line. Everything else passes - a name is a name.
+            if (c == ',' || c == '|' || c == '@' || c == '=')
+                continue;
+
+            if (static_cast<unsigned char>(c) < 32)
+                continue;
+
+            out += c;
+        }
+
+        if (out.size() > 12)
+            out = out.substr(0, 12);
+
+        return out;
+    }
+
     std::string BuildPinLine(Player* owner)
     {
         struct Entry
@@ -2486,6 +2599,7 @@ namespace
             std::string numbers;
             char style;
             std::string title;
+            uint32 extra = 0;   // companions folded into this marker beyond the second
         };
 
         std::vector<Entry> entries;
@@ -2549,7 +2663,7 @@ namespace
                 std::replace(title.begin(), title.end(), '=', ':');
 
                 if (g_multiCompanion)
-                    title += "@" + bot->GetName();
+                    title += "@" + SafePinName(bot->GetName());
 
                 bool merged = false;
                 for (Entry& existing : entries)
@@ -2557,13 +2671,20 @@ namespace
                     if (existing.numbers != numbers || existing.style != style)
                         continue;
 
-                    existing.title += " + " + title;
+                    // Two names read fine; four do not fit on a map marker. Past the
+                    // second, count them instead - the full list is a click away in
+                    // `.companionsync quests`.
+                    if (existing.extra || existing.title.find(" + ") != std::string::npos)
+                        ++existing.extra;
+                    else
+                        existing.title += " + " + title;
+
                     merged = true;
                     break;
                 }
 
                 if (!merged)
-                    entries.push_back({ numbers, style, title });
+                    entries.push_back({ numbers, style, title, 0 });
             }
         }
 
@@ -2575,6 +2696,9 @@ namespace
                 line += "|";
 
             line += entry.numbers + "," + entry.style + "=" + entry.title;
+
+            if (entry.extra)
+                line += " +" + std::to_string(entry.extra);
         }
 
         return line;
@@ -2800,7 +2924,10 @@ namespace
 
         ApplyMarks(owner, marks);
 
-        // One payload for the whole owner, after every companion has had its pass.
+        // One payload and one set of quest-area circles for the whole owner, after every
+        // companion has had its pass. Both must aggregate: the client replaces what it
+        // holds on receipt, so per-companion sends would take turns erasing each other.
+        SendQuestPins(owner, bots);
         SendPinSync(owner, false);
 
         return aggregate;
@@ -3277,29 +3404,54 @@ public:
             return true;
         }
 
-        uint32 botGuid = 0;
-        if (!FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
+        std::vector<uint32> bots;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
             return true;
         }
 
-        Player* bot = FindCompanionPlayer(botGuid);
-        if (!bot || !bot->IsInWorld())
+        // Every companion at once: with several bound, aligning the first and saying
+        // nothing about the rest is how a group ends up half-levelled.
+        uint32 aligned = 0;
+        uint32 offline = 0;
+        uint32 already = 0;
+
+        for (uint32 const botGuid : bots)
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not online.");
-            return true;
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+            {
+                ++offline;
+                continue;
+            }
+
+            if (bot->GetLevel() == player->GetLevel())
+            {
+                ++already;
+                continue;
+            }
+
+            uint8 const from = bot->GetLevel();
+            bot->GiveLevel(player->GetLevel());
+            ++aligned;
+
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} levelled {} -> {}.",
+                                     bot->GetName(), uint32(from), uint32(bot->GetLevel()));
         }
 
-        if (bot->GetLevel() == player->GetLevel())
-        {
-            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} is already level {}.", bot->GetName(), uint32(bot->GetLevel()));
-            return true;
-        }
+        if (already)
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} already level {}.",
+                                     already == 1 ? "one companion was" : std::to_string(already) + " companions were",
+                                     uint32(player->GetLevel()));
 
-        uint8 const from = bot->GetLevel();
-        bot->GiveLevel(player->GetLevel());
-        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} levelled {} -> {}.", bot->GetName(), uint32(from), uint32(bot->GetLevel()));
+        if (offline)
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} not online, left alone.",
+                                     offline == 1 ? "one companion is" : std::to_string(offline) + " companions are");
+
+        if (!aligned && !offline && !already)
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: nothing to align.");
+
         return true;
     }
 };

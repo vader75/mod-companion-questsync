@@ -129,7 +129,13 @@ INSERT INTO wowlegends_companion_multi (owner_guid, bot_guid, companion_name) VA
 CompanionQuestSync.BindingTable = wowlegends_companion_multi
 ```
 
-then `.reload config`. Keep `bot_guid` unique in practice — one bot bound to two owners
+then `.reload config`. `sql/multi-companion.sql` does all of that and carries your
+existing bindings across, so nothing is lost on the switch.
+
+**Four companions, no more.** A party is five with the owner, so four is the ceiling:
+a fifth row is ignored and logged rather than swept on every pass, and the same bot bound
+twice is ignored the same way. On this realm a bot bound to two owners used to mean two
+sweeps levelling one character against each other. Keep `bot_guid` unique in practice — one bot bound to two owners
 means two sweeps levelling and questing it against each other.
 
 What changes:
@@ -138,7 +144,8 @@ What changes:
 - the heartbeat writes one line per companion, joined with ` | `, so two bots' quest
   counts are never blended into one row;
 - whispers are prefixed with the companion's name when more than one is bound — with a
-  single companion the prefix is suppressed, because it would be noise;
+  single companion the prefix is suppressed, because it would be noise. A held line is
+  spoken by the companion that queued it — the prefix is applied at send, not at queue;
 - pin entries carry `@Name`, so the addon can tell two companions apart on one map;
 - `.companionsync quests` and `.companionsync pins` walk the whole binding;
   `.companionsync status` still describes one companion and says how many are bound.
@@ -150,6 +157,13 @@ Also handled:
 - turn-in markers are collected across companions and applied once, so one companion's
   pass cannot clear another's marker;
 - the pass memo is keyed per companion;
+- the map's quest-area circles are also built once per owner from every companion's log.
+  They used to be pushed per companion while the "already sent" key lived per owner, so
+  the packet was re-sent most passes and the client — which replaces its circles on
+  receipt — only ever showed whichever companion passed last;
+- a whisper held by the rate limit is spoken by the companion that queued it, and the
+  window is given to whichever companion has gone longest without being heard, so one
+  companion cannot starve the rest;
 - the addon filters per companion with `/wlpins only <name>` and `/wlpins all`.
 
 Still open:
@@ -160,8 +174,9 @@ Still open:
 - `RequireGrouped` is per companion, so every companion has to be in the party or it is
   skipped. `.playerbots bot add <name>` does not always group what it adds; check
   `group_member` if one companion looks ignored;
-- verified with two companions. Four is the design target and nothing caps it, but the
-  whisper budget and the label layout have not been exercised at that width.
+- verified with two companions live. Four is the cap and the sweep, the cap warning and
+  the merged-marker layout are tested, but four bots questing at once have not been played
+  for a session.
 
 Add rows to `wowlegends_companion_multi` (or whichever table `BindingTable` names). The
 `.companion` commands in mod-wowlegends still manage one companion at a time.
