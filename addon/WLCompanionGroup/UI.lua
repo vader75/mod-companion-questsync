@@ -570,7 +570,7 @@ launcher:SetSize(24, 24)
 launcher:SetPoint("TOPLEFT", Minimap, "TOPLEFT", 6, -60)
 launcher:SetFrameStrata("MEDIUM")
 launcher:SetBackdrop({
-    edgeFile = "Interface\Tooltips\UI-Tooltip-Border",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
     edgeSize = 9,
     insets = { left = 2, right = 2, top = 2, bottom = 2 },
 })
@@ -587,7 +587,7 @@ launcher.plate:SetTexture(0.03, 0.03, 0.04, 0.9)
 launcher.icon = launcher:CreateTexture(nil, "ARTWORK")
 launcher.icon:SetPoint("TOPLEFT", 3, -3)
 launcher.icon:SetPoint("BOTTOMRIGHT", -3, 3)
-launcher.icon:SetTexture("Interface\Icons\Ability_Hunter_BeastCall")
+launcher.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
 launcher.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 
 -- how many companions are bound, so the corner says something before the window does
