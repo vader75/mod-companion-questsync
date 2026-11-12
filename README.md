@@ -40,7 +40,7 @@ companion is not a record of what it played.
 
 - AzerothCore 3.3.5a (built and tested against the WOW Legends 1.7.0 sources, core `82d3bf23`)
 - [mod-playerbots](https://github.com/liyunfan1223/mod-playerbots) — optional at compile time, required for the bag/AI features
-- A table mapping `owner_guid` → `bot_guid` (default `wowlegends_companion`; set `CompanionQuestSync.BindingTable` to yours)
+- A table mapping `owner_guid` → `bot_guid` (default `wowlegends_companion`; set `CompanionQuestSync.BindingTable` to yours). That default allows one companion per player — see *Several companions* for the multi-companion table
 
 The module's own quest logic needs nothing but the core; without mod-playerbots it compiles and syncs quests, but cannot sell or equip.
 
@@ -74,7 +74,7 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 | `LevelMode` | 1 | 0 off, 1 raise-only, 2 exactly the owner's level |
 | `SyncCompletion` | 1 | Mirror the owner's `COMPLETE` status |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 every refusal |
-| `BindingTable` | `wowlegends_companion` | Owner → bot mapping table |
+| `BindingTable` | `wowlegends_companion` | Owner → bot mapping table. On this branch point it at a table whose `owner_guid` is **not** unique, or only one companion is ever tracked |
 | `TidyInventory` | 1 | Managed bag space |
 | `KeepFreeSlots` | 2 | Slots to keep free |
 | `SellJunk` | 1 | Ask the bot's AI to sell vendor trash |
@@ -91,7 +91,36 @@ See `conf/mod_companion_questsync.conf.dist` — every option is documented ther
 ## Several companions (experimental branch)
 
 `feat/multi-companion` tracks every row in the binding table for an owner, not just
-the first. What changes:
+the first.
+
+**The stock table cannot hold two companions.** `wowlegends_companion` has `owner_guid`
+as its PRIMARY KEY, so one row per owner is a schema rule — the module can loop all it
+likes, there is nothing to loop over. Point `BindingTable` at a table without that
+constraint:
+
+```sql
+CREATE TABLE wowlegends_companion_multi (
+  owner_guid INT UNSIGNED NOT NULL,
+  bot_guid   INT UNSIGNED NOT NULL,
+  companion_name VARCHAR(24) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY owner (owner_guid),
+  KEY bot (bot_guid)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO wowlegends_companion_multi (owner_guid, bot_guid, companion_name) VALUES
+  (<owner>, <bot 1>, 'Healy'),
+  (<owner>, <bot 2>, 'Soak');
+```
+
+```ini
+CompanionQuestSync.BindingTable = wowlegends_companion_multi
+```
+
+then `.reload config`. Keep `bot_guid` unique in practice — one bot bound to two owners
+means two sweeps levelling and questing it against each other.
+
+What changes:
 
 - the sweep loops per companion, aggregating the pass report;
 - the heartbeat writes one line per companion, joined with ` | `, so two bots' quest
