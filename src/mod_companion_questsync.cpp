@@ -184,6 +184,7 @@ namespace
     std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
+    std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
     std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
@@ -3130,72 +3131,6 @@ namespace
             SendPinSync(owner, true);
     }
 
-    /// Sweep every companion bound to this owner.
-    ///
-    /// One pass per companion, aggregated into a single report so callers that only
-    /// want "did anything happen" keep working. `lines` carries one heartbeat line per
-    /// companion, which is the only way several can be told apart in the log.
-    SyncReport SyncCompanion(Player* owner)
-    {
-        SyncReport aggregate;
-
-        if (!g_cfg.enable)
-            return aggregate;
-
-        std::vector<uint32> bots;
-        FindCompanions(owner->GetGUID().GetCounter(), bots);
-
-        // A binding the module refused to believe is news the player needs: a companion
-        // that silently stops being tracked reads as "it stopped following me", and the
-        // next thing they do is file a bug about the module rather than about the row.
-        ReportDroppedBindings(owner);
-
-        if (bots.empty())
-            return aggregate;
-
-        aggregate.hasCompanion = true;
-        g_multiCompanion = bots.size() > 1;
-
-        // One union of turn-in markers for the owner, applied after every companion has
-        // contributed: applying them per companion let the second pass clear the first
-        // companion's marker, so a giver only one of them needed flickered each sweep.
-        std::set<uint64> marks;
-
-        for (uint32 const botGuid : bots)
-        {
-            SyncReport const one = SyncCompanionFor(owner, botGuid, marks);
-
-            aggregate.added += one.added;
-            aggregate.completed += one.completed;
-            aggregate.dropped += one.dropped;
-            aggregate.reopened += one.reopened;
-            aggregate.classRaceLocked += one.classRaceLocked;
-            aggregate.prereqs += one.prereqs;
-            aggregate.failed += one.failed;
-            aggregate.companionOnline = aggregate.companionOnline || one.companionOnline;
-            aggregate.ownerName = one.ownerName;
-            aggregate.ownerLevel = one.ownerLevel;
-            aggregate.ownerQuestCount = one.ownerQuestCount;
-
-            aggregate.skipped.insert(aggregate.skipped.end(), one.skipped.begin(), one.skipped.end());
-            aggregate.refusedIds.insert(aggregate.refusedIds.end(), one.refusedIds.begin(), one.refusedIds.end());
-
-            if (one.companionOnline)
-                aggregate.lines.push_back(DescribeReport(one));
-        }
-
-        ApplyMarks(owner, marks);
-
-        // One payload and one set of quest-area circles for the whole owner, after every
-        // companion has had its pass. Both must aggregate: the client replaces what it
-        // holds on receipt, so per-companion sends would take turns erasing each other.
-        SendQuestPins(owner, bots);
-        SendPinSync(owner, false);
-
-        return aggregate;
-    }
-}
-
     /// Drive playerbots through the owner's own session, exactly as mod-wowlegends does.
     ///
     /// The playerbots command is SEC_PLAYER, so the owner is authorised for it, and its
@@ -3225,6 +3160,7 @@ namespace
     std::map<uint32, PendingSummon> g_pendingSummon;   // bot guid -> what we are waiting for
 
     /// The name a companion answers to, online or not.
+
     std::string CompanionNameFor(uint32 botGuid)
     {
         if (Player* bot = FindCompanionPlayer(botGuid))
@@ -3234,6 +3170,171 @@ namespace
             return row->Fetch()[0].Get<std::string>();
 
         return std::to_string(botGuid);
+    }
+
+    /// Does the owner carry a quest this companion does not? That is the one thing the
+    /// window has to show that the quest-log view does not: work waiting on the *player*.
+    bool OwnerHasQuestCompanionLacks(Player* owner, Player* bot)
+    {
+        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = owner->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            if (owner->GetQuestStatus(questId) == QUEST_STATUS_NONE)
+                continue;
+
+            if (bot->GetQuestStatus(questId) == QUEST_STATUS_NONE && !bot->IsQuestRewarded(questId))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// One line per companion, for the client.
+    ///
+    ///     Comp sync 2: Healy,5,32,4,ogs,110|Soak,1,32,2,o,105
+    ///                  name,class,level,quests,flags,free slots
+    ///
+    /// Flags: `o` in the world, `g` in your party, `s` same level as you, `b` behind (you
+    /// carry a quest it has not got). Compact on purpose: this rides a whisper, and the
+    /// addon splits on `,` and `|` exactly like the pin payload, so names go through
+    /// SafePinName.
+    std::string BuildCompLine(Player* owner)
+    {
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return std::string();
+
+        std::string line;
+
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            bool const online = bot && bot->IsInWorld();
+
+            std::string name;
+            std::string flags;
+            uint32 classId = 0;
+            uint32 level = 0;
+            uint32 quests = 0;
+            uint32 freeSlots = 0;
+
+            if (online)
+            {
+                name = bot->GetName();
+                classId = uint32(bot->getClass());
+                level = bot->GetLevel();
+                quests = CountQuestLog(bot);
+                int32 const free = int32(bot->GetFreeInventorySpace());
+                freeSlots = free > 0 ? uint32(free) : 0;
+
+                flags += "o";
+
+                Group* group = owner->GetGroup();
+                if (group && group->IsMember(bot->GetGUID()))
+                    flags += "g";
+
+                if (bot->GetLevel() == owner->GetLevel())
+                    flags += "s";
+
+                if (OwnerHasQuestCompanionLacks(owner, bot))
+                    flags += "b";
+            }
+            else
+            {
+                // Offline: the name is all there is. The addon dims the row and offers
+                // Summon, which is the only action that makes sense for a body that is not
+                // in the world.
+                name = CompanionNameFor(botGuid);
+            }
+
+            if (!line.empty())
+                line += "|";
+
+            line += SafePinName(name) + "," + std::to_string(classId) + "," + std::to_string(level) + "," +
+                    std::to_string(quests) + "," + (flags.empty() ? "-" : flags) + "," + std::to_string(freeSlots);
+        }
+
+        return line;
+    }
+
+    /// Send the companions line when it changes, on login, and on demand.
+    ///
+    /// Same channel and cadence as the pin payload: a whisper, because that is the only
+    /// thing the client can read. Nothing else tells the addon who is bound - commands go
+    /// one way, and a client cannot query the server.
+    void SendCompSync(Player* owner, bool force = false)
+    {
+        if (!g_cfg.pinSync || !owner || !owner->GetSession())
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        std::string const payload = BuildCompLine(owner);
+
+        std::string& last = g_lastCompSync[ownerGuid];
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        if (!force && payload == last && !last.empty())
+            return;
+
+        std::vector<std::string> chunks;
+        std::string current;
+        size_t start = 0;
+        uint32 entries = 0;
+
+        while (start <= payload.size())
+        {
+            size_t const bar = payload.find('|', start);
+            std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+
+            if (!current.empty() && current.size() + entry.size() + 1 > 150)
+            {
+                chunks.push_back(current);
+                current.clear();
+            }
+
+            if (!current.empty())
+                current += "|";
+
+            current += entry;
+            ++entries;
+
+            if (bar == std::string::npos)
+                break;
+
+            start = bar + 1;
+        }
+
+        if (!current.empty())
+            chunks.push_back(current);
+
+        if (chunks.empty())
+            chunks.push_back(std::string());
+
+        SyncReport compReport;   // only used to resolve a speaker
+
+        for (size_t i = 0; i < chunks.size(); ++i)
+        {
+            std::string line = "Comp sync ";
+
+            if (chunks.size() > 1)
+                line += std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ": ";
+            else
+                line += std::to_string(entries) + ": ";
+
+            line += chunks[i];
+
+            if (Player* speaker = ResolveCompanion(owner, compReport))
+                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+        }
+
+        last = payload;
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] comp sync -> {}: {} part(s), {} entries: {}",
+                     owner->GetName(), uint32(chunks.size()), entries, payload);
     }
 
     /// Which bound companion the player meant, by live name or by the name on the row.
@@ -3330,6 +3431,73 @@ namespace
             }
         }
     }
+
+    /// Sweep every companion bound to this owner.
+    ///
+    /// One pass per companion, aggregated into a single report so callers that only
+    /// want "did anything happen" keep working. `lines` carries one heartbeat line per
+    /// companion, which is the only way several can be told apart in the log.
+    SyncReport SyncCompanion(Player* owner)
+    {
+        SyncReport aggregate;
+
+        if (!g_cfg.enable)
+            return aggregate;
+
+        std::vector<uint32> bots;
+        FindCompanions(owner->GetGUID().GetCounter(), bots);
+
+        // A binding the module refused to believe is news the player needs: a companion
+        // that silently stops being tracked reads as "it stopped following me", and the
+        // next thing they do is file a bug about the module rather than about the row.
+        ReportDroppedBindings(owner);
+
+        if (bots.empty())
+            return aggregate;
+
+        aggregate.hasCompanion = true;
+        g_multiCompanion = bots.size() > 1;
+
+        // One union of turn-in markers for the owner, applied after every companion has
+        // contributed: applying them per companion let the second pass clear the first
+        // companion's marker, so a giver only one of them needed flickered each sweep.
+        std::set<uint64> marks;
+
+        for (uint32 const botGuid : bots)
+        {
+            SyncReport const one = SyncCompanionFor(owner, botGuid, marks);
+
+            aggregate.added += one.added;
+            aggregate.completed += one.completed;
+            aggregate.dropped += one.dropped;
+            aggregate.reopened += one.reopened;
+            aggregate.classRaceLocked += one.classRaceLocked;
+            aggregate.prereqs += one.prereqs;
+            aggregate.failed += one.failed;
+            aggregate.companionOnline = aggregate.companionOnline || one.companionOnline;
+            aggregate.ownerName = one.ownerName;
+            aggregate.ownerLevel = one.ownerLevel;
+            aggregate.ownerQuestCount = one.ownerQuestCount;
+
+            aggregate.skipped.insert(aggregate.skipped.end(), one.skipped.begin(), one.skipped.end());
+            aggregate.refusedIds.insert(aggregate.refusedIds.end(), one.refusedIds.begin(), one.refusedIds.end());
+
+            if (one.companionOnline)
+                aggregate.lines.push_back(DescribeReport(one));
+        }
+
+        ApplyMarks(owner, marks);
+
+        // One payload and one set of quest-area circles for the whole owner, after every
+        // companion has had its pass. Both must aggregate: the client replaces what it
+        // holds on receipt, so per-companion sends would take turns erasing each other.
+        SendQuestPins(owner, bots);
+        SendPinSync(owner, false);
+        SendCompSync(owner, false);
+
+        return aggregate;
+    }
+}
 
 class CompanionQuestSyncWorldScript : public WorldScript
 {
@@ -3682,6 +3850,8 @@ public:
         // does is look at it.
         SyncCompanion(player);
 
+        SendCompSync(player, true);
+
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r is now your companion "
                                  "({}/{}). Its quests follow yours from now on.",
                                  bot->GetName(), uint32(bound.size()), uint32(kMaxCompanions));
@@ -3746,7 +3916,10 @@ public:
                  player->GetName(), name, botGuid);
 
         if (g_cfg.pinSync)
+        {
             SendPinSync(player, true);
+            SendCompSync(player, true);
+        }
 
         handler->PSendSysMessage("|cff20ff20Companion quest sync|r: stopped tracking |cffffff00{}|r. The bot is "
                                  "still yours; it simply does not follow your quest log any more.", name);
@@ -4251,7 +4424,10 @@ public:
         // Reconcile the map on the way in: a pin left behind by a session that ended
         // badly is cleared the moment the player logs back in.
         if (g_cfg.pinSync)
+        {
             SendPinSync(player, true);
+            SendCompSync(player, true);
+        }
 
         // Sweep once immediately: the timer would leave the first thirty seconds of a
         // session showing whatever was true when the player last logged out.
@@ -4287,6 +4463,7 @@ public:
             PurgeCompanionState(botGuid);
 
         g_lastPinSync.erase(ownerGuid);
+        g_lastCompSync.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);
         g_sessionRefused.erase(ownerGuid);

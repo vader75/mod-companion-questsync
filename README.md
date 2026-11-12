@@ -142,6 +142,29 @@ CompanionQuestSync.BindingTable = wowlegends_companion_multi
 then `.reload config`. `sql/multi-companion.sql` does all of that and carries your
 existing bindings across, so nothing is lost on the switch.
 
+### What the client is told
+
+An addon cannot ask the server anything: commands go one way. Everything the client knows
+arrives as a grey whisper, the same channel `WLPins` already reads, and both payloads are
+**authoritative and complete** — whatever is not mentioned does not exist, so pins and rows
+disappear by omission rather than by a delete message.
+
+```
+Pin sync 1/2: 43,65,h=Kobold Candles@Healy + The Balance of Nature@Soak|64,59,g=Gold Dust Exchange
+Comp sync 2:  Healy,5,32,4,ogs,110|Soak,1,32,2,o,105
+```
+
+- **Pin sync** — `x,y,style=label`, `|` between markers, `@Name` when several companions are
+  bound. `h` is a hand-in (round marker), `g` still gathering (square). Markers at the same
+  coordinate merge into one, naming two companions and then counting (`+2`).
+- **Comp sync** — one entry per companion: `name,class,level,quests,flags,free slots`.
+  Flags are letters: `o` in world, `g` in your party, `s` same level as you, `b` behind
+  (you carry a quest it has not got).
+
+Both are chunked as `i/n` when they would overflow a whisper, sent on login, whenever the
+payload changes, after any membership change, and again every `PinSyncSeconds`. Debug level
+2 logs the payload verbatim, which is the only record of what a client was told.
+
 ### Summoning and dismissing one companion at a time
 
 `.companion summon` belongs to mod-wowlegends and only knows its single companion, so a
