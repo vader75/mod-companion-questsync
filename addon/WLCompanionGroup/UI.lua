@@ -346,6 +346,15 @@ end
 
 function G.OnStockChanged() RefreshAddPanel() end
 
+-- While the window is open, ask the server for the current state every few seconds. Without
+-- this the panel only knew what the server chose to push, so a companion dismissed a moment
+-- ago still showed as with you until the window was closed and reopened.
+local POLL_SECONDS = 8
+
+function G.PollState()
+    G.Run(".companionsync refresh")
+end
+
 function G.OnServerMessage(text)
     if addPanel and addPanel:IsShown() and serverLine then
         serverLine:SetText(COL_WARN .. text .. COL_RESET)
@@ -439,6 +448,15 @@ local function CreateWindow()
         if addPanel and addPanel:IsShown() then addPanel:Hide() else G.ShowAddPanel() end
     end, "Mint a new companion from the pool.")
     add:SetPoint("TOPRIGHT", -36, -14)
+
+    frame.elapsed = 0
+    frame:SetScript("OnUpdate", function(self, delta)
+        self.elapsed = self.elapsed + delta
+        if self.elapsed >= POLL_SECONDS then
+            self.elapsed = 0
+            G.PollState()
+        end
+    end)
 
     frame.close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     frame.close:SetPoint("TOPRIGHT", -6, -6)
