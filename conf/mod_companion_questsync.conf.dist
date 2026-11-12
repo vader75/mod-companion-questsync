@@ -160,7 +160,7 @@ CompanionQuestSync.PinSyncSeconds = 600
 #                     is also removed so the two logs can line up again.
 #        Default:     0 (report only)
 CompanionQuestSync.DropFailedBotQuests = 0
-CompanionQuestSync.RequireGrouped = 1
+CompanionQuestSync.RequireGrouped = 0
 
 # May this module mint a companion from the playerbots pool itself?
 # It claims a free AddClass body, blanks it, names it, binds it and calls it out - so a

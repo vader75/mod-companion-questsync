@@ -383,6 +383,14 @@ function G.Refresh()
 
             card.primary:SetText(online and "Dismiss" or "Summon")
 
+            -- Summon and Dismiss were both green, which reads as "both are the good thing to
+            -- press". Sending a companion away is neutral: gold text, not a positive green.
+            if online then
+                card.primary:GetFontString():SetTextColor(1, 0.82, 0.35)
+            else
+                card.primary:GetFontString():SetTextColor(0.35, 1, 0.35)
+            end
+
             if companion.level > 0 and not G.HasFlag(companion, "s") then card.levelButton:Show()
             else card.levelButton:Hide() end
 
@@ -392,6 +400,25 @@ function G.Refresh()
         else
             card.companion = nil
             card:Hide()
+        end
+    end
+
+    -- With fewer than four companions the roster leaves empty rows. Rather than a window that
+    -- looks unfinished, the space carries the one line that matters: how many slots are left.
+    if frame.hint then
+        local free = MAX_CARDS - count
+
+        frame.hint:ClearAllPoints()
+        frame.hint:SetPoint("TOPLEFT", 18, -58 - count * (CARD_HEIGHT + CARD_GAP) - 6)
+
+        if count == 0 then
+            frame.hint:SetText("")
+        elseif free > 0 then
+            frame.hint:SetText(("%s%d of %d companions  ·  %d slot%s free - press + Add companion%s"):format(
+                COL_MUTED, count, MAX_CARDS, free, free == 1 and "" or "s", COL_RESET))
+        else
+            frame.hint:SetText(("%s%d of %d companions - a full group of five with you%s"):format(
+                COL_MUTED, count, MAX_CARDS, COL_RESET))
         end
     end
 
@@ -453,6 +480,10 @@ local function CreateWindow()
 
     cards = {}
     for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
+
+    frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.hint:SetJustifyH("LEFT")
+    frame.hint:SetPoint("TOPLEFT", 18, -300)
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.empty:SetPoint("TOPLEFT", 20, -84)
