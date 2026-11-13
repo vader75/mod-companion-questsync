@@ -28,9 +28,16 @@ The button colours say which is which: `Dismiss` is gold text, `Summon` is green
 the body to the pool for good. `waiting on you` is the flag the quest log cannot give
 you — you carry a quest this companion has not been given yet.
 
-Footer: **Summon missing**, **Dismiss all**, **Refresh**, **Quest log**. While the window
+Footer: **Summon missing**, **Dismiss all**, **Refresh**, **Quest log**, **Ground quests**.
+While the window
 is open it asks the server for its state every 8 seconds, so a companion dismissed a
 moment ago stops showing as present without closing and reopening the panel.
+
+**Ground quests** is the fallback for a collection quest whose items lie on the ground — oats
+in a field, cloth in a crate. The companion hops to those objects and takes them by itself
+(on a two-second clock, so it is not a wait); the button finishes the ones it cannot reach,
+and only ever collects items that actually lie on the ground. It answers in chat with what it
+gathered or that nothing is owed.
 
 `+ Add companion` opens the create panel: race and class dropdowns (with pool stock
 counted per combination), a suggested name you can edit, and the server's answer shown
@@ -52,12 +59,15 @@ to the minimap's own button cluster and read as a stray lens against the clock.
 Everything else is a button, so there are only a few:
 
 ```
-/csync            open / close      (/companions also works)
+/csync            open / close            (/wlcg and /companions also work)
 /csync test       parser self-test: two known payloads, one chunked in two parts
 /csync quests     ask the server for the quest log view
-/csreset       put the minimap launcher back in its corner
-/csstate       print where the launcher is and what it is anchored to
+/csync catchup    finish ground-object quests (the Ground quests button sends this)
+/csreset          put the minimap launcher back in its corner
+/csstate          print where the launcher is and what it is anchored to
 ```
+
+Version 1.3.0.
 
 `/csync test` is the in-game sanity check. If the window looks empty or stale, run it
 first: it separates "the addon cannot parse" from "the server is not sending".

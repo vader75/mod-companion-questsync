@@ -40,10 +40,13 @@ Two entry points, one rule set:
 
 Per pass, for each owner with bindings:
 
-1. **Upkeep, always** — level alignment (`LevelMode`), bags (`ExtraBags`), and the
-   starting kit on a body that has none. This is *not* gated by grouping: a companion
-   that slipped out of the party is still kept healthy. Level changes wait for a quiet
-   moment (`SkipInCombat`); quest copying does not.
+1. **Upkeep, always** — level alignment (`LevelMode`), bags (`ExtraBags`), the starting
+   kit on a body that has none, and **wearing upgrades**. This is *not* gated by
+   grouping: a companion that slipped out of the party is still kept healthy. Level
+   changes and equipping wait for a quiet moment (`SkipInCombat`); quest copying does
+   not. Upgrade checks run every three minutes and separately from the bag-pressure
+   rescue, so a better item goes on the companion rather than sitting in its pack until
+   the pack fills.
 2. **Quests** — every quest in the owner's log the companion lacks is added via
    `AddQuestAndCheckCompletion` (or `Player::AddQuest` with `ForceAccept = 1`).
    Eligibility uses the core's own rules; a refusal is reported with the gate that
@@ -54,9 +57,28 @@ Per pass, for each owner with bindings:
 4. **Drops** — `DropExtraBotQuests = 1` (default) removes companion quests the owner
    does not have, so the logs match; `DropExtraGraceSeconds` gives a freshly added
    quest time to settle first.
-5. **Pins and whispers** — the open quests of companions the owner cannot see are
+5. **Gathering, on its own clock** — a collection quest whose items lie on the ground
+   ("eight handfuls of oats") is not a kill-and-loot quest: the item is in a chest
+   standing in a field, and playerbots lists such an object as loot but never walks to
+   one. Every two seconds the companion is stepped to a spawned object it needs, takes
+   what it holds, and the emptied object is deactivated so it cannot be farmed twice.
+   The whole objective clears in one pass, not one object per thirty-second pass, and
+   the companion says so once when it finishes
+   (*"I picked up the last of '<quest>' off the ground…"*). If the world will not yield
+   the items, `CatchUpGroundItems` finishes the quest after `CatchUpIdleSeconds` with
+   no progress — but only ground items, and only for a quest the **owner has already
+   been rewarded**, so the companion catches up rather than running ahead.
+   `.companionsync catchup` (and the window's **Ground quests** button) does the same on
+   demand.
+6. **Hand-ins** — a completed quest is handed in through the companion's own reward
+   command. If the owner is standing at the giver the companion steps to their side;
+   if they are anywhere else it goes to the giver itself and says where it went, so
+   "cannot talk to the quest giver" is a distance the module never creates.
+7. **Pins and whispers** — the open quests of companions the owner cannot see are
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
-   is said once, in words, naming the next action.
+   is said once, in words, naming the next action. The roster line is only re-sent when
+   something that matters changes: free bag slots drift on their own and wait for a
+   slower clock rather than being broadcast every pass.
 
 Class- and race-locked quests are expected for a differently-built companion: they
 are counted separately and reported (`NotifySkippedQuests`). Objective counters are
@@ -97,6 +119,36 @@ SOAP, including for **offline** owners:
 | `.companionadmin integrity [fix]` | audit both tables; `fix` repairs what is safe |
 | `.companionadmin gear <player>` | what each bound body is wearing, slot by slot |
 | `.companionadmin dress <player>` | run the dressing pass now |
+| `.companionadmin catchup <player>` | finish that player's ground-object quests |
+
+## Talking to the client
+
+The module pushes state to two addons; it never asks the client for anything.
+
+- **Channel:** every payload is a system message prefixed `CSYNC|`, sent to the owner's
+  session. Not a whisper — a whisper needs a live speaker, and the map and the window have
+  to work with no companion in the world.
+- **Both consumers register `CHAT_MSG_SYSTEM`, ignore any line without the tag, and strip
+  exactly it.** When the channel or the tag changes, both change in the same pass: an
+  addon left on the old channel receives nothing and keeps drawing what it last wrote to
+  saved variables.
+- **Presence:** on login the module sends `CSYNC|Hello <interval>` unconditionally, outside
+  every cosmetic switch. That is how the client knows the module is loaded, and the interval
+  it carries sets how long the window waits for the first payload before it says anything.
+- **Payloads:**
+
+  | Line | Meaning |
+  |---|---|
+  | `Comp sync N: name,class,race,level,quests,flags,free\|…` | the roster; flags are `o` in world, `g` in party, `s` same level, `b` behind |
+  | `Pin sync N: x,y,h=Quest\|x,y,g=Quest\|…` | the map, which is authoritative: anything not listed is removed |
+  | `Pool stock N: 1-5=8\|…` | free bodies per race-class, so the picker can offer only combinations that exist |
+
+  Sets longer than one line are chunked on `|` boundaries as `1/3:`, `2/3:`, `3/3:` and
+  rebuilt by the client before anything is drawn.
+
+The addons are `addon/CompanionSync` (the window and the buttons — companion roster, create,
+summon, dismiss, release, **Ground quests**) and `addon/WLPins` (titled **Companion Pins**:
+the map markers and the key in the map's corner). Both are client-side only.
 
 ## Configuration
 
