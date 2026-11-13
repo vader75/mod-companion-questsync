@@ -55,8 +55,15 @@ Full detail: [`src`-side readme](https://github.com/vader75/wow-legends/blob/mas
 
 ## Where this code lives
 
-The module that **builds and runs** is the copy inside the realm source tree,
-`modules/mod-companion-questsync` in the `wow-legends` repository. This repository
-mirrors that copy and carries the addon and tests. Change the module in one place and
-copy it across — `src/`, `conf/` and `sql/` here are byte-identical to the realm copy;
-the addon is only here.
+**This repository is the single source of truth** for the module, the addon and the
+tests. The realm source tree holds a clone at `modules/mod-companion-questsync`, which
+is where the worldserver build picks it up; that clone is ignored by the realm
+repository, so there is exactly one tracked copy of this code.
+
+```
+git clone https://github.com/vader75/mod-companion-questsync <server-src>/modules/mod-companion-questsync
+```
+
+Edit here, then copy into the build tree before building. Nothing under `modules/` in
+the realm repository is tracked any more — that duplication is what let the two copies
+drift a thousand lines apart.
