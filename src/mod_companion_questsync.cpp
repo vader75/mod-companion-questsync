@@ -268,6 +268,7 @@ namespace
 
     std::map<uint32, std::vector<PendingNotice>> g_pendingNotices;  // bot guid -> lines
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
+    std::unordered_map<uint32, uint32> g_equipAt;           // bot guid -> unix time
     std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
     std::map<std::pair<uint32, uint32>, std::string> g_openLatch;  // last owed-strings logged
@@ -498,6 +499,7 @@ namespace
         g_notified.erase(botGuid);
         g_pendingNotices.erase(botGuid);
         g_sellAt.erase(botGuid);
+        g_equipAt.erase(botGuid);
         g_lastWhisperByBot.erase(botGuid);
         for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
             g_gearCreatedAt.erase((uint64(botGuid) << 8) | slot);   // guids are pooled
@@ -2707,6 +2709,33 @@ namespace
                      bot->GetName(), bot->GetFreeInventorySpace());
     }
 
+    /// Wear upgrades even when the bags are not full.
+    ///
+    /// playerbots has the judgement - "equip upgrade" compares what the companion carries
+    /// against what it wears - but this module only ever issued it as a bag-pressure rescue,
+    /// so a companion with room in its pack kept a better drop in the pack while fighting in
+    /// the old one. Upgrade gear as it arrives, on its own throttle.
+    void TryEquipUpgrades(Player* owner, Player* bot)
+    {
+        if (!bot || !bot->IsAlive() || bot->IsInCombat())
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_equipAt[botGuid];
+
+        if (last && now - last < 180)
+            return;
+
+        last = now;
+
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
+
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} asked to wear any upgrade it is carrying", bot->GetName());
+    }
+
     std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
     uint32 TidyInventory(Player* bot);   // defined below, used by the accept path
     /// The companion bins grey loot when its bags are full - say so, once per
@@ -3535,6 +3564,7 @@ namespace
         // Keep a couple of slots free so quest items can be picked up and
         // quest source items stored, instead of discovering the shortage only
         // when an accept is refused.
+        TryEquipUpgrades(owner, bot);                  // better gear goes on as it arrives
         TrySellJunk(owner, bot);                       // earn coin first
         NotifyJunk(owner, bot, TidyInventory(bot));    // destroy only what is left
 
