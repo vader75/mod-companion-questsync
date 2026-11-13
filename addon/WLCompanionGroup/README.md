@@ -94,3 +94,9 @@ python ../../tests/lua_sandbox.py  # loads Core.lua and UI.lua against a stub Wo
 `test_parse.py` mirrors `Core.lua`'s parser in Python, so a payload change cannot silently
 break the window. `lua_sandbox.py` catches the failure the client hides — a file that
 does not compile at all, which looks exactly like an addon that simply shows nothing.
+
+## Licence
+
+GNU General Public License, version 2 — the same terms as the module it talks to; see
+[`LICENSE`](../../LICENSE) in the repository root. Note that the server side links against
+`mod-playerbots` (AGPL-3.0), which is why AGPL-3.0 suits a distributed install.

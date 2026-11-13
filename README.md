@@ -218,6 +218,20 @@ The in-game window is part of this repository,
 action, a draggable minimap launcher, and quest pins. It is optional — the module works
 with commands alone — and it reads the same protocol lines.
 
+## Licence and release
+
+- **Licence**: GNU General Public License, version 2 — see [`LICENSE`](LICENSE). The addon in
+  `addon/WLCompanionGroup` carries the same terms.
+- **Compatibility note**: this module includes headers from `mod-playerbots`, which is
+  licensed AGPL-3.0, and GPL-2.0 cannot be combined with AGPL-3.0. If you redistribute the
+  module alongside playerbots — which is the normal deployment — AGPL-3.0 is the correct
+  licence for this repository.
+- **Release**: module, schema and addon ship together from this repository. The addon's
+  `.toc` carries the version (`1.0.8`); the schema is `sql/companion-questsync.sql`, which
+  creates `cq_bindings` and `cq_pool` and migrates the pre-decoupling tables.
+- **What is not here**: no core, `mod-playerbots` or `mod-wowlegends` source. Those keep
+  their own licences and their own repositories.
+
 ## Where this code lives
 
 This repository is the single source of truth for the module, the addon and the tests.
