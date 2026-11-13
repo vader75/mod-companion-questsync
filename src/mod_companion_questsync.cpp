@@ -42,6 +42,7 @@
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
+#include "LootMgr.h"
 #include "Map.h"
 #include "MapMgr.h"
 #include <chrono>
@@ -1175,13 +1176,30 @@ namespace
                     bot->StopMoving();
                     bot->NearTeleportTo(x, y, z, bot->GetOrientation());
 
+                    // Take what it holds, the way clicking it would. playerbots lists a quest
+                    // object as loot and never opens one, so stepping alone left the count at
+                    // 0/8 forever while the log cheerfully said "stepped".
+                    uint32 const lootId = go->GetGOInfo() ? go->GetGOInfo()->GetLootId() : 0;
+                    uint32 taken = 0;
+
+                    if (lootId)
+                    {
+                        uint32 const before = bot->GetItemCount(itemId, true);
+                        bot->AutoStoreLoot(NULL_BAG, NULL_SLOT, lootId, LootTemplates_Gameobject);
+                        taken = bot->GetItemCount(itemId, true) - before;
+                    }
+
+                    if (taken)
+                        go->SetLootState(GO_JUST_DEACTIVATED);   // emptied, so it cannot be farmed twice
+
                     what = std::string(go->GetName()) + " for " + quest->GetTitle();
 
                     if (g_cfg.debug >= 2)
-                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering: stepped {} to '{}' (item {}, {}/{})",
-                                 bot->GetName(), go->GetName(), itemId, entry.second.ItemCount[i], need);
+                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} stepped to '{}' and took {} x{} ({} taken of {} so far)",
+                                 bot->GetName(), go->GetName(), taken, itemId,
+                                 uint32(bot->GetItemCount(itemId, true)), need);
 
-                    return true;
+                    return taken > 0;
                 }
             }
         }
