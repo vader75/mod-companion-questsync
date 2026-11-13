@@ -243,5 +243,13 @@ exactly one copy of this code is tracked anywhere.
 git clone https://github.com/vader75/mod-companion-questsync <server-src>/modules/mod-companion-questsync
 ```
 
-Edit here, then copy into the build tree before building. Keeping a tracked copy in
-both places is what let the two drift a thousand lines apart.
+Edit here, then copy into the build tree before building:
+
+```
+scripts/install-to-server.sh D:/Build/WOW_Legends_Server_Source [client-AddOns-dir]
+```
+
+The script copies `src conf sql addon` (the whole module, so the clone can never again
+be "current" on two files and missing seven), and installs both addons when a client
+directory is given. Keeping a tracked copy in two repositories is what let the two
+drift a thousand lines apart.

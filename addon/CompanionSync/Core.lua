@@ -218,12 +218,11 @@ listener:SetScript("OnEvent", function(_, event, message)
             -- your companions", "the pool has no free body"); surface the last one in the
             -- panel so a refusal is visible without reading chat
             local plain = StripColors(message)
-            -- the module's own greeting counts as proof of life: it arrives at login,
-            -- before the first payload, and it is what a player sees when everything is
-            -- working
-            if plain:find("mod-companion-questsync", 1, true) then
-                G.sawServerLine = true
-            end
+
+            -- Proof of life no longer depends on matching the greeting text: the module
+            -- sends "CSYNC|Hello <interval>" at login whatever its chat settings are, and
+            -- IsProtocolLine above already counts it. (Matching prose is how the previous
+            -- version broke the moment the sentence was reworded.)
 
             if plain:find("Companion quest sync", 1, true) then
                 plain = plain:gsub("^Companion quest sync:?%s*", "")
@@ -235,6 +234,14 @@ listener:SetScript("OnEvent", function(_, event, message)
             return
         end
         text = StripColors(string.sub(message, 7))   -- drop "CSYNC|"
+
+        -- the module says hello at login and tells us how often it passes; the panel's
+        -- patience scales with this instead of a hard-coded guess
+        local hello = string.match(text, "^Hello%s+(%d+)$")
+        if hello then
+            G.serverInterval = tonumber(hello)
+            return
+        end
     end
 
     -- companions

@@ -6401,6 +6401,11 @@ public:
         // This used to sit behind `announceLogin`, which meant that turning off two chat
         // lines also turned off the login payload - the client then saw nothing for up to
         // a full pass and reported the module as not answering.
+        // The hello is a CSYNC protocol line, sent whatever else is switched off: it is
+        // how the client knows the module is loaded, and it carries the pass interval so
+        // the client's patience scales with the config instead of a hard-coded guess.
+        SendProtocolLine(player, "Hello " + std::to_string(g_cfg.intervalSeconds));
+
         if (g_cfg.pinSync)
         {
             SendPinSync(player, true);

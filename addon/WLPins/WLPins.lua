@@ -1,4 +1,4 @@
--- WL Companion Pins - 3.3.5a (Interface 30300)  v0.3
+-- Companion Pins - 3.3.5a (Interface 30300)
 --
 -- The server cannot draw a quest-area pin for a quest that is not in your own log,
 -- and cannot colour one at all. The companion already says where it needs to go:
@@ -11,12 +11,18 @@
 --       black outline plate so nothing can be mistaken for map art.
 
 local ADDON = "WLPins"
--- Pins are deleted, never recoloured, once they are this old. /wlpins life changes it.
+-- Pins are deleted, never recoloured, once they are this old. /cpins life changes it.
 local PIN_LIFETIME = 30 * 60
 local FLIP_Y = false
 
 local WLPins = CreateFrame("Frame")
 WLPins.debug = false
+
+-- read the version from our own TOC, because hand-written version comments drift
+do
+    local toc = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
+    WLPins.version = (toc and toc("WLPins", "Version")) or "?"
+end
 WLPins.offsetX = 0
 WLPins.offsetY = 0
 WLPins.pins = {}
@@ -239,7 +245,7 @@ function WLPins:Redraw()
     end
 
     for i, pin in ipairs(self.pins) do
-        -- "/wlpins only <name>" narrows the map to one companion; the others are hidden
+        -- "/cpins only <name>" narrows the map to one companion; the others are hidden
         -- but kept, so clearing the filter brings them straight back.
         if WLPins.only and pin.companion and WLPins.only ~= string.lower(pin.companion) then
             if WLPins.frames[i] then WLPins.frames[i]:Hide() end
@@ -292,7 +298,7 @@ function WLPins:Redraw()
         f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
         table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width })
 
-        end   -- /wlpins only
+        end   -- /cpins only
         shown = shown + 1
     end
 
@@ -320,8 +326,8 @@ WLPins:RegisterEvent("WORLD_MAP_UPDATE")
 WLPins:SetScript("OnEvent", function(self, event, arg1)
     if event == "PLAYER_LOGIN" then
         LoadDB()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r v0.3 loaded - " ..
-            #self.pins .. " pin(s). /wlpins for help.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r v" .. WLPins.version ..
+            " loaded - " .. #self.pins .. " pin(s). /cpins for help.")
 
     elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER"
         or event == "CHAT_MSG_SYSTEM" then
@@ -409,19 +415,21 @@ end)
 -- commands
 --------------------------------------------------------------------------
 
-SLASH_WLPINS1 = "/wlpins"
+-- /cpins is the name; /wlpins stays registered because hands remember it
+SLASH_WLPINS1 = "/cpins"
+SLASH_WLPINS2 = "/wlpins"
 SlashCmdList["WLPINS"] = function(msg)
     msg = string.lower(msg or "")
 
     if msg == "clear" then
         WLPins.pins = {}
         SaveDB(); WLPins:Redraw()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r cleared.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r cleared.")
 
     elseif msg == "flip" then
         FLIP_Y = not FLIP_Y
         WLPins:Redraw()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r vertical flip " ..
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r vertical flip " ..
             (FLIP_Y and "on" or "off") .. ".")
 
     elseif string.find(msg, "^offset") then
@@ -442,16 +450,16 @@ SlashCmdList["WLPINS"] = function(msg)
         if name then
             WLPins.only = string.lower(name)
             WLPins:Redraw()
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing only " .. name .. ".")
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " .. name .. ".")
         else
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing only " ..
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " ..
                 (WLPins.only or "everyone") .. " - /wlpins only <name>, /wlpins all")
         end
 
     elseif msg == "all" then
         WLPins.only = nil
         WLPins:Redraw()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r showing every companion.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing every companion.")
 
     elseif string.find(msg, "^life") then
         local minutes = tonumber(string.match(msg, "^life%s+(%d+)"))
@@ -459,10 +467,10 @@ SlashCmdList["WLPINS"] = function(msg)
             PIN_LIFETIME = minutes * 60
             SaveDB()
             DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffWL Companion Pins|r pins now expire after %d minute(s).", minutes))
+                "|cff00ccffCompanion Pins|r pins now expire after %d minute(s).", minutes))
         else
             DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffWL Companion Pins|r pins live %d minute(s) - change it with /wlpins life 60",
+                "|cff00ccffCompanion Pins|r pins live %d minute(s) - change it with /wlpins life 60",
                 math.floor(PIN_LIFETIME / 60)))
         end
 
@@ -477,7 +485,7 @@ SlashCmdList["WLPINS"] = function(msg)
 
     elseif msg == "list" then
         if #WLPins.pins == 0 then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r: no pins.")
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r: no pins.")
             return
         end
         for _, pin in ipairs(WLPins.pins) do
@@ -486,7 +494,7 @@ SlashCmdList["WLPINS"] = function(msg)
         end
 
     else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r - signposts from the companion's whispers")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r - signposts from the companion's whispers")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  hand in a copy the companion owes")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff66b3ffsquare blue ?|r  a turn-in only it can do")

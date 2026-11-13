@@ -2,7 +2,7 @@
 
 This mirrors the parser in Core.lua line for line: split the payload on '|', then each
 entry on ',' into name,class,level,quests,flags,free. It cannot catch a Lua typo - run
-`/wlcg test` in game for that - but it does catch a change in the payload that would break
+`/csync test` in game for that - but it does catch a change in the payload that would break
 the window, which is the failure that matters after a server-side edit.
 
     python test_parse.py

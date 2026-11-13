@@ -782,11 +782,12 @@ probe:SetScript("OnEvent", function(self)
             return
         end
 
-        -- longer than one pass (IntervalSeconds, 30 by default) plus a margin: the first
-        -- payload can legitimately take a full interval to arrive, and a warning that fires
-        -- before it is a false alarm that sends players looking for a broken module
+        -- longer than one pass plus a margin. The interval comes from the server's hello
+        -- line ("CSYNC|Hello 30") when it has arrived; 30 is the config default and 45 is
+        -- the floor, so a realm that syncs every 90s does not get a false alarm at 46.
         waited = waited + delta
-        if waited < 45 then return end
+        local patience = math.max(45, (G.serverInterval or 30) + 15)
+        if waited < patience then return end
 
         frame:SetScript("OnUpdate", nil)
         DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: the server is not answering - "

@@ -27,7 +27,7 @@ if [ ! -d "$server/modules" ]; then
 fi
 
 mkdir -p "$target"
-for part in src conf sql README.md CMakeLists.txt LICENSE; do
+for part in src conf sql addon README.md CMakeLists.txt LICENSE; do
     if [ -e "$repo/$part" ]; then
         rm -rf "${target:?}/$part"
         cp -r "$repo/$part" "$target/$part"
@@ -39,9 +39,13 @@ echo "module -> $target"
 
 if [ $# -ge 2 ]; then
     addons="$2"
-    mkdir -p "$addons/WLCompanionGroup"
-    cp "$repo"/addon/WLCompanionGroup/* "$addons/WLCompanionGroup/"
-    echo "addon  -> $addons/WLCompanionGroup"
+    for a in CompanionSync WLPins; do
+        if [ -d "$repo/addon/$a" ]; then
+            mkdir -p "$addons/$a"
+            cp "$repo"/addon/$a/*.lua "$repo"/addon/$a/*.toc "$addons/$a/"
+            echo "addon  -> $addons/$a"
+        fi
+    done
 fi
 
 echo
