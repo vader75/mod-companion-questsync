@@ -752,3 +752,27 @@ SlashCmdList["WLCGSTATE"] = function()
         :format(s.launcher or "?", s.minimap or "?", s.parent or "?", s.point or "?",
                 s.x or 0, s.y or 0, tostring(s.shown), tostring(s.width), s.strata or "?", tostring(s.alpha)))
 end
+
+-- If the server never says anything, say so once. A window whose buttons all do nothing is
+-- worse than one that admits the module is not running - and "no companions yet" and "no
+-- module" look identical otherwise.
+local probe = CreateFrame("Frame")
+probe:RegisterEvent("PLAYER_ENTERING_WORLD")
+probe:SetScript("OnEvent", function(self)
+    self:UnregisterEvent("PLAYER_ENTERING_WORLD")
+
+    local waited = 0
+    self:SetScript("OnUpdate", function(frame, delta)
+        if G.sawServerLine then
+            frame:SetScript("OnUpdate", nil)
+            return
+        end
+
+        waited = waited + delta
+        if waited < 20 then return end
+
+        frame:SetScript("OnUpdate", nil)
+        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r companions: the server is not answering - "
+            .. "is mod-companion-questsync enabled?")
+    end)
+end)

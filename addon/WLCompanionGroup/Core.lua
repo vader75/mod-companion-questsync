@@ -209,6 +209,10 @@ listener:SetScript("OnEvent", function(_, event, message)
     local text = StripColors(message)
 
     if event == "CHAT_MSG_SYSTEM" then
+        -- anything the server says proves the module is loaded and talking; the window uses
+        -- this to tell "no companions yet" apart from "no module answering at all"
+        if IsProtocolLine(message) then G.sawServerLine = true end
+
         if not IsProtocolLine(message) then
             -- the module answers button presses with a plain system line ("{} is not one of
             -- your companions", "the pool has no free body"); surface the last one in the
@@ -217,6 +221,7 @@ listener:SetScript("OnEvent", function(_, event, message)
             if plain:find("Companion quest sync", 1, true) then
                 plain = plain:gsub("^Companion quest sync:?%s*", "")
                 G.lastServerMessage = plain
+                G.sawServerLine = true
 
                 if G.OnServerMessage then G.OnServerMessage(plain) end
             end
