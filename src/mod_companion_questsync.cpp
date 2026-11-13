@@ -183,6 +183,7 @@ namespace
         uint32 completed = 0;
         uint32 reopened = 0;
         uint32 refused = 0;
+        uint32 gathered = 0;    // items taken off the ground, by the step or the fallback
         uint8 levelFrom = 0;
         uint8 levelTo = 0;
     };
@@ -521,6 +522,32 @@ namespace
                 ++it;
         }
     }
+
+    /// The one thing worth saying to this owner on this pass.
+    ///
+    /// Several conditions can want a whisper in the same pass - a hand-in ready, items still
+    /// owed, a nudge, junk in the bags - and the old shape queued them all, so the player got
+    /// a burst and then a stale line forty seconds later. Collect instead, keep the most
+    /// actionable, and say exactly one thing.
+    struct PassNote
+    {
+        uint8 priority = 0;      // 3 hand-in ready, 2 work owed, 1 chatter
+        std::string text;
+    };
+
+    std::map<uint32, PassNote> g_passNotes;   // owner guid -> best note this pass
+
+    void Note(Player* owner, uint8 priority, std::string const& text)
+    {
+        if (!owner || text.empty())
+            return;
+
+        PassNote& note = g_passNotes[owner->GetGUID().GetCounter()];
+
+        if (priority >= note.priority)
+            note = PassNote{ priority, text };
+    }
+
 
     void PurgeCompanionState(uint32 botGuid)
     {
@@ -926,6 +953,19 @@ namespace
         return true;
     }
 
+    void FlushNotes(Player* owner, Player* speaker)
+    {
+        auto itr = g_passNotes.find(owner->GetGUID().GetCounter());
+        if (itr == g_passNotes.end())
+            return;
+
+        std::string const text = itr->second.text;
+        g_passNotes.erase(itr);
+
+        if (!text.empty() && speaker)
+            SayToOwner(speaker, owner, text);
+    }
+
     /// Tell the owner, once per quest, that the companion could not take it.
     /// The message comes from the companion itself, which is how every other
     /// bot message in this realm arrives; repeats are suppressed until the quest
@@ -1276,6 +1316,8 @@ namespace
 
                 what = std::string(gatheredFrom) + " for " + quest->GetTitle();
 
+                g_session[owner->GetGUID().GetCounter()].gathered += collected;
+
                 // Say so, once. A completion with no word from the companion reads as nothing
                 // having happened, and the useful half of the message is what comes next.
                 if (bot->GetItemCount(itemId, true) >= need
@@ -1401,6 +1443,8 @@ namespace
                 continue;
 
             stall.second = now;
+
+            g_session[owner->GetGUID().GetCounter()].gathered += granted;
 
             LOG_INFO("server.loading", "[CompanionQuestSync] catch-up: {} took {} ground item(s) for '{}' after {}s with no progress",
                      bot->GetName(), granted, quest->GetTitle(), stalledFor);
@@ -1756,15 +1800,15 @@ namespace
                 // done - asking them along reads as "you still owe this", which they do
                 // not. It is the companion's own errand; say it that way.
                 if (owner->IsQuestRewarded(questId))
-                    SayToOwner(bot, owner, "I still owe " + spot.name + " my own copy of '" +
-                                          quest->GetTitle() +
-                                          "' - I will hand it in next time we are near" +
-                                          (coords.empty() ? "." : " (" + coords + ")."));
+                    Note(owner, 2, "I still owe " + spot.name + " my own copy of '" +
+                                   quest->GetTitle() +
+                                   "' - I will hand it in next time we are near" +
+                                   (coords.empty() ? "." : " (" + coords + ")."));
                 else
-                    SayToOwner(bot, owner, "When we get a chance, could we stop by " + spot.name +
-                                          "? I can hand in '" + quest->GetTitle() + "' there - about " +
-                                          std::to_string(uint32(dist)) + " yards from me" +
-                                          (coords.empty() ? "." : ", " + coords + "."));
+                    Note(owner, 3, "When we get a chance, could we stop by " + spot.name +
+                                   "? I can hand in '" + quest->GetTitle() + "' there - about " +
+                                   std::to_string(uint32(dist)) + " yards from me" +
+                                   (coords.empty() ? "." : ", " + coords + "."));
                 return;
             }
         }
@@ -1845,9 +1889,9 @@ namespace
             g_repairing[bot->GetGUID().GetCounter()].insert(questId);
 
             if (g_cfg.notifySkipped >= 2)
-                SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
-                                      "' before moving on? I still owe " + DescribeMissingItems(bot, quest) +
-                                      " - I will gather them as we go, then I can hand it in.");
+                Note(owner, 2, "Could we help each other finish '" + quest->GetTitle() +
+                               "' before moving on? I still owe " + DescribeMissingItems(bot, quest) +
+                               " - I will gather them as we go, then I can hand it in.");
         }
 
         // Second half of the same story: once it has collected what it owed, say
@@ -2060,10 +2104,11 @@ namespace
                 continue;
 
             last = now;
-            SayToOwner(bot, owner, "Could we help each other finish '" + quest->GetTitle() +
-                                  "' before we move on? I still owe " + owed +
-                                  " - I will gather them as we go" +
-                                  (where.empty() ? "." : " (" + where + ")."), 45, questId);
+            Note(owner, 2, "Could we help each other finish '" + quest->GetTitle() +
+                           "' before we move on? I still owe " + owed +
+                           " - I will gather them as we go" +
+                           (where.empty() ? "." : " (" + where + ")."));
+            g_nudgeAt[key] = now;
             return;                                  // one request per pass
         }
     }
@@ -5206,6 +5251,16 @@ namespace
         SendPinSync(owner, false);
         SendCompSync(owner, false);
 
+        // One message, after everything is known: the highest-priority thing this pass found.
+        for (uint32 const botGuid : bots)
+        {
+            if (Player* speaker = FindCompanionPlayer(botGuid); speaker && speaker->IsInWorld())
+            {
+                FlushNotes(owner, speaker);
+                break;
+            }
+        }
+
         return aggregate;
     }
 }
@@ -6069,6 +6124,7 @@ public:
                     continue;
 
                 forBot += granted;
+                g_session[ownerGuid].gathered += granted;
 
                 handler->PSendSysMessage("|cff20ff20{}|r: gathered the rest of '{}' ({} item(s)).",
                                          bot->GetName(), quest->GetTitle(), granted);
@@ -7137,15 +7193,18 @@ public:
         SessionTally const tally = itr->second;
         g_session.erase(itr);
 
-        if (!tally.added && !tally.onAccept && !tally.completed && !tally.refused && !tally.reopened && !tally.levelFrom)
+        if (!tally.added && !tally.onAccept && !tally.completed && !tally.refused && !tally.reopened &&
+            !tally.gathered && !tally.levelFrom)
             return;
 
         std::string level;
         if (tally.levelFrom && tally.levelTo)
             level = ", level " + std::to_string(tally.levelFrom) + " -> " + std::to_string(tally.levelTo);
 
-        LOG_INFO("server.loading", "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused{}",
-                 player->GetName(), tally.added + tally.onAccept, tally.onAccept, tally.completed, tally.reopened, tally.refused, level);
+        LOG_INFO("server.loading",
+                 "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground{}",
+                 player->GetName(), tally.added + tally.onAccept, tally.onAccept, tally.completed, tally.reopened,
+                 tally.refused, tally.gathered, level);
     }
     /// Instant mirror: the moment a real player accepts a quest, hand it to the
     /// companion. The 20 s sweep stays as the safety net (logins, level gates,
