@@ -307,8 +307,14 @@ end
 --------------------------------------------------------------------------
 
 WLPins:RegisterEvent("PLAYER_LOGIN")
+-- The module sends its pins as system messages prefixed CSYNC, not whispers: a whisper
+-- needs a live speaker, and the map has to work when no companion is out. This addon kept
+-- listening on the whisper channel after that change, so it silently received nothing and
+-- its pins were whatever an older session had left in saved variables - an old title sitting
+-- on another quest's area.
 WLPins:RegisterEvent("CHAT_MSG_WHISPER")
 WLPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
+WLPins:RegisterEvent("CHAT_MSG_SYSTEM")
 WLPins:RegisterEvent("WORLD_MAP_UPDATE")
 
 WLPins:SetScript("OnEvent", function(self, event, arg1)
@@ -317,7 +323,8 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWL Companion Pins|r v0.3 loaded - " ..
             #self.pins .. " pin(s). /wlpins for help.")
 
-    elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER" then
+    elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER"
+        or event == "CHAT_MSG_SYSTEM" then
         if self.debug then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper: " .. tostring(arg1))
         end
@@ -327,6 +334,12 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         -- colour codes before trying to read anything out of them
         local text = string.gsub(arg1 or "", "|c%x%x%x%x%x%x%x%x", "")
         text = string.gsub(text, "|r", "")
+
+        -- system messages carry every line the server says; only ours are prefixed
+        if event == "CHAT_MSG_SYSTEM" then
+            if string.sub(text, 1, 6) ~= "CSYNC|" then return end
+            text = string.sub(text, 7)
+        end
 
         -- "Pin sync 1/3: ..." arrives in parts when the companion carries more quests
         -- than one whisper can hold. Hold them until the set is complete, then rebuild
