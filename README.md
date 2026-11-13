@@ -201,6 +201,14 @@ cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DS
 cmake --build . --config RelWithDebInfo --target worldserver
 ```
 
+Copy it into a server source tree with the script, which also installs the addon if
+you give it a client path:
+
+```
+scripts/install-to-server.sh <server-src> [<client>/Interface/AddOns]
+mysql -u <user> -p wl_characters < sql/companion-questsync.sql    # first install only
+```
+
 Adding the module requires a CMake **re-run** (the module config list is baked in at
 configure time), and on an existing install the `.conf.dist` must be copied to
 `configs/modules/mod_companion_questsync.conf` before restarting.
