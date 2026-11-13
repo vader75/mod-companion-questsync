@@ -541,6 +541,13 @@ local function CreateWindow()
         "Print what each companion is carrying to chat.")
     quests:SetPoint("LEFT", 286, 0)
 
+    -- The fallback for a quest that cannot be gathered: items that lie on the ground (oats in
+    -- a field, cloth in a crate). The companion tries on its own, and this is for when the
+    -- world will not co-operate - the object was taken, or it never respawned.
+    local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
+        "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
+    catchUp:SetPoint("LEFT", 374, 0)
+
     return frame
 end
 

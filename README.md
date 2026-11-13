@@ -74,6 +74,7 @@ available over SOAP, for the same reason `.companion` is not.
 | `.companionsync status` | bindings, both levels, both quest counts |
 | `.companionsync level` | level-align only |
 | `.companionsync quests` | compare the two logs, quest by quest |
+| `.companionsync catchup` | finish a quest the companion cannot gather for itself |
 | `.companionsync pins` | push map pins now |
 | `.companionsync refresh` | resend the panel payload now |
 | `.companionsync list` | every companion with its state |
@@ -129,6 +130,7 @@ each one. The defaults that matter most:
 | `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
+| `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `AnnounceAtStartup` / `AnnounceOnLogin` | 1 / 1 | one line, so players know the module is running |
 | `Debug` / `HeartbeatSeconds` | 0 / 300 | log detail, and the heartbeat window for `Debug = 2` |
 

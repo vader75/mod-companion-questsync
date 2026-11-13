@@ -89,6 +89,8 @@ namespace
         bool dropFailedBotQuests = false; // a FAILED copy the owner never failed  // keep the addon map reconciled with the companion
         bool announce           = true;
         bool announceLogin      = true;
+        bool catchUpGroundItems = true;    // finish a ground-object quest the world will not yield
+        uint32 catchUpIdleSeconds = 120;   // how long the count must sit still first
         uint32 intervalSeconds  = 20;
         uint32 heartbeatSeconds = 300;  // Debug >= 2 heartbeat window (0 = off)
         uint32 levelMode        = 1;   // 0 off, 1 raise to owner, 2 exact
@@ -222,6 +224,8 @@ namespace
 
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
+    /// bot guid -> quest id -> { item count last seen, when that count last moved }
+    std::map<uint32, std::map<uint32, std::pair<uint32, uint32>>> g_groundStall;
     std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
@@ -375,6 +379,8 @@ namespace
         g_cfg.dropFailedBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropFailedBotQuests", false);
         g_cfg.announce           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceAtStartup", true);
         g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
+        g_cfg.catchUpGroundItems = sConfigMgr->GetOption<bool>("CompanionQuestSync.CatchUpGroundItems", true);
+        g_cfg.catchUpIdleSeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.CatchUpIdleSeconds", 120);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
         g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
         g_cfg.levelMode          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.LevelMode", 1);
@@ -1181,6 +1187,119 @@ namespace
         }
 
         return false;
+    }
+
+    /// Hand the companion the ground items it still owes for one quest.
+    ///
+    /// Only items that actually lie on the ground are granted, so a kill-collect quest can
+    /// never be finished from here. This is the fallback for "the object was gone, another
+    /// player took it, or the step never reached it" - not a way to skip the game.
+    uint32 GrantMissingGroundItems(Player* bot, Quest const* quest)
+    {
+        uint32 granted = 0;
+
+        for (uint8 i = 0; i < quest->GetReqItemsCount(); ++i)
+        {
+            uint32 const itemId = quest->RequiredItemId[i];
+            uint32 const need = quest->RequiredItemCount[i];
+
+            if (!itemId || !need || g_itemGroundObjects.find(itemId) == g_itemGroundObjects.end())
+                continue;
+
+            uint32 const have = bot->GetItemCount(itemId, true);
+            if (have >= need)
+                continue;
+
+            uint32 const missing = need - have;
+
+            if (!bot->AddItem(itemId, missing))
+            {
+                LOG_INFO("server.loading", "[CompanionQuestSync] catch-up for {}: no bag room for {} item(s) of {}",
+                         bot->GetName(), missing, itemId);
+                break;
+            }
+
+            granted += missing;
+        }
+
+        return granted;
+    }
+
+    /// Finish a ground-object quest the world will not yield, once it has clearly stalled.
+    ///
+    /// The gather step keeps trying every pass; this is what happens when it cannot win -
+    /// a chest another player looted, a spawn the bot cannot reach, a node that never
+    /// respawns. The condition is deliberately narrow: every objective must be a ground
+    /// item, the count must not have moved for CatchUpIdleSeconds, and **the owner must
+    /// already have been rewarded that quest** - the companion is catching up, not doing
+    /// the player's work ahead of them.
+    void AutoCatchUpGround(Player* owner, Player* bot)
+    {
+        if (!owner || !bot || !bot->IsAlive() || g_cfg.catchUpIdleSeconds == 0)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = uint32(time(nullptr));
+
+        for (auto const& entry : bot->getQuestStatusMap())
+        {
+            Quest const* quest = sObjectMgr->GetQuestTemplate(entry.first);
+            if (!quest || entry.second.Status != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            if (!owner->IsQuestRewarded(entry.first))
+                continue;
+
+            bool groundOnly = true;
+            bool owed = false;
+            uint32 count = 0;
+
+            for (uint8 i = 0; i < quest->GetReqItemsCount(); ++i)
+            {
+                uint32 const itemId = quest->RequiredItemId[i];
+                if (!itemId)
+                    continue;
+
+                if (g_itemGroundObjects.find(itemId) == g_itemGroundObjects.end())
+                {
+                    groundOnly = false;
+                    break;
+                }
+
+                count += entry.second.ItemCount[i];
+
+                if (entry.second.ItemCount[i] < quest->RequiredItemCount[i])
+                    owed = true;
+            }
+
+            if (!groundOnly || !owed)
+                continue;
+
+            auto& stall = g_groundStall[botGuid][entry.first];
+
+            if (stall.second == 0 || stall.first != count)
+            {
+                stall.first = count;
+                stall.second = now;
+                continue;
+            }
+
+            uint32 const stalledFor = now - stall.second;
+            if (stalledFor < g_cfg.catchUpIdleSeconds)
+                continue;
+
+            uint32 const granted = GrantMissingGroundItems(bot, quest);
+            if (!granted)
+                continue;
+
+            stall.second = now;
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] catch-up: {} took {} ground item(s) for '{}' after {}s with no progress",
+                     bot->GetName(), granted, quest->GetTitle(), stalledFor);
+
+            SayToOwner(bot, owner, "I went back for the rest of '" + quest->GetTitle() +
+                       "' myself - the field had been picked over. Ready when you are.");
+        }
     }
 
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
@@ -3147,6 +3266,9 @@ namespace
             if (GatherFromGround(owner, bot, gathered) && g_cfg.debug >= 2)
                 LOG_INFO("server.loading", "[CompanionQuestSync] gathering for {}", gathered);
         }
+
+        if (g_cfg.catchUpGroundItems)
+            AutoCatchUpGround(owner, bot);
 
         DeliverHandIns(owner, bot);
         RepairStrandedDelivery(owner, bot, report);   // retry-worthy: belongs above the memo
@@ -5618,6 +5740,93 @@ public:
         return true;
     }
 
+    /// Finish every ground-object quest a player's companions still owe. Shared by the
+    /// player command (the addon's button) and the admin twin, so both run the same code.
+    static void CatchUpForOwner(ChatHandler* handler, uint32 ownerGuid)
+    {
+        std::vector<uint32> bots;
+
+        if (!g_cfg.enable || !ownerGuid || !FindCompanions(ownerGuid, bots))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companion bound.");
+            return;
+        }
+
+        uint32 total = 0;
+
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+
+            if (!bot || !bot->IsInWorld())
+            {
+                handler->PSendSysMessage("|cffff8000{}|r is not in the world - summon it first.", botGuid);
+                continue;
+            }
+
+            uint32 forBot = 0;
+
+            for (auto const& entry : bot->getQuestStatusMap())
+            {
+                Quest const* quest = sObjectMgr->GetQuestTemplate(entry.first);
+                if (!quest || entry.second.Status != QUEST_STATUS_INCOMPLETE)
+                    continue;
+
+                uint32 const granted = GrantMissingGroundItems(bot, quest);
+                if (!granted)
+                    continue;
+
+                forBot += granted;
+
+                handler->PSendSysMessage("|cff20ff20{}|r: gathered the rest of '{}' ({} item(s)).",
+                                         bot->GetName(), quest->GetTitle(), granted);
+            }
+
+            if (!forBot)
+                handler->PSendSysMessage("|cffaaaaaa{}|r owes nothing that lies on the ground.", bot->GetName());
+
+            total += forBot;
+        }
+
+        if (total)
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} item(s) gathered - the hand-in runs on the next pass.", total);
+    }
+
+    static bool HandleCatchUpCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        CatchUpForOwner(handler, player->GetGUID().GetCounter());
+        return true;
+    }
+
+    /// Console form, so the same path is testable with nobody logged in (the companion
+    /// still has to be in the world: objective counts live on the entity).
+    static bool HandleAdminCatchUp(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 1);
+
+        if (a.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin catchup <player>");
+            return true;
+        }
+
+        uint32 ownerGuid = 0;
+        ConsoleTarget(handler, a[0], ownerGuid);
+
+        if (!ownerGuid)
+        {
+            handler->PSendSysMessage("|cffff8000{}|r is not a character here.", a[0]);
+            return true;
+        }
+
+        CatchUpForOwner(handler, ownerGuid);
+        return true;
+    }
+
     static ChatCommandTable GetAdminCommands()
     {
         static ChatCommandTable adminTable =
@@ -5628,6 +5837,7 @@ public:
             { "integrity", HandleAdminIntegrity, SEC_ADMINISTRATOR, Console::Yes },
             { "gear",    HandleAdminGear,    SEC_ADMINISTRATOR, Console::Yes },
             { "dress",   HandleAdminDress,   SEC_ADMINISTRATOR, Console::Yes },
+            { "catchup", HandleAdminCatchUp, SEC_ADMINISTRATOR, Console::Yes },
         };
 
         static ChatCommandTable baseTable =
@@ -5645,6 +5855,7 @@ public:
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
+            { "catchup", HandleCatchUpCommand, SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
             { "create", HandleCreateCommand, SEC_PLAYER, Console::No },

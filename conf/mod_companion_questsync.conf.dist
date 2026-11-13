@@ -178,6 +178,26 @@ CompanionQuestSync.PinSync = 1
 #                     net for a whisper the client never received.
 #        Default:     600
 CompanionQuestSync.PinSyncSeconds = 600
+#    CompanionQuestSync.CatchUpGroundItems
+#        Description: Not every collection quest drops from a body. "Milly's Harvest"
+#                     needs eight handfuls of oats, and they are chests standing in a
+#                     field: the companion steps to them and loots them like any other
+#                     object. When the world will not co-operate - another player took the
+#                     node, a spawn the bot cannot reach - this lets it take the items it
+#                     still owes, so the quest does not sit at 0/8 forever.
+#                     Only items that lie on the ground are ever granted, so a
+#                     kill-collect quest cannot be finished this way, and only for a
+#                     quest the owner has already been rewarded (the companion is
+#                     catching up, not running ahead). .companionsync catchup, or the
+#                     "Ground quests" button in the window, does it on demand.
+#        Default:     1 (on)
+CompanionQuestSync.CatchUpGroundItems = 1
+#    CompanionQuestSync.CatchUpIdleSeconds
+#        Description: How long the companion's count for a ground quest must sit still
+#                     before it finishes the quest itself. The gather step keeps trying
+#                     every pass; this is the patience it gets first.
+#        Default:     120
+CompanionQuestSync.CatchUpIdleSeconds = 120
 
 #    CompanionQuestSync.DropFailedBotQuests
 #        Description: Drop a companion quest its own AI failed (a dead escort, a timed
