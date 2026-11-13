@@ -190,6 +190,7 @@ namespace
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
+    std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
@@ -4146,6 +4147,41 @@ namespace
     /// Same channel and cadence as the pin payload: a whisper, because that is the only
     /// thing the client can read. Nothing else tells the addon who is bound - commands go
     /// one way, and a client cannot query the server.
+    /// The roster with its free-slot column removed, one entry at a time.
+    ///
+    /// Bag space drifts on its own as a companion vendors and loots, and comparing whole
+    /// payloads meant the entire roster was re-sent every other pass for a number nobody
+    /// watches. Everything that matters - a name, a level, a quest count, a flag, a
+    /// companion appearing or going - still differs here and still goes out immediately.
+    std::string CompSyncSignature(std::string const& payload)
+    {
+        std::string out;
+        out.reserve(payload.size());
+
+        size_t start = 0;
+        while (start <= payload.size())
+        {
+            size_t const bar = payload.find('|', start);
+            std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+
+            size_t const comma = entry.find_last_of(',');
+            if (comma != std::string::npos)
+                entry.erase(comma);
+
+            if (!out.empty())
+                out += "|";
+
+            out += entry;
+
+            if (bar == std::string::npos)
+                break;
+
+            start = bar + 1;
+        }
+
+        return out;
+    }
+
     void SendCompSync(Player* owner, bool force = false)
     {
         if (!g_cfg.pinSync || !owner || !owner->GetSession())
@@ -4155,10 +4191,22 @@ namespace
         std::string const payload = BuildCompLine(owner);
 
         std::string& last = g_lastCompSync[ownerGuid];
+        uint32& lastAt = g_lastCompSyncAt[ownerGuid];
         uint32 const now = static_cast<uint32>(time(nullptr));
 
-        if (!force && payload == last && !last.empty())
-            return;
+        // A change that is only the free-slot column waits for the slower clock, so the
+        // client is still told (the number is in the payload) but not every 30 seconds.
+        constexpr uint32 kSlotOnlyGraceSeconds = 180;
+
+        if (!force && !last.empty())
+        {
+            if (payload == last)
+                return;
+
+            if (CompSyncSignature(payload) == CompSyncSignature(last)
+                && now - lastAt < kSlotOnlyGraceSeconds)
+                return;
+        }
 
         std::vector<std::string> chunks;
         std::string current;
@@ -4211,6 +4259,7 @@ namespace
         }
 
         last = payload;
+        lastAt = now;
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] comp sync -> {}: {} part(s), {} entries: {}",
@@ -6451,6 +6500,7 @@ public:
 
         g_lastPinSync.erase(ownerGuid);
         g_lastCompSync.erase(ownerGuid);
+        g_lastCompSyncAt.erase(ownerGuid);
         g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);
