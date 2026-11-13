@@ -218,6 +218,13 @@ listener:SetScript("OnEvent", function(_, event, message)
             -- your companions", "the pool has no free body"); surface the last one in the
             -- panel so a refusal is visible without reading chat
             local plain = StripColors(message)
+            -- the module's own greeting counts as proof of life: it arrives at login,
+            -- before the first payload, and it is what a player sees when everything is
+            -- working
+            if plain:find("mod-companion-questsync", 1, true) then
+                G.sawServerLine = true
+            end
+
             if plain:find("Companion quest sync", 1, true) then
                 plain = plain:gsub("^Companion quest sync:?%s*", "")
                 G.lastServerMessage = plain

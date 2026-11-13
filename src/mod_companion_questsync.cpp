@@ -6386,7 +6386,7 @@ public:
 
     void OnPlayerLogin(Player* player) override
     {
-        if (!g_cfg.enable || !g_cfg.announceLogin || !g_tableReady)
+        if (!g_cfg.enable || !g_tableReady)
             return;
 
         if (!player->GetSession() || player->GetSession()->IsBot())
@@ -6394,8 +6394,13 @@ public:
 
         ChatHandler handler(player->GetSession());
 
-        // Reconcile the map on the way in: a pin left behind by a session that ended
-        // badly is cleared the moment the player logs back in.
+        // Reconcile the map and the roster on the way in: a pin left behind by a session
+        // that ended badly is cleared the moment the player logs back in, and the window
+        // has its state before it opens.
+        //
+        // This used to sit behind `announceLogin`, which meant that turning off two chat
+        // lines also turned off the login payload - the client then saw nothing for up to
+        // a full pass and reported the module as not answering.
         if (g_cfg.pinSync)
         {
             SendPinSync(player, true);
@@ -6408,8 +6413,11 @@ public:
         if (g_cfg.autoSync && g_cfg.enable)
             SyncCompanion(player);
 
-        handler.SendSysMessage("|cff00ff00This server runs with |cff00ccffmod-companion-questsync|r |cffcccccc- companion quest + level sync|r");
-        handler.SendSysMessage("|cff00ff00Companion:|r quests and level follow yours. |cffffff00.companionsync status|r for a report, |cffffff00.companionsync|r to sync now.");
+        if (g_cfg.announceLogin)
+        {
+            handler.SendSysMessage("|cff00ff00This server runs with |cff00ccffmod-companion-questsync|r |cffcccccc- companion quest + level sync|r");
+            handler.SendSysMessage("|cff00ff00Companion:|r quests and level follow yours. |cffffff00.companionsync status|r for a report, |cffffff00.companionsync|r to sync now.");
+        }
     }
 
     /// One line per session on the way out. The heartbeat answers "is it alive";
