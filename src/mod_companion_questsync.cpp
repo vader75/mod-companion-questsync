@@ -1149,58 +1149,87 @@ namespace
                 if (ground == g_itemGroundObjects.end())
                     continue;
 
+                uint32 const have = entry.second.ItemCount[i];
+                uint32 const missing = need > have ? need - have : 0;
+                uint32 collected = 0;
+                std::string gatheredFrom;
+
+                // Clear what is still owed in one pass. One object per pass meant eight
+                // chests took four minutes of walking to a field the companion is already
+                // standing in - the player reads that as "it is not collecting anything".
                 for (uint32 const goEntry : ground->second)
                 {
-                    GameObject* go = bot->FindNearestGameObject(goEntry, 60.0f, true);
-                    if (!go || go->GetGoState() != GO_STATE_READY)
-                        continue;
-
-                    // Stand beside it, on the side facing away from the owner, so the step
-                    // reads as "the companion went to gather" rather than a stray blink.
-                    float dx = go->GetPositionX() - owner->GetPositionX();
-                    float dy = go->GetPositionY() - owner->GetPositionY();
-                    float len = std::sqrt(dx * dx + dy * dy);
-
-                    if (len < 0.5f)
+                    while (collected < missing)
                     {
-                        dx = 1.0f;
-                        dy = 0.0f;
-                        len = 1.0f;
-                    }
+                        GameObject* go = bot->FindNearestGameObject(goEntry, 60.0f, true);
 
-                    float const x = go->GetPositionX() - 2.0f * dx / len;
-                    float const y = go->GetPositionY() - 2.0f * dy / len;
-                    float z = go->GetPositionZ();
+                        if (!go || go->GetGoState() != GO_STATE_READY)
+                            break;
 
-                    bot->UpdateGroundPositionZ(x, y, z);
-                    bot->StopMoving();
-                    bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+                        // Stand beside it first, on the side facing away from the owner, so the
+                        // move reads as "the companion went to gather" and not a stray blink.
+                        float dx = go->GetPositionX() - owner->GetPositionX();
+                        float dy = go->GetPositionY() - owner->GetPositionY();
+                        float len = std::sqrt(dx * dx + dy * dy);
 
-                    // Take what it holds, the way clicking it would. playerbots lists a quest
-                    // object as loot and never opens one, so stepping alone left the count at
-                    // 0/8 forever while the log cheerfully said "stepped".
-                    uint32 const lootId = go->GetGOInfo() ? go->GetGOInfo()->GetLootId() : 0;
-                    uint32 taken = 0;
+                        if (len < 0.5f)
+                        {
+                            dx = 1.0f;
+                            dy = 0.0f;
+                            len = 1.0f;
+                        }
 
-                    if (lootId)
-                    {
-                        uint32 const before = bot->GetItemCount(itemId, true);
-                        bot->AutoStoreLoot(NULL_BAG, NULL_SLOT, lootId, LootTemplates_Gameobject);
-                        taken = bot->GetItemCount(itemId, true) - before;
-                    }
+                        float const x = go->GetPositionX() - 2.0f * dx / len;
+                        float const y = go->GetPositionY() - 2.0f * dy / len;
+                        float z = go->GetPositionZ();
 
-                    if (taken)
+                        bot->UpdateGroundPositionZ(x, y, z);
+                        bot->StopMoving();
+                        bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+
+                        // Take what it holds, the way clicking it would. playerbots lists a
+                        // quest object as loot and never opens one, so stepping alone left the
+                        // count at 0/8 forever while the log cheerfully said "stepped".
+                        uint32 const lootId = go->GetGOInfo() ? go->GetGOInfo()->GetLootId() : 0;
+                        uint32 taken = 0;
+
+                        if (lootId)
+                        {
+                            uint32 const before = bot->GetItemCount(itemId, true);
+                            bot->AutoStoreLoot(NULL_BAG, NULL_SLOT, lootId, LootTemplates_Gameobject);
+                            taken = bot->GetItemCount(itemId, true) - before;
+                        }
+
+                        if (!taken)
+                        {
+                            // no bag room, or the object had nothing: leave it standing rather
+                            // than deactivating it, and stop rather than hop in place.
+                            if (g_cfg.debug >= 2)
+                                LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} reached '{}' but took nothing",
+                                         bot->GetName(), go->GetName());
+                            break;
+                        }
+
                         go->SetLootState(GO_JUST_DEACTIVATED);   // emptied, so it cannot be farmed twice
+                        collected += taken;
+                        gatheredFrom = go->GetName();
+                    }
 
-                    what = std::string(go->GetName()) + " for " + quest->GetTitle();
-
-                    if (g_cfg.debug >= 2)
-                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} stepped to '{}' and took {} x{} ({} taken of {} so far)",
-                                 bot->GetName(), go->GetName(), taken, itemId,
-                                 uint32(bot->GetItemCount(itemId, true)), need);
-
-                    return taken > 0;
+                    if (collected >= missing)
+                        break;
                 }
+
+                if (!collected)
+                    continue;
+
+                what = std::string(gatheredFrom) + " for " + quest->GetTitle();
+
+                if (g_cfg.debug >= 2)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} took {} x{} from '{}' ({} of {} now)",
+                             bot->GetName(), collected, itemId, gatheredFrom,
+                             uint32(bot->GetItemCount(itemId, true)), need);
+
+                return true;
             }
         }
 
