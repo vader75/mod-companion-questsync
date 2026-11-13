@@ -87,6 +87,7 @@ end
 local function SaveDB()
     WLPinsDB = WLPinsDB or {}
     WLPinsDB.offsetX, WLPinsDB.offsetY = WLPins.offsetX, WLPins.offsetY
+    WLPinsDB.showLegend = WLPins.showLegend
     WLPinsDB.pins = {}
     for i, pin in ipairs(WLPins.pins) do
         WLPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
@@ -96,6 +97,8 @@ end
 
 local function LoadDB()
     WLPinsDB = WLPinsDB or { pins = {} }
+    WLPins.showLegend = WLPinsDB.showLegend
+    if WLPins.showLegend == nil then WLPins.showLegend = true end
     WLPins.offsetX = WLPinsDB.offsetX or 0
     WLPins.offsetY = WLPinsDB.offsetY or 0
     PIN_LIFETIME = WLPinsDB.lifetime or PIN_LIFETIME
@@ -306,6 +309,65 @@ function WLPins:Redraw()
         self.frames[i]:Hide()
         self.frames[i].pin = nil
     end
+
+    local lg = BuildLegend()
+
+    if WLPins.showLegend == false or #self.pins == 0 then
+        lg:Hide()
+    else
+        lg:Show()
+    end
+end
+
+--------------------------------------------------------------------------
+-- legend: what a marker means, bottom right of the map
+--------------------------------------------------------------------------
+
+-- Three lines of text on a soft dark plate. The map is parchment and the markers are
+-- glyphs, so a legend that is a box with a border fights the map the same way a plated
+-- pin did. Small, dim, and it only appears while there is something to explain.
+local LEGEND = {
+    { style = STYLE.handin, text = "hand in" },
+    { style = STYLE.gather, text = "work left" },
+    { style = STYLE.other,  text = "own errand" },
+}
+
+local legend
+
+local function BuildLegend()
+    if legend then return legend end
+
+    local f = CreateFrame("Frame", ADDON .. "Legend", WorldMapDetailFrame)
+    f:SetSize(118, 16 + #LEGEND * 15)
+    f:SetPoint("BOTTOMRIGHT", WorldMapDetailFrame, "BOTTOMRIGHT", -12, 46)
+    f:SetFrameStrata("MEDIUM")
+
+    f:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    f:SetBackdropColor(0, 0, 0, 0.35)
+    f:SetBackdropBorderColor(1, 1, 1, 0.10)
+
+    for index, row in ipairs(LEGEND) do
+        local glyph = f:CreateFontString(nil, "OVERLAY")
+        glyph:SetFont(STANDARD_TEXT_FONT, 14, "OUTLINE")
+        glyph:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -5 - (index - 1) * 15)
+        glyph:SetText(row.style.glyph)
+        glyph:SetTextColor(row.style.ring[1], row.style.ring[2], row.style.ring[3])
+
+        local label = f:CreateFontString(nil, "OVERLAY")
+        label:SetFont(STANDARD_TEXT_FONT, 11, "OUTLINE")
+        label:SetPoint("LEFT", glyph, "RIGHT", 7, 0)
+        label:SetText(row.text)
+        label:SetTextColor(0.85, 0.85, 0.85)
+    end
+
+    f:Hide()
+    legend = f
+    return f
 end
 
 --------------------------------------------------------------------------
@@ -426,6 +488,13 @@ SlashCmdList["WLPINS"] = function(msg)
         SaveDB(); WLPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r cleared.")
 
+    elseif msg == "legend" then
+        WLPins.showLegend = not WLPins.showLegend
+        SaveDB()
+        WLPins:Redraw()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r legend " ..
+            (WLPins.showLegend and "on" or "off") .. ".")
+
     elseif msg == "flip" then
         FLIP_Y = not FLIP_Y
         WLPins:Redraw()
@@ -498,6 +567,7 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  hand in a copy the companion owes")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff66b3ffsquare blue ?|r  a turn-in only it can do")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff9a9a9a/cpins legend|r  show or hide the key on the map")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins life [minutes] - how long a pin lives (default 30)")

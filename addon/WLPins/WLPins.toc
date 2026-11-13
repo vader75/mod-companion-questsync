@@ -3,7 +3,7 @@
 ## Notes: Draws map pins for the companion's quests, read from the module's CSYNC payloads.
 ## Notes-de-DE: Zeichnet Kartenmarkierungen fuer die Quest-Abgabe des Begleiters.
 ## Author: Hermes (for WOW Legends)
-## Version: 0.7
+## Version: 0.8
 ## SavedVariables: WLPinsDB
 ## X-Category: Map
 
