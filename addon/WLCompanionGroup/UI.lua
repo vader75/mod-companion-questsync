@@ -386,9 +386,16 @@ function G.Refresh()
             card.dot:SetTexture(r, g, b, online and 1 or 0.3)
             card.stripe:SetTexture(r, g, b, online and 0.85 or 0.25)
 
-            card.subtitle:SetText(("%s%s · %s · level %d%s"):format(
-                COL_MUTED, G.RaceName(companion.raceId), G.ClassName(companion.classId),
-                companion.level, COL_RESET))
+            -- An offline companion is reported with zeros, because there is nothing live to
+            -- report. Printing "Unknown · Unknown · level 0" made a bound companion look
+            -- corrupt; it is simply not in the world, which is what the row should say.
+            if companion.level and companion.level > 0 then
+                card.subtitle:SetText(("%s%s · %s · level %d%s"):format(
+                    COL_MUTED, G.RaceName(companion.raceId), G.ClassName(companion.classId),
+                    companion.level, COL_RESET))
+            else
+                card.subtitle:SetText(COL_MUTED .. "not in the world" .. COL_RESET)
+            end
 
             card.status:SetText(StatusText(companion))
 

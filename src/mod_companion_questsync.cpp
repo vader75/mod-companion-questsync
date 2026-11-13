@@ -205,6 +205,7 @@ namespace
     /// When a kit item was last created for a body *and slot*, so one unfillable slot does not
     /// throttle the others. Purged with the companion: guids are pooled.
     std::map<uint64, uint32> g_gearCreatedAt;  // bot guid -> unix time, for fairness
+    std::map<uint64, uint32> g_stuckNoticeAt;  // owner+bot -> when we last said "summon it"
 
     /// A whisper waiting for the rate-limit window. `questId` is non-zero for
     /// refusals, so the queue can re-check the world before it speaks: a refusal
@@ -2967,11 +2968,39 @@ namespace
         Player* bot = ResolveCompanion(owner, report, botGuid);
         if (!bot)
         {
+            // Say which of the three it is. One combined message cost an evening of guessing
+            // when the log said "could not be resolved" and the database said "online".
+            Player* body = FindCompanionPlayer(botGuid);
+
+            char const* why = !body                                ? "no player object for that guid"
+                            : !body->IsInWorld()                   ? "logged in but not in the world"
+                            : (!body->GetSession() || !body->GetSession()->IsBot())
+                                                                   ? "not a bot session"
+                            : "resolved but rejected";
+
             if (g_cfg.debug >= 1)
                 LOG_INFO("server.loading",
-                         "[CompanionQuestSync] pass for {} skipped: companion {} could not be resolved "
-                         "(offline, not a bot session, or not grouped)",
-                         owner->GetName(), botGuid);
+                         "[CompanionQuestSync] pass for {} skipped: companion {} - {}",
+                         owner->GetName(), botGuid, why);
+
+            // A companion that is logged in but has no map cannot be helped from here, and
+            // the player has no way to tell it apart from "the module is broken": say the one
+            // thing that fixes it, once every ten minutes.
+            if (body && !body->IsInWorld())
+            {
+                uint64 const key = (uint64(owner->GetGUID().GetCounter()) << 32) | botGuid;
+                uint32 const now = static_cast<uint32>(time(nullptr));
+                auto const said = g_stuckNoticeAt.find(key);
+
+                if (said == g_stuckNoticeAt.end() || now - said->second > 600)
+                {
+                    g_stuckNoticeAt[key] = now;
+
+                    ChatHandler(owner->GetSession()).PSendSysMessage(
+                        "|cff20ff20Companion quest sync|r: {} is bound but is not in the world - "
+                        "summon it and we can pick up where we left off.", body->GetName());
+                }
+            }
 
             return report;
         }
@@ -4868,12 +4897,11 @@ namespace
             CharacterDatabase.DirectExecute(
                 "DELETE FROM " + g_cfg.poolTable + " WHERE released_at < NOW() - INTERVAL 180 DAY");
 
-            // A released companion that was dismissed while its owner was offline leaves its party
-            // row behind: nothing else looks at that body again, and the group keeps a member who
-            // will never come back. Only unbound bodies from the bot accounts qualify, and never
-            // the leader - removing a leader from a loaded group is the group's business.
-            // The bot accounts live in the playerbots database, not this one: ask it there and
-            // pass the ids in, rather than naming a table the characters connection cannot see.
+            // A companion that is not in the world must not hold a party slot - bound or not.
+            // The first version of this excluded bound bodies, which is exactly the case that
+            // happens after a restart: the bot is logged out, its group row survives, and the
+            // party shows a companion that is not there. Only bot accounts qualify, and never
+            // the leader, because a group without its leader is the group's own business.
             std::string const botAccounts = AddClassAccountCsv();
 
             if (!botAccounts.empty())
@@ -4884,8 +4912,21 @@ namespace
                     "JOIN characters c ON c.guid = gm.memberGuid "
                     "WHERE c.online = 0 "
                     "AND gm.memberGuid <> g.leaderGuid "
-                    "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
                     "AND c.account IN (" + botAccounts + ")");
+
+                // and a party of one is not a party: drop the husk so the client does not
+                // open a group frame with a single member in it
+                CharacterDatabase.Execute(
+                    "DELETE gm FROM group_member gm "
+                    "WHERE gm.guid IN (SELECT guid FROM ("
+                    "    SELECT g.guid FROM `groups` g "
+                    "    LEFT JOIN group_member m ON m.guid = g.guid "
+                    "    GROUP BY g.guid HAVING COUNT(m.memberGuid) < 2) AS lonely)");
+
+                CharacterDatabase.Execute(
+                    "DELETE g FROM `groups` g "
+                    "LEFT JOIN group_member m ON m.guid = g.guid "
+                    "WHERE m.memberGuid IS NULL");
             }
         }
 
