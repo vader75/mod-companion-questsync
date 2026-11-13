@@ -5323,6 +5323,42 @@ public:
         CheckPendingReleases();
         SweepIntegrity();
 
+        // Ground gathering runs on its own clock, not the pass's. A chest is a hop and a
+        // loot, and the whole point is that the companion is seen taking it - on a thirty
+        // second sweep the player stands in the field watching nothing happen, then sees a
+        // burst, which reads as "delayed" however few items are involved.
+        _gatherAccumulator += diff;
+
+        if (_gatherAccumulator >= kGatherTickMs)
+        {
+            _gatherAccumulator = 0;
+
+            for (auto const& pair : sWorldSessionMgr->GetAllSessions())
+            {
+                WorldSession* session = pair.second;
+                if (!session || session->IsBot() || !session->GetPlayer())
+                    continue;
+
+                Player* player = session->GetPlayer();
+
+                std::vector<uint32> bots;
+                if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+                    continue;
+
+                for (uint32 const botGuid : bots)
+                {
+                    Player* bot = FindCompanionPlayer(botGuid);
+                    if (!bot || !bot->IsInWorld())
+                        continue;
+
+                    std::string gathered;
+
+                    if (GatherFromGround(player, bot, gathered) && g_cfg.debug >= 2)
+                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering for {}", gathered);
+                }
+            }
+        }
+
         if (!g_cfg.autoSync)
             return;
 
@@ -5502,6 +5538,11 @@ private:
     }
 
     uint32 _accumulator = 0;
+    uint32 _gatherAccumulator = 0;
+
+    /// How often the gather step runs. Short enough that the companion is seen taking the
+    /// object, long enough that a grid search for one spawn costs nothing.
+    static constexpr uint32 kGatherTickMs = 2000;
     bool _announced = false;
 
     // Heartbeat window state (Debug >= 2).
