@@ -1368,6 +1368,35 @@ namespace
         }
     }
 
+    /// Put the companion next to a point in the world (a quest giver), not next to the player.
+    ///
+    /// The step-beside-the-owner shape is right when the player is standing at the NPC: the
+    /// companion catches up and happens to be in range. It is wrong when they are not, which
+    /// is exactly when a hand-in is needed - the bot landed two yards from its owner and
+    /// thirty from the giver, playerbots refused the reward, and the player was told the
+    /// companion "cannot talk to the quest giver". True, and entirely the module's fault.
+    void StepBesidePoint(Player* bot, float x, float y, float z, float radius = 2.5f)
+    {
+        float ax = bot->GetPositionX() - x;
+        float ay = bot->GetPositionY() - y;
+        float len = std::sqrt(ax * ax + ay * ay);
+
+        if (len < 0.1f)
+        {
+            ax = 1.0f;
+            ay = 0.0f;
+            len = 1.0f;
+        }
+
+        float const tx = x + radius * ax / len;
+        float const ty = y + radius * ay / len;
+        float tz = z;
+
+        bot->UpdateGroundPositionZ(tx, ty, tz);
+        bot->StopMoving();
+        bot->NearTeleportTo(tx, ty, tz, bot->GetOrientation());
+    }
+
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
 
     /// Mark the turn-in NPCs where the owner is already done and the companion is not.
@@ -2599,7 +2628,23 @@ namespace
 
             stepAt = nowTs;
 
-            StepBesideOwner(owner, bot, spot.x, spot.y);
+            // Stand at the giver when the player is not there, or the step lands the bot in
+            // the player's bubble and out of interaction range of the NPC it needs.
+            float const ownerToGiver = owner->GetDistance(spot.x, spot.y, spot.z);
+
+            if (ownerToGiver <= 10.0f)
+            {
+                StepBesideOwner(owner, bot, spot.x, spot.y);
+            }
+            else
+            {
+                StepBesidePoint(bot, spot.x, spot.y, spot.z);
+
+                // Say where it went: a blink to somebody else's part of the map is a bug
+                // unless the companion explains it.
+                SayToOwner(bot, owner, "I have gone ahead to " + spot.name + " to hand in '" +
+                           quest->GetTitle() + "' myself - catch up when you can.", 90);
+            }
 
             // Speak to the giver in THIS pass. Checking the distance on the next
             // one loses a race the bot cannot win: its follow strategy walks it
