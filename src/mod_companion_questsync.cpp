@@ -225,6 +225,44 @@ namespace
 
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
+    /// bot guid -> { has an unfinished ground objective, when that was last checked }
+    std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
+
+    /// How many grid searches this pass spent looking for ground objects (Debug >= 3).
+    uint32 g_gridSearches = 0;
+
+    /// Does this companion still owe items that lie on the ground? Cheap, and cached by the
+    /// caller: it is the gate that keeps the two-second gather tick from walking every quest
+    /// log in the world when nine companions out of ten have nothing to gather.
+    bool HasPendingGroundObjective(Player* bot)
+    {
+        if (!bot || g_itemGroundObjects.empty())
+            return false;
+
+        for (auto const& entry : bot->getQuestStatusMap())
+        {
+            if (entry.second.Status != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(entry.first);
+            if (!quest)
+                continue;
+
+            for (uint8 i = 0; i < quest->GetReqItemsCount(); ++i)
+            {
+                uint32 const itemId = quest->RequiredItemId[i];
+
+                if (!itemId || g_itemGroundObjects.find(itemId) == g_itemGroundObjects.end())
+                    continue;
+
+                if (entry.second.ItemCount[i] < quest->RequiredItemCount[i])
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
     /// bot guid -> quest id -> { item count last seen, when that count last moved }
     std::map<uint32, std::map<uint32, std::pair<uint32, uint32>>> g_groundStall;
     /// (bot guid, quest id) whose "I finished gathering this" whisper has already gone out
@@ -488,6 +526,7 @@ namespace
     {
         g_passMemo.erase(botGuid);
         g_groundStall.erase(botGuid);
+        g_gatherPending.erase(botGuid);
 
         // guids are pooled, so a stale "already announced" pair would silence the next
         // companion that inherits this body
@@ -1173,6 +1212,7 @@ namespace
                 {
                     while (collected < missing)
                     {
+                        ++g_gridSearches;
                         GameObject* go = bot->FindNearestGameObject(goEntry, 60.0f, true);
 
                         if (!go || go->GetGoState() != GO_STATE_READY)
@@ -3311,23 +3351,55 @@ namespace
         g_missingCache.clear();     // bag contents can change between passes
 
         auto const startedAt = std::chrono::steady_clock::now();
+
+        // Section timings, so "it feels slow" can be answered with numbers instead of a
+        // guess: which part of a pass costs the microseconds, and how many grid searches
+        // the gather step spent finding objects.
+        struct PassProfile
+        {
+            uint64 gather = 0;
+            uint64 handIn = 0;
+        } profile;
+
+        g_gridSearches = 0;
+
+        auto lastSection = startedAt;
+        auto lap = [&lastSection]() -> uint64
+        {
+            auto const now = std::chrono::steady_clock::now();
+            uint64 const us = uint64(std::chrono::duration_cast<std::chrono::microseconds>(now - lastSection).count());
+            lastSection = now;
+            return us;
+        };
+
         struct PassTimer
         {
             std::chrono::steady_clock::time_point start;
             Player* owner;
+            PassProfile* profile;
 
             ~PassTimer()
             {
                 if (g_cfg.debug < 2)
                     return;
 
-                auto const us = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - start).count();
+                auto const us = static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count());
 
                 LOG_INFO("server.loading", "[CompanionQuestSync] pass for {} took {} us",
                          owner ? owner->GetName() : "?", us);
+
+                if (g_cfg.debug < 3)
+                    return;
+
+                uint64 const measured = profile->gather + profile->handIn;
+
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync]   profile {}: gather {} us, hand-in {} us, rest {} us, {} game-object search(es)",
+                         owner ? owner->GetName() : "?", profile->gather, profile->handIn,
+                         us > measured ? us - measured : 0, g_gridSearches);
             }
-        } timer{ startedAt, owner };
+        } timer{ startedAt, owner, &profile };
 
         SyncReport report;
 
@@ -3410,8 +3482,12 @@ namespace
         if (g_cfg.catchUpGroundItems)
             AutoCatchUpGround(owner, bot);
 
+        profile.gather = lap();
+
         DeliverHandIns(owner, bot);
         RepairStrandedDelivery(owner, bot, report);   // retry-worthy: belongs above the memo
+
+        profile.handIn = lap();
 
         // Extras are cleared before the memo, not after. A pass that ends "clean" with an
         // unchanged digest short-circuits every later pass, so a drop that waits out a
@@ -5096,6 +5172,12 @@ namespace
         {
             SyncReport const one = SyncCompanionFor(owner, botGuid, marks);
 
+            // Completion marking happens inside the pass, after the hand-in step that ran at
+            // the top of it - so a quest that became complete this pass would otherwise wait
+            // a full interval to be handed in. DeliverHandIns is throttled, so this is cheap.
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                DeliverHandIns(owner, bot);
+
             aggregate.added += one.added;
             aggregate.completed += one.completed;
             aggregate.dropped += one.dropped;
@@ -5439,16 +5521,44 @@ public:
                 if (!FindCompanions(player->GetGUID().GetCounter(), bots))
                     continue;
 
+                uint32 const nowTs = static_cast<uint32>(time(nullptr));
+
                 for (uint32 const botGuid : bots)
                 {
                     Player* bot = FindCompanionPlayer(botGuid);
                     if (!bot || !bot->IsInWorld())
+                    {
+                        g_gatherPending.erase(botGuid);
+                        continue;
+                    }
+
+                    // Walk the quest log every twenty seconds, not every two: the tick that
+                    // follows is the expensive one, and most companions have no ground
+                    // objective at all.
+                    auto& gate = g_gatherPending[botGuid];
+
+                    if (!gate.first && gate.second && nowTs - gate.second < 20)
+                        continue;
+
+                    gate.second = nowTs;
+                    gate.first = HasPendingGroundObjective(bot);
+
+                    if (!gate.first)
                         continue;
 
                     std::string gathered;
 
-                    if (GatherFromGround(player, bot, gathered) && g_cfg.debug >= 2)
-                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering for {}", gathered);
+                    if (GatherFromGround(player, bot, gathered))
+                    {
+                        if (g_cfg.debug >= 2)
+                            LOG_INFO("server.loading", "[CompanionQuestSync] gathering for {}", gathered);
+
+                        // Hand it in now instead of at the next pass: the quest just became
+                        // complete, and the player is standing here watching.
+                        DeliverHandIns(player, bot);
+
+                        gate.first = HasPendingGroundObjective(bot);
+                    }
                 }
             }
         }
