@@ -189,6 +189,37 @@ namespace
     std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
+    /// Quest items that lie on the ground, by item id -> the game objects that hold them.
+    ///
+    /// Filled once at startup from `gameobject_questitem`. A "pick it off the ground" quest
+    /// ("eight handfuls of oats") is not a kill-and-loot quest at all: the item is in a chest
+    /// standing in a field, and no amount of fighting will produce it.
+    std::map<uint32, std::vector<uint32>> g_itemGroundObjects;
+
+    void LoadQuestGroundObjects()
+    {
+        g_itemGroundObjects.clear();
+
+        QueryResult result = WorldDatabase.Query("SELECT GameObjectEntry, ItemId FROM gameobject_questitem");
+
+        if (!result)
+            return;
+
+        do
+        {
+            Field* fields = result->Fetch();
+            uint32 const goEntry = fields[0].Get<uint32>();
+            uint32 const itemId = fields[1].Get<uint32>();
+
+            if (goEntry && itemId)
+                g_itemGroundObjects[itemId].push_back(goEntry);
+
+        } while (result->NextRow());
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} ground object(s) indexed for gathering quests",
+                 uint32(g_itemGroundObjects.size()));
+    }
+
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
@@ -1075,6 +1106,81 @@ namespace
         bot->UpdateGroundPositionZ(x, y, z);
         bot->StopMoving();
         bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+    }
+
+    /// Step the companion to a ground object it needs, so its own loot logic can take it.
+    ///
+    /// playerbots recognises a quest game object as loot and opens it happily - it simply
+    /// never walks towards one. A companion that follows its owner therefore stood in the
+    /// oat field with "Milly's Harvest 0/8" for a whole session while every kill-collect
+    /// quest progressed, and the module reported the quest as merely unfinished. This is the
+    /// same trick as the quest-giver step, aimed at a chest: put the bot beside the object,
+    /// let its own AI open and loot it.
+    bool GatherFromGround(Player* owner, Player* bot, std::string& what)
+    {
+        if (!owner || !bot || !bot->IsAlive() || bot->IsInCombat() || g_itemGroundObjects.empty())
+            return false;
+
+        for (auto const& entry : bot->getQuestStatusMap())
+        {
+            if (entry.second.Status != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(entry.first);
+            if (!quest)
+                continue;
+
+            for (uint8 i = 0; i < quest->GetReqItemsCount(); ++i)
+            {
+                uint32 const itemId = quest->RequiredItemId[i];
+                uint32 const need = quest->RequiredItemCount[i];
+
+                if (!itemId || entry.second.ItemCount[i] >= need)
+                    continue;
+
+                auto const ground = g_itemGroundObjects.find(itemId);
+                if (ground == g_itemGroundObjects.end())
+                    continue;
+
+                for (uint32 const goEntry : ground->second)
+                {
+                    GameObject* go = bot->FindNearestGameObject(goEntry, 60.0f, true);
+                    if (!go || go->GetGoState() != GO_STATE_READY)
+                        continue;
+
+                    // Stand beside it, on the side facing away from the owner, so the step
+                    // reads as "the companion went to gather" rather than a stray blink.
+                    float dx = go->GetPositionX() - owner->GetPositionX();
+                    float dy = go->GetPositionY() - owner->GetPositionY();
+                    float len = std::sqrt(dx * dx + dy * dy);
+
+                    if (len < 0.5f)
+                    {
+                        dx = 1.0f;
+                        dy = 0.0f;
+                        len = 1.0f;
+                    }
+
+                    float const x = go->GetPositionX() - 2.0f * dx / len;
+                    float const y = go->GetPositionY() - 2.0f * dy / len;
+                    float z = go->GetPositionZ();
+
+                    bot->UpdateGroundPositionZ(x, y, z);
+                    bot->StopMoving();
+                    bot->NearTeleportTo(x, y, z, bot->GetOrientation());
+
+                    what = std::string(go->GetName()) + " for " + quest->GetTitle();
+
+                    if (g_cfg.debug >= 2)
+                        LOG_INFO("server.loading", "[CompanionQuestSync] gathering: stepped {} to '{}' (item {}, {}/{})",
+                                 bot->GetName(), go->GetName(), itemId, entry.second.ItemCount[i], need);
+
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
@@ -3033,6 +3139,15 @@ namespace
         // from its giver changes nothing in either log, so the digest keeps matching and
         // the step would never be retried - the quest would sit COMPLETE until something
         // else moved. The routine carries its own throttles, so repeating it is cheap.
+        // Gathering goes before the hand-in: a ground-object quest can only be walked and
+        // looted, and there is nothing to deliver until it is done.
+        {
+            std::string gathered;
+
+            if (GatherFromGround(owner, bot, gathered) && g_cfg.debug >= 2)
+                LOG_INFO("server.loading", "[CompanionQuestSync] gathering for {}", gathered);
+        }
+
         DeliverHandIns(owner, bot);
         RepairStrandedDelivery(owner, bot, report);   // retry-worthy: belongs above the memo
 
@@ -5023,6 +5138,9 @@ public:
     void OnStartup() override
     {
         Refresh(false);
+
+        if (g_cfg.enable)
+            LoadQuestGroundObjects();
     }
 
     void OnUpdate(uint32 diff) override
