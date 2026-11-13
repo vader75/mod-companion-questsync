@@ -545,7 +545,24 @@ namespace
         PassNote& note = g_passNotes[owner->GetGUID().GetCounter()];
 
         if (priority >= note.priority)
+        {
+            // Say what lost, at Debug >= 3: "one message per pass" is only trustworthy if the
+            // discarded candidates are visible, otherwise a quiet pass looks like a bug.
+            if (g_cfg.debug >= 3 && !note.text.empty() && note.priority != priority)
+            {
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync]   note for {}: priority {} replaces {} ('{}' dropped)",
+                         owner->GetName(), uint32(priority), uint32(note.priority), note.text);
+            }
+
             note = PassNote{ priority, text };
+        }
+        else if (g_cfg.debug >= 3)
+        {
+            LOG_INFO("server.loading",
+                     "[CompanionQuestSync]   note for {}: priority {} dropped, {} outranks it ('{}')",
+                     owner->GetName(), uint32(priority), uint32(note.priority), text);
+        }
     }
 
 
@@ -960,7 +977,11 @@ namespace
             return;
 
         std::string const text = itr->second.text;
+        uint8 const priority = itr->second.priority;
         g_passNotes.erase(itr);
+
+        if (g_cfg.debug >= 3)
+            LOG_INFO("server.loading", "[CompanionQuestSync]   note for {}: sending priority {}", owner->GetName(), uint32(priority));
 
         if (!text.empty() && speaker)
             SayToOwner(speaker, owner, text);
