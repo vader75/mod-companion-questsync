@@ -88,7 +88,7 @@ still works if you prefer it — the two do not share state and can run at once.
 
 ```
 python test_parse.py            # the Comp sync / Stock grammar, without a client
-python ../tests/lua_sandbox.py  # loads Core.lua and UI.lua against a stub WoW API
+python ../../tests/lua_sandbox.py  # loads Core.lua and UI.lua against a stub WoW API
 ```
 
 `test_parse.py` mirrors `Core.lua`'s parser in Python, so a payload change cannot silently

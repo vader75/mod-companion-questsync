@@ -22,7 +22,7 @@
 #    CompanionQuestSync.IntervalSeconds
 #        Seconds between automatic reconciliation passes. Each pass is cheap
 #        (one binding lookup + one quest-log walk per online player).
-#        Default: 20
+#        Default: 30
 #
 #    CompanionQuestSync.LevelMode
 #        0 = never touch the companion's level.
@@ -55,12 +55,13 @@
 #            match exactly. Destructive: this also removes the companion's own
 #            quests (class, profession, its own pickups).
 #        0 = keep them; the owner's quests are still added on top.
-#        Default: 0
+#        Default: 1
 #
 #    CompanionQuestSync.RequireGrouped
-#        1 = only sync while the companion is in the owner's group (the state
-#            it is summoned in). Avoids touching a released/dismissed bot.
-#        Default: 1
+#        1 = only sync QUEST LOGS while the companion is in the owner's group
+#            Bags, gear and level alignment always run, so a companion that
+#            slipped out of the party is still kept healthy.
+#        Default: 0
 #
 #    CompanionQuestSync.SkipInCombat
 #        1 = do not LEVEL the companion while either side is in combat (a level
@@ -74,11 +75,35 @@
 #        1 = do not copy timed quests; the client timer is not transferable.
 #        Default: 1
 #
+#    CompanionQuestSync.ExtraArmourSlots
+#        Fill belt, bracers, gloves and cloak from a curated starter set that
+#        matches the class's armour type (cloth, leather, mail). 0 leaves the
+#        companion in the four core slots only.
+#        Default: 1
+#
+#    CompanionQuestSync.PoolAccountType
+#        The playerbots_account_type value that marks an AddClass body in the
+#        pool. Change it only if the server reorganises those accounts.
+#        Default: 2
+#
+#    CompanionQuestSync.RespectLegacyBindings
+#        Honour mod-wowlegends' binding table when claiming a body, so the two
+#        modules never level and quest the same bot. Read only, always.
+#        0 = do not look at that table at all: the module stands completely
+#        alone and needs nothing from mod-wowlegends, not even read access.
+#        Default: 1
+#
+#    CompanionQuestSync.PoolTable
+#        This module's own release ledger: which bodies it has released, when and
+#        why. Pruned after 180 days by `.companionadmin integrity fix`.
+#        Letters, digits and underscores only.
+#        Default: "cq_pool"
+#
 #    CompanionQuestSync.BindingTable
 #        Character-database table holding owner_guid -> bot_guid. Change it
 #        only if another module owns the binding. Letters, digits and
 #        underscore only, otherwise the module disables itself.
-#        Default: "wowlegends_companion"
+#        Default: "cq_bindings"
 #
 #    CompanionQuestSync.NotifySkippedQuests
 #        How much the companion whispers the owner about quests it could not
@@ -169,7 +194,11 @@ CompanionQuestSync.RequireGrouped = 0
 CompanionQuestSync.AllowCreate = 1
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1
-CompanionQuestSync.BindingTable = "wowlegends_companion"
+CompanionQuestSync.BindingTable = "cq_bindings"
+CompanionQuestSync.PoolTable = "cq_pool"
+CompanionQuestSync.ExtraArmourSlots = 1
+CompanionQuestSync.PoolAccountType = 2
+CompanionQuestSync.RespectLegacyBindings = 1
 CompanionQuestSync.NotifySkippedQuests = 2
 CompanionQuestSync.TidyInventory = 1
 CompanionQuestSync.KeepFreeSlots = 2

@@ -83,6 +83,9 @@ namespace
         uint32 debug            = 0;     // 0 silent, 1 per-change, 2 + heartbeat
         bool pinSync            = true;
         uint32 pinSyncSeconds   = 600;   // re-send the pin line at least this often
+        uint8 poolAccountType = 2;         // playerbots account type that marks an AddClass body
+        bool extraArmourSlots = true;      // fill head/shoulder/waist/wrist/hand/back from item_template
+        bool respectLegacyBindings = true;  // honour mod-wowlegends' binding table when picking a body
         bool dropFailedBotQuests = false; // a FAILED copy the owner never failed  // keep the addon map reconciled with the companion
         bool announce           = true;
         bool announceLogin      = true;
@@ -99,7 +102,8 @@ namespace
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
         uint32 keepFreeSlots   = 2;
-        std::string bindingTable = "wowlegends_companion";
+        std::string bindingTable = "cq_bindings";   // this module's own table
+        std::string poolTable    = "cq_pool";       // this module's own ledger
     };
 
     SyncSettings g_cfg;
@@ -196,7 +200,11 @@ namespace
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
-    std::unordered_map<uint32, uint32> g_lastWhisperByBot;  // bot guid -> unix time, for fairness
+    std::unordered_map<uint32, uint32> g_lastWhisperByBot;
+
+    /// When a kit item was last created for a body *and slot*, so one unfillable slot does not
+    /// throttle the others. Purged with the companion: guids are pooled.
+    std::map<uint64, uint32> g_gearCreatedAt;  // bot guid -> unix time, for fairness
 
     /// A whisper waiting for the rate-limit window. `questId` is non-zero for
     /// refusals, so the queue can re-check the world before it speaks: a refusal
@@ -323,7 +331,7 @@ namespace
         g_cfg.syncCompletion     = sConfigMgr->GetOption<bool>("CompanionQuestSync.SyncCompletion", true);
         g_cfg.dropExtraBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropExtraBotQuests", true);
         g_cfg.dropExtraGrace     = sConfigMgr->GetOption<uint32>("CompanionQuestSync.DropExtraGraceSeconds", 120);
-        g_cfg.requireGrouped     = sConfigMgr->GetOption<bool>("CompanionQuestSync.RequireGrouped", true);
+        g_cfg.requireGrouped     = sConfigMgr->GetOption<bool>("CompanionQuestSync.RequireGrouped", false);
         g_cfg.allowCreate        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AllowCreate", true);
         g_cfg.skipInCombat       = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipInCombat", true);
         g_cfg.skipTimedQuests    = sConfigMgr->GetOption<bool>("CompanionQuestSync.SkipTimedQuests", true);
@@ -334,10 +342,10 @@ namespace
         g_cfg.dropFailedBotQuests = sConfigMgr->GetOption<bool>("CompanionQuestSync.DropFailedBotQuests", false);
         g_cfg.announce           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceAtStartup", true);
         g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
-        g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 20);
+        g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
         g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
         g_cfg.levelMode          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.LevelMode", 1);
-        g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 1);
+        g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 2);
         g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
         g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
         g_cfg.tidyVendorJunk     = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyVendorJunk", true);
@@ -347,7 +355,14 @@ namespace
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
         g_cfg.keepFreeSlots      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.KeepFreeSlots", 2);
-        g_cfg.bindingTable       = sConfigMgr->GetOption<std::string>("CompanionQuestSync.BindingTable", "wowlegends_companion");
+        g_cfg.bindingTable       = sConfigMgr->GetOption<std::string>("CompanionQuestSync.BindingTable", "cq_bindings");
+        g_cfg.poolTable          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.PoolTable", "cq_pool");
+        g_cfg.respectLegacyBindings =
+            sConfigMgr->GetOption<bool>("CompanionQuestSync.RespectLegacyBindings", true);
+        g_cfg.extraArmourSlots =
+            sConfigMgr->GetOption<bool>("CompanionQuestSync.ExtraArmourSlots", true);
+        g_cfg.poolAccountType =
+            sConfigMgr->GetOption<uint8>("CompanionQuestSync.PoolAccountType", 2);
 
         if (g_cfg.intervalSeconds < 5)
             g_cfg.intervalSeconds = 5;
@@ -355,18 +370,23 @@ namespace
         if (g_cfg.levelMode > 2)
             g_cfg.levelMode = 2;
 
-        // The table name is interpolated into SQL, so accept nothing but a
+        // The table names are interpolated into SQL, so accept nothing but a
         // plain identifier. Anything else disables the module rather than
         // risking an injection through the config file.
-        bool ok = !g_cfg.bindingTable.empty();
-        for (char const c : g_cfg.bindingTable)
+        auto plainIdentifier = [](std::string const& name)
         {
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
-            {
-                ok = false;
-                break;
-            }
-        }
+            if (name.empty())
+                return false;
+
+            for (char const c : name)
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '_'))
+                    return false;
+
+            return true;
+        };
+
+        bool ok = plainIdentifier(g_cfg.bindingTable) && plainIdentifier(g_cfg.poolTable);
 
         if (!ok)
         {
@@ -429,6 +449,8 @@ namespace
         g_pendingNotices.erase(botGuid);
         g_sellAt.erase(botGuid);
         g_lastWhisperByBot.erase(botGuid);
+        for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
+            g_gearCreatedAt.erase((uint64(botGuid) << 8) | slot);   // guids are pooled
 
         EraseByBot(g_nudgeAt, botGuid);
         EraseByBot(g_openLatch, botGuid);
@@ -1752,6 +1774,388 @@ namespace
         }
     }
 
+    /// Put clothes on a companion that has none.
+    ///
+    /// Release wipes a body back to a blank level 1, which includes its gear, so a freshly
+    /// created companion arrived naked and died to the first wolf. Rather than keep a table
+    /// of starting kit per race and class that would drift from the client's, this asks the
+    /// core what it issues a new character of that race and class and stores it the same
+    /// way character creation does - which also equips the weapon and the armour.
+    /// A companion that already carries a weapon or a chest piece is left alone, so gear the
+    /// player has given it is never replaced.
+    /// A weapon that fits the class.
+    static uint32 WeaponForClass(uint8 classId)
+    {
+        switch (classId)
+        {
+            case CLASS_WARRIOR:       return 25;      // Worn Shortsword
+            case CLASS_PALADIN:       return 36;      // Worn Mace
+            case CLASS_DEATH_KNIGHT:  return 25;
+            case CLASS_SHAMAN:        return 36;
+            case CLASS_DRUID:         return 36;
+            case CLASS_PRIEST:        return 36;
+            default:                  return 2092;    // Worn Dagger
+        }
+    }
+
+    /// Wear a kit item that ended up in the bags instead of on the body.
+    ///
+    /// "Equip" through CanEquipNewItem can fall back to storing the item in a bag, which is how
+    /// a companion came out wearing a weapon and boots while its chest and legs were missing:
+    /// two pieces were issued, counted as dressed, put in the bag and then sold as vendor trash.
+    /// This walks the bags for the exact item and moves it into the slot with the slot named
+    /// explicitly, which is the direction that actually equips.
+    bool WearFromBags(Player* bot, uint8 slot, uint32 itemId)
+    {
+        for (uint8 bagSlot = INVENTORY_SLOT_ITEM_START; bagSlot < INVENTORY_SLOT_ITEM_END; ++bagSlot)
+        {
+            Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot);
+            if (!item || item->GetEntry() != itemId)
+                continue;
+
+            uint16 dest = 0;
+            if (bot->CanEquipItem(slot, dest, item, true) != EQUIP_ERR_OK)
+                continue;
+
+            bot->SwapItem(uint16((INVENTORY_SLOT_BAG_0 << 8) | bagSlot), dest);
+
+            return bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot) != nullptr;
+        }
+
+        return false;
+    }
+
+    /// Wear anything in the bags that fits an empty slot.
+    ///
+    /// A companion that was handed gear and left it in the bag is the same bug from the other
+    /// side: the item is "there" but not on the body, so it looks naked while the piece sits in
+    /// a backpack. Only empty slots are filled and only what the body may use, so nothing the
+    /// player chose to wear is ever displaced.
+    uint32 WearLooseGear(Player* bot)
+    {
+        uint32 worn = 0;
+
+        for (uint8 bagSlot = INVENTORY_SLOT_ITEM_START; bagSlot < INVENTORY_SLOT_ITEM_END; ++bagSlot)
+        {
+            Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot);
+            if (!item)
+                continue;
+
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || (proto->Class != ITEM_CLASS_ARMOR && proto->Class != ITEM_CLASS_WEAPON))
+                continue;
+
+            if (!bot->CanUseItem(proto))
+                continue;
+
+            uint8 const target = bot->FindEquipSlot(proto, NULL_SLOT, false);
+            if (target == NULL_SLOT || bot->GetItemByPos(INVENTORY_SLOT_BAG_0, target))
+                continue;
+
+            uint16 dest = 0;
+            if (bot->CanEquipItem(target, dest, item, false) != EQUIP_ERR_OK)
+                continue;
+
+            bot->SwapItem(uint16((INVENTORY_SLOT_BAG_0 << 8) | bagSlot), dest);
+
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, target))
+            {
+                ++worn;
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} picked up and wore {}",
+                         bot->GetName(), proto->Name1);
+            }
+        }
+
+        return worn;
+    }
+
+    /// Kit items this module used to issue that do not work here, so a body wearing one is
+    /// re-dressed instead of being left alone.
+    ///
+    /// There is no way to ask the server whether an item renders: the vest equips, reads back and
+    /// counts as worn while the player sees a bare torso. The only practical answer is a list of
+    /// the ids that turned out to be wrong, retired by name, and a body found wearing one gets
+    /// the current kit instead.
+    bool IsRetiredKitItem(uint32 entry)
+    {
+        switch (entry)
+        {
+            case 193:      // Tattered Cloth Vest - no visible model in this client
+            case 194:      // Tattered Cloth Pants - Horde only (FlagsExtra 1)
+            case 2121:     // Thin Cloth Armor - never rendered
+            case 3270:     // Flax Vest - never rendered
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// The armour subclass a class can actually wear.
+    uint32 ArmourSubclassFor(uint8 clazz)
+    {
+        switch (clazz)
+        {
+            case CLASS_WARRIOR:
+            case CLASS_PALADIN:
+            case CLASS_DEATH_KNIGHT:  return ITEM_SUBCLASS_ARMOR_PLATE;
+            case CLASS_HUNTER:
+            case CLASS_SHAMAN:        return ITEM_SUBCLASS_ARMOR_MAIL;
+            case CLASS_ROGUE:
+            case CLASS_DRUID:         return ITEM_SUBCLASS_ARMOR_LEATHER;
+            default:                  return ITEM_SUBCLASS_ARMOR_CLOTH;
+        }
+    }
+
+    /// The plain pieces a level 1 character wears, taken from the game's own starter vocabulary -
+    /// Tattered Cloth, Dirty Leather, Rusted Chain - and checked one by one against item_template:
+    /// right slot, no faction or class restriction, a display id the client ships.
+    ///
+    /// Selecting these from the database by formula looked like the general solution and was not:
+    /// ordered by item level it produced "Tuxedo Jacket" and "Black Night Elf Helm", ordered by
+    /// level it produced NPC-only templates. A short verified list beats a clever query, and two
+    /// candidates per row cover the odd item a core refuses.
+    struct ArmourSet
+    {
+        uint32 belt[2];
+        uint32 bracers[2];
+        uint32 gloves[2];
+        uint32 cloak[2];
+    };
+
+    ArmourSet const& StarterArmourSet(uint8 clazz)
+    {
+        // static: built once, and returned by reference
+        static ArmourSet const cloth   = { { 3595, 3363 }, { 3596, 3365 }, { 711, 1377 }, { 11847, 1376 } };
+        static ArmourSet const leather = { { 1835, 1418 }, { 1836, 2124 }, { 714, 1422 },  { 1376, 0 } };
+        static ArmourSet const mail    = { { 2387, 0 },    { 2390, 0 },    { 2391, 0 },     { 1376, 0 } };
+
+        // a plate-wearer starts in mail: nothing plate exists at level 1 in this data
+        switch (ArmourSubclassFor(clazz))
+        {
+            case ITEM_SUBCLASS_ARMOR_LEATHER: return leather;
+            case ITEM_SUBCLASS_ARMOR_MAIL:
+            case ITEM_SUBCLASS_ARMOR_PLATE:   return mail;
+            default:                          return cloth;
+        }
+    }
+
+    /// Put clothes on a companion, one slot at a time.
+    ///
+    /// Release wipes a body, so a created companion arrives with nothing on. The core's own
+    /// list is the obvious source and it is empty here (`playercreateinfo_item` holds a single
+    /// unrelated row), so the kit is issued directly.
+    ///
+    /// Each slot is filled and then *read back*: the previous version asked the core to equip
+    /// and trusted the return value, and a companion turned up wearing a weapon and boots with
+    /// its chest and legs missing, because an item that cannot be equipped is stored in the bag
+    /// instead and the counter still said "dressed". Now an item that does not end up on the
+    /// body is an error in the log, naming the slot and the equip error, and the other slots are
+    /// never affected by the one that failed - there is no all-or-nothing guard any more.
+    void EnsureStartingGear(Player* /*owner*/, Player* bot)
+    {
+        struct SlotKit
+        {
+            uint8 slot;
+            uint32 item;
+            char const* label;
+        };
+
+        // Several candidates per slot. This repack flags some of these items faction-only -
+        // Tattered Cloth Pants (194) carries FlagsExtra 1, Horde only - and the core answers
+        // EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM forever, so a single hard-coded id can leave a
+        // companion permanently half-dressed. The list is tried in order.
+        struct SlotChoice
+        {
+            uint8 slot;
+            uint32 items[3];
+            char const* label;
+        };
+
+        std::vector<SlotChoice> kit;
+
+        kit.push_back({ EQUIPMENT_SLOT_MAINHAND, { WeaponForClass(uint8(bot->getClass())), 0, 0 }, "weapon" });
+
+        // Robes, not vests. Item 193 (Tattered Cloth Vest) equips and reports as worn but has no
+        // visible model in this client - the character sheet showed an empty chest while the
+        // server said "wearing chest" - so the fallbacks are the classic starter robes, whose
+        // display ids are the ones the client definitely ships.
+        kit.push_back({ EQUIPMENT_SLOT_CHEST, { 57, 56, 0 },   "chest" });
+        kit.push_back({ EQUIPMENT_SLOT_LEGS,  { 39, 1378, 0 }, "legs"  });
+        kit.push_back({ EQUIPMENT_SLOT_FEET,  { 195, 1374, 0 }, "feet" });
+
+        // The rest of the outfit: belt, bracers, gloves and cloak in the class's own armour type.
+        // Off-switchable, because it is a curated list rather than the core's own itemisation.
+        if (g_cfg.extraArmourSlots)
+        {
+            ArmourSet const& set = StarterArmourSet(uint8(bot->getClass()));
+
+            kit.push_back({ EQUIPMENT_SLOT_WAIST,  { set.belt[0],    set.belt[1],    0 }, "waist"  });
+            kit.push_back({ EQUIPMENT_SLOT_WRISTS, { set.bracers[0], set.bracers[1], 0 }, "wrists" });
+            kit.push_back({ EQUIPMENT_SLOT_HANDS,  { set.gloves[0],  set.gloves[1],  0 }, "hands"  });
+            kit.push_back({ EQUIPMENT_SLOT_BACK,   { set.cloak[0],   set.cloak[1],   0 }, "back"   });
+        }
+
+        uint32 filled = 0;
+
+        for (SlotChoice const& one : kit)
+        {
+            if (Item* worn = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, one.slot))
+            {
+                if (!IsRetiredKitItem(worn->GetEntry()))
+                    continue;                               // keep what it is wearing
+
+                // an item this module issued and has since withdrawn: take it off, the player
+                // cannot see it anyway
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} removing retired kit item {} from {}",
+                         bot->GetName(), worn->GetEntry(), one.label);
+
+                bot->DestroyItem(INVENTORY_SLOT_BAG_0, one.slot, true);
+            }
+
+            uint32 const botGuid = bot->GetGUID().GetCounter();
+            uint32 const now = static_cast<uint32>(time(nullptr));
+            uint64 const key = (uint64(botGuid) << 8) | one.slot;
+
+            for (uint32 const itemId : one.items)
+            {
+                if (!itemId)
+                    continue;
+
+                // Wear a copy that is already in the bags before making another one: without
+                // this, a slot that cannot be filled collects a new item every 30 seconds.
+                if (WearFromBags(bot, one.slot, itemId) &&
+                    bot->GetItemByPos(INVENTORY_SLOT_BAG_0, one.slot))
+                    break;
+
+                auto const created = g_gearCreatedAt.find(key);
+                if (created != g_gearCreatedAt.end() && now - created->second < 300)
+                    break;                                  // tried recently, leave this slot alone
+
+                uint16 dest = 0;
+                InventoryResult const check = bot->CanEquipNewItem(NULL_SLOT, dest, itemId, true);
+                if (check != EQUIP_ERR_OK)
+                {
+                    if (g_cfg.debug >= 1)
+                        LOG_INFO("server.loading",
+                                 "[CompanionQuestSync] {} {} candidate {} refused (error {}), trying the next",
+                                 bot->GetName(), one.label, itemId, uint32(check));
+
+                    continue;                              // faction or skill locked: next candidate
+                }
+
+                bot->AutoUnequipOffhandIfNeed();
+
+                if (!bot->EquipNewItem(dest, itemId, true))
+                    continue;
+
+                g_gearCreatedAt[key] = now;
+
+                if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, one.slot))
+                    WearFromBags(bot, one.slot, itemId);
+
+                break;
+            }
+
+            if (Item* worn = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, one.slot))
+            {
+                ++filled;
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} wearing {}: {} ({})",
+                         bot->GetName(), one.label, worn->GetTemplate()->Name1, worn->GetEntry());
+            }
+            else
+            {
+                LOG_ERROR("server.loading",
+                          "[CompanionQuestSync] {} {} is still empty - no candidate could be worn",
+                          bot->GetName(), one.label);
+            }
+        }
+
+        filled += WearLooseGear(bot);
+
+        if (filled)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} dressed ({} slot(s) filled this pass)",
+                     bot->GetName(), filled);
+    }
+
+    /// Take a companion out of the owner's group.
+    ///
+    /// A dismissed companion must not stay in the party frame: playerbots usually ungroups on
+    /// logout, but not always - the member lingers as an offline row, the group frame keeps a
+    /// slot, and the player has to remove it by hand. Doing it explicitly costs nothing and is
+    /// also the correct order: leave the group, then log out.
+    void LeaveGroup(Player* owner, uint32 botGuid, std::string const& name)
+    {
+        if (!owner)
+            return;
+
+        Group* group = owner->GetGroup();
+        if (!group)
+            return;
+
+        ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(botGuid);
+        if (!group->IsMember(guid))
+            return;
+
+        group->RemoveMember(guid);
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} removed from {}'s group",
+                 name, owner->GetName());
+    }
+
+    /// Make the client forget a cached unit name.
+    ///
+    /// A 3.3.5 client caches names per guid for the whole session, so a body renamed to the
+    /// player's chosen name still showed as Zz<guid> in the group frame and on the nameplate
+    /// while the panel - which reads our own payload - showed the new name. The core has the
+    /// opcode but no packet class for it, so it is built raw with a packed guid.
+    void InvalidatePlayerName(Player* owner, uint32 botGuid)
+    {
+        if (!owner || !owner->GetSession())
+            return;
+
+        WorldPacket data(SMSG_INVALIDATE_PLAYER, 8);
+        data << ObjectGuid::Create<HighGuid::Player>(botGuid);
+        owner->GetSession()->SendPacket(&data);
+    }
+
+    /// The last tie to mod-wowlegends: its binding table, read only, so two modules never level
+    /// and quest the same bot. With RespectLegacyBindings = 0 the clause disappears and this
+    /// module knows nothing about that table - the honest position for one that claims to stand
+    /// alone, and the setting to use when that module is not installed at all.
+    std::string LegacyBindingClause(char const* alias = "c.guid")
+    {
+        if (!g_cfg.respectLegacyBindings)
+            return "";
+
+        return std::string("AND ") + alias + " NOT IN (SELECT bot_guid FROM wowlegends_companion) ";
+    }
+
+    /// What a body is actually wearing, slot by slot - the check that was missing.
+    std::string DescribeGear(Player* bot)
+    {
+        static char const* const names[] =
+        {
+            "head", "neck", "shoulder", "shirt", "chest", "waist", "legs", "feet", "wrists",
+            "hands", "finger1", "finger2", "trinket1", "trinket2", "back", "main hand",
+            "off hand", "ranged", "tabard"
+        };
+
+        std::string out;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!item)
+                continue;
+
+            if (!out.empty())
+                out += ", ";
+
+            out += std::string(names[slot]) + ": " + item->GetTemplate()->Name1;
+        }
+
+        return out.empty() ? "nothing equipped" : out;
+    }
+
     /// Sell before destroying.
     ///
     /// Destroying greys was the only lever the module had, and greys are worth
@@ -2493,12 +2897,14 @@ namespace
         report.ownerLevel = owner->GetLevel();
         report.botLevel = bot->GetLevel();
 
+        // Grouping gates QUEST SYNCING, not upkeep. It used to return here, which meant a
+        // bound companion that had slipped out of the group got no bags, no gear and no
+        // level alignment at all - silently, because nothing was logged. The callers now
+        // decide what a missing group suppresses.
         if (g_cfg.requireGrouped)
         {
             Group* group = owner->GetGroup();
             report.grouped = group && group->IsMember(bot->GetGUID());
-            if (!report.grouped)
-                return nullptr;
         }
 
         return bot;
@@ -2535,7 +2941,15 @@ namespace
 
         Player* bot = ResolveCompanion(owner, report, botGuid);
         if (!bot)
+        {
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] pass for {} skipped: companion {} could not be resolved "
+                         "(offline, not a bot session, or not grouped)",
+                         owner->GetName(), botGuid);
+
             return report;
+        }
 
         // Combat defers only the LEVEL change. Quest copying used to be blocked
         // here outright, which is why a companion refused to pick up a quest
@@ -2687,6 +3101,22 @@ namespace
         }
 
 
+        // Upkeep runs before the memo, not after it. Bags and gear are not quest-log work:
+        // once a companion's logs settled the digest short-circuit returned above them, so a
+        // body created from the pool stayed naked forever while every pass reported "in sync".
+        EnsureBags(owner, bot);
+        EnsureStartingGear(owner, bot);
+
+        if (g_cfg.requireGrouped && !report.grouped)
+        {
+            if (g_cfg.debug >= 2)
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] {} is not in {}'s group - upkeep only this pass",
+                         bot->GetName(), owner->GetName());
+
+            return report;
+        }
+
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -2702,7 +3132,6 @@ namespace
         // Keep a couple of slots free so quest items can be picked up and
         // quest source items stored, instead of discovering the shortage only
         // when an accept is refused.
-        EnsureBags(owner, bot);                        // room before anything else
         TrySellJunk(owner, bot);                       // earn coin first
         NotifyJunk(owner, bot, TidyInventory(bot));    // destroy only what is left
 
@@ -2938,6 +3367,22 @@ namespace
 
     /// Send the pin line when it changes, and again every ten minutes in case one
     /// was missed. A whisper, because that is the only channel the addon can read.
+    /// Deliver one protocol line to the client that can read it.
+    ///
+    /// A system message rather than a whisper. Whispers need a speaker, and the payloads are
+    /// needed most when no companion is out - the roster, the pool picker, the map. With no
+    /// companion in the world there was nobody to whisper, so the client silently got
+    /// nothing and the window showed an empty pool. The addon hides these lines from the
+    /// chat frame by their WLCG prefix, so the player never sees them.
+    void SendProtocolLine(Player* owner, std::string const& line)
+    {
+        if (!owner || !owner->GetSession())
+            return;
+
+        ChatHandler handler(owner->GetSession());
+        handler.SendSysMessage(("WLCG|" + line).c_str());
+    }
+
     /// Who speaks the protocol lines (pin and companion payloads).
     ///
     /// Not the sync resolver: that one refuses a companion which is not grouped, which is
@@ -3029,8 +3474,7 @@ namespace
 
             // Grey and quiet: the addon needs the line, the player does not need to read
             // it. Colour codes are stripped by WLPins before it parses.
-            if (Player* speaker = ResolveProtocolSpeaker(owner))
-                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+            SendProtocolLine(owner, line);
         }
 
         last = payload;
@@ -3148,10 +3592,17 @@ namespace
 
         ChatHandler handler(owner->GetSession());
         for (DroppedBinding const& one : dropped)
+        {
+            // Say it in the log as well as the chat frame: a dropped binding is invisible to
+            // anyone debugging from the log, and a test that greps for it finds nothing.
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} dropped binding {} ({}): {}",
+                     owner->GetName(), one.name, one.botGuid, one.reason);
+
             handler.PSendSysMessage("|cffff8000Companion|r: no longer following |cffffff00{}|r: {}. "
                                     "|cffffff00.companionsync list|r shows who is bound, "
                                     "|cffffff00.companionsync bind <name>|r adds one.",
                                     one.name, one.reason);
+        }
 
         if (g_cfg.pinSync)
             SendPinSync(owner, true);
@@ -3214,7 +3665,8 @@ namespace
         std::string csv;
 
         if (QueryResult result = PlayerbotsDatabase.Query(
-                "SELECT account_id FROM playerbots_account_type WHERE account_type = 2"))
+                "SELECT account_id FROM playerbots_account_type WHERE account_type = "
+                + std::to_string(g_cfg.poolAccountType)))
         {
             do
             {
@@ -3247,15 +3699,17 @@ namespace
             "AND c.online = 0 "
             "AND c.guid NOT IN (SELECT guid FROM guild_member) "
             "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
-            "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion) ";
+            + LegacyBindingClause();
 
         uint32 const ahbot = sConfigMgr->GetOption<uint32>("AuctionHouseBot.GUID", 0);
         if (ahbot)
             sql += "AND c.guid <> " + std::to_string(ahbot) + " ";
 
-        // Our own ledger: a body released minutes ago may still be settling.
-        sql += "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion_pool "
-               "WHERE released_at > NOW() - INTERVAL 15 MINUTE) ";
+        // No re-claim cooldown. That rule belongs to mod-wowlegends, whose cleanup is
+        // asynchronous; this module resets and renames a released body before it records the
+        // release, so the body is ready the moment it is written down. Holding it back for a
+        // quarter of an hour made a just-released race/class look empty - which is exactly
+        // what "human priest not available" was.
 
         sql += "LIMIT 1";
 
@@ -3284,6 +3738,32 @@ namespace
             "WHERE guid = {}", botGuid);
     }
 
+    /// Make sure the core knows this body, name and all.
+    ///
+    /// A body that exists only in the database - a pool body cloned from a template, or one
+    /// this module just renamed - has no entry in sCharacterCache. playerbots' AddPlayerBot
+    /// looks the account id up there and returns silently when it finds nothing, so a summon
+    /// of a freshly created companion did nothing at all, with no error anywhere.
+    void EnsureCharacterCache(uint32 botGuid, std::string const& name)
+    {
+        ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(botGuid);
+
+        if (sCharacterCache->GetCharacterAccountIdByGuid(guid))
+        {
+            sCharacterCache->UpdateCharacterData(guid, name);
+            return;
+        }
+
+        if (QueryResult row = CharacterDatabase.Query(
+                "SELECT account, gender, race, class, level FROM characters WHERE guid = {}", botGuid))
+        {
+            Field* fields = row->Fetch();
+            sCharacterCache->AddCharacterCacheEntry(guid, fields[0].Get<uint32>(), name,
+                                                    fields[1].Get<uint8>(), fields[2].Get<uint8>(),
+                                                    fields[3].Get<uint8>(), fields[4].Get<uint8>());
+        }
+    }
+
     /// Rename a body and prove it stuck - a rename the database refused must never be
     /// reported as done, because the next summon would then look for a name nobody has.
     bool RenameBody(uint32 botGuid, std::string const& name)
@@ -3292,7 +3772,7 @@ namespace
         CharacterDatabase.EscapeString(escaped);
 
         CharacterDatabase.DirectExecute("UPDATE characters SET name = '{}' WHERE guid = {}", escaped, botGuid);
-        sCharacterCache->UpdateCharacterData(ObjectGuid::Create<HighGuid::Player>(botGuid), name);
+        EnsureCharacterCache(botGuid, name);
 
         if (QueryResult row = CharacterDatabase.Query("SELECT name FROM characters WHERE guid = {}", botGuid))
             return row->Fetch()[0].Get<std::string>() == name;
@@ -3335,14 +3815,11 @@ namespace
             "AND c.online = 0 "
             "AND c.guid NOT IN (SELECT guid FROM guild_member) "
             "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
-            "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion) ";
+            + LegacyBindingClause();
 
         uint32 const ahbot = sConfigMgr->GetOption<uint32>("AuctionHouseBot.GUID", 0);
         if (ahbot)
             sql += "AND c.guid <> " + std::to_string(ahbot) + " ";
-
-        sql += "AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion_pool "
-               "WHERE released_at > NOW() - INTERVAL 15 MINUTE) ";
 
         sql += "GROUP BY c.race, c.class ORDER BY c.race, c.class";
 
@@ -3419,8 +3896,7 @@ namespace
 
             line += chunks[i];
 
-            if (speaker)
-                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+            SendProtocolLine(owner, line);
         }
 
         last = payload;
@@ -3456,8 +3932,8 @@ namespace
     ///
     /// Returns false with `error` set to something a player can act on. Every failure is
     /// named, because "it did not work" from a button is useless.
-    bool CreateCompanion(Player* owner, uint8 race, uint8 clazz, std::string const& name,
-                         uint32& botGuid, std::string& error)
+    bool CreateCompanion(uint32 ownerGuid, std::string const& ownerName, uint8 race, uint8 clazz,
+                         std::string const& name, uint32& botGuid, std::string& error)
     {
         if (!ValidCompanionName(name))
         {
@@ -3472,7 +3948,7 @@ namespace
         }
 
         std::vector<uint32> bound;
-        if (FindCompanions(owner->GetGUID().GetCounter(), bound) && bound.size() >= kMaxCompanions)
+        if (FindCompanions(ownerGuid, bound) && bound.size() >= kMaxCompanions)
         {
             error = "you already have the maximum of " + std::to_string(kMaxCompanions) + " companions";
             return false;
@@ -3497,8 +3973,6 @@ namespace
             return false;
         }
 
-        uint32 const ownerGuid = owner->GetGUID().GetCounter();
-
         if (g_bindingHasName)
         {
             std::string escaped = name;
@@ -3517,7 +3991,7 @@ namespace
         InvalidateCompanionGuid(ownerGuid);
 
         LOG_INFO("server.loading", "[CompanionQuestSync] {} created companion {} (race {}, class {}) from pool body {} (was '{}')",
-                 owner->GetName(), name, uint32(race), uint32(clazz), botGuid, poolName);
+                 ownerName, name, uint32(race), uint32(clazz), botGuid, poolName);
 
         return true;
     }
@@ -3679,8 +4153,7 @@ namespace
 
             line += chunks[i];
 
-            if (Player* speaker = ResolveProtocolSpeaker(owner))
-                speaker->Whisper("|cff7a7a7a" + line + "|r", LANG_UNIVERSAL, owner);
+            SendProtocolLine(owner, line);
         }
 
         last = payload;
@@ -3713,6 +4186,34 @@ namespace
         return 0;
     }
 
+    /// The same lookup as ResolveCompanion, for a character who is not logged in.
+    uint32 ResolveCompanionForOwner(uint32 ownerGuid, std::string const& name, std::vector<uint32> const& bound)
+    {
+        for (uint32 const candidate : bound)
+            if (CompanionNameFor(candidate) == name)
+                return candidate;
+
+        if (g_bindingHasName)
+        {
+            std::string escaped = name;
+            CharacterDatabase.EscapeString(escaped);
+
+            if (QueryResult row = CharacterDatabase.Query(
+                    "SELECT bot_guid FROM {} WHERE owner_guid = {} AND companion_name = '{}'",
+                    g_cfg.bindingTable, ownerGuid, escaped))
+                return row->Fetch()[0].Get<uint32>();
+        }
+
+        return 0;
+    }
+
+    /// When each body was last seen up, so a removal is never issued at a bot playerbots is
+    /// still finishing the login of.
+    ///
+    /// Every removal that took the worldserver down today was of a companion summoned seconds
+    /// earlier, and every removal that worked was of one that had been out for minutes.
+    std::map<uint32, uint32> g_botUpAt;
+
     void CheckPendingSummons()
     {
         if (g_pendingSummon.empty())
@@ -3739,7 +4240,24 @@ namespace
             {
                 if (online)
                 {
+                    g_botUpAt[pending.botGuid] = static_cast<uint32>(time(nullptr));
+
                     LOG_INFO("server.loading", "[CompanionQuestSync] summon came up: {} ({})", pending.name, pending.botGuid);
+
+                    // Dress it on the spot. Waiting for the next sweep means the player watches
+                    // a naked companion walk around for up to half a minute, and "it spawns
+                    // dressed" is the whole point of a companion arriving.
+                    if (Player* fresh = FindCompanionPlayer(pending.botGuid); fresh && fresh->IsInWorld())
+                    {
+                        Player* master = ObjectAccessor::FindConnectedPlayer(
+                            ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+
+                        EnsureBags(master, fresh);
+                        EnsureStartingGear(master, fresh);
+
+                        LOG_INFO("server.loading", "[CompanionQuestSync] {} dressed at spawn: {}",
+                                 pending.name, DescribeGear(fresh));
+                    }
 
                     if (owner && owner->GetSession() && g_cfg.requireGrouped)
                     {
@@ -3800,7 +4318,7 @@ namespace
             return;
 
         CharacterDatabase.DirectExecute(
-            "CREATE TABLE IF NOT EXISTS wowlegends_companion_pool ("
+            "CREATE TABLE IF NOT EXISTS " + g_cfg.poolTable + " ("
             " bot_guid INT UNSIGNED NOT NULL,"
             " released_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             " reason VARCHAR(32) NOT NULL DEFAULT '',"
@@ -3815,7 +4333,7 @@ namespace
         EnsurePoolLedger();
 
         CharacterDatabase.DirectExecute(
-            "INSERT INTO wowlegends_companion_pool (bot_guid, released_at, reason) VALUES ({}, NOW(), '{}') "
+            "INSERT INTO " + g_cfg.poolTable + " (bot_guid, released_at, reason) VALUES ({}, NOW(), '{}') "
             "ON DUPLICATE KEY UPDATE released_at = NOW(), reason = '{}'",
             botGuid, reason, reason);
     }
@@ -3880,20 +4398,14 @@ namespace
             Player* bot = FindCompanionPlayer(pending.botGuid);
             bool const online = bot && bot->IsInWorld();
 
-            // still in the world: send it away and give it time to actually go
-            if (online && pending.needsDismiss)
+            // still in the world: the dismiss was issued from the command handler, so give it
+            // time to actually go before touching the body
+            if (online)
             {
-                Player* owner = ObjectAccessor::FindConnectedPlayer(
-                    ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
-
                 LOG_INFO("server.loading",
-                         "[CompanionQuestSync] release step 4: dismissing {} from the update tick", pending.name);
+                         "[CompanionQuestSync] release step 4: waiting for {} to leave ({} s left)",
+                         pending.name, uint32(pending.deadline > now ? pending.deadline - now : 0));
 
-                if (owner)
-                    DispatchPlayerbots(owner, "remove " + pending.name);
-
-                it->needsDismiss = false;
-                it->deadline = now + 15;
                 ++it;
                 continue;
             }
@@ -3913,6 +4425,27 @@ namespace
             }
 
             it = g_pendingRelease.erase(it);
+
+            // The body is offline and about to stop being a companion, so the sweep will never
+            // look at it again: if its party slot is not released here it stays behind as an
+            // offline member that nothing owns.
+            if (Player* owner = ObjectAccessor::FindConnectedPlayer(
+                    ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid)))
+            {
+                if (Group* group = owner->GetGroup())
+                {
+                    ObjectGuid const botGuidObj = ObjectGuid::Create<HighGuid::Player>(pending.botGuid);
+
+                    if (group->IsMember(botGuidObj))
+                    {
+                        group->RemoveMember(botGuidObj);
+
+                        LOG_INFO("server.loading",
+                                 "[CompanionQuestSync] {} removed from {}'s group before release",
+                                 pending.name, owner->GetName());
+                    }
+                }
+            }
 
             LOG_INFO("server.loading", "[CompanionQuestSync] release step 5: finalising {} ({})",
                      pending.name, pending.botGuid);
@@ -3954,10 +4487,10 @@ namespace
     }
 
     /// Start a release: dismiss the body, then finish when it is really gone.
-    bool BeginRelease(Player* owner, uint32 botGuid, std::string& error)
+    bool BeginRelease(uint32 ownerGuid, std::string const& ownerName, uint32 botGuid, std::string& error)
     {
         LOG_INFO("server.loading", "[CompanionQuestSync] release step 1: begin (owner {}, bot {})",
-                 owner ? owner->GetGUID().GetCounter() : 0, botGuid);
+                 ownerGuid, botGuid);
         for (PendingRelease const& pending : g_pendingRelease)
             if (pending.botGuid == botGuid)
             {
@@ -3969,6 +4502,11 @@ namespace
 
         LOG_INFO("server.loading", "[CompanionQuestSync] release step 2: name resolved ({})", name);
 
+        // A summon check may still be armed for this body. Releasing dismisses it, and the check
+        // would then report "summon did not come up" ten seconds after the release had already
+        // succeeded - a contradiction that reads like two features fighting.
+        g_pendingSummon.erase(botGuid);
+
         // Never dispatch playerbots from here. `bot remove` deletes the bot synchronously,
         // and doing that inside a chat command handler took the worldserver down: the player
         // was disconnected and the process died with no dump. The dismiss is queued and sent
@@ -3976,14 +4514,45 @@ namespace
         Player* bot = FindCompanionPlayer(botGuid);
         bool const online = bot && bot->IsInWorld();
 
-        if (online)
+        Player* owner = ObjectAccessor::FindConnectedPlayer(
+            ObjectGuid::Create<HighGuid::Player>(ownerGuid));
+
+        uint32 const upAt = g_botUpAt.count(botGuid) ? g_botUpAt[botGuid] : 0;
+        uint32 const now = static_cast<uint32>(time(nullptr));
+
+        if (online && owner && upAt && now - upAt < 20)
+        {
+            error = "that companion has only just come out - give it a few seconds and release again";
+            return false;
+        }
+
+        if (online && owner)
+        {
             LOG_INFO("server.loading",
-                     "[CompanionQuestSync] release step 3: body is out, dismiss queued for the next tick");
+                     "[CompanionQuestSync] release step 3: body is out, dismissing it now");
 
-        g_pendingRelease.push_back({ owner->GetGUID().GetCounter(), botGuid, name,
-                                     static_cast<uint32>(time(nullptr)) + 15, online });
+            // Inline, from the command handler: that is exactly how mod-wowlegends' own
+            // `.companion forget` dismisses, and it is the one place playerbots' synchronous
+            // teardown is provably safe. Issuing it from the update tick instead - which this
+            // module tried twice - takes the process down at the log line, with no dump.
+            // Nothing below touches the body: the reset waits for the tick, once it is offline.
+            LOG_INFO("server.loading", "[CompanionQuestSync] release: dispatching remove {}", name);
 
-        LOG_INFO("server.loading", "[CompanionQuestSync] {} releasing {} ({})", owner->GetName(), name, botGuid);
+            DispatchPlayerbots(owner, "remove " + name);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] release: remove dispatched");
+        }
+        else if (online)
+        {
+            LOG_INFO("server.loading",
+                     "[CompanionQuestSync] release step 3: body is out but its owner is offline - "
+                     "it will be reset on the next tick it is gone");
+        }
+
+        g_pendingRelease.push_back({ ownerGuid, botGuid, name,
+                                     static_cast<uint32>(time(nullptr)) + 15, false });
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} releasing {} ({})", ownerName, name, botGuid);
         return true;
     }
 
@@ -4009,6 +4578,30 @@ namespace
 
         if (bots.empty())
             return aggregate;
+
+        // A companion that is not in the world must not hold a party slot. This has to run for
+        // *every* bound companion before anything tries to resolve one - the resolver returns
+        // early for an offline body, which is exactly the case that needs tidying, so putting
+        // it behind the resolver meant it never ran at all.
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (bot && bot->IsInWorld())
+                continue;
+
+            Group* group = owner->GetGroup();
+            if (!group)
+                break;
+
+            ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(botGuid);
+            if (!group->IsMember(guid))
+                continue;
+
+            group->RemoveMember(guid);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] companion {} was not in the world - "
+                                       "removed it from {}'s group", botGuid, owner->GetName());
+        }
 
         aggregate.hasCompanion = true;
         g_multiCompanion = bots.size() > 1;
@@ -4054,6 +4647,247 @@ namespace
     }
 }
 
+    // -----------------------------------------------------------------------
+    // integrity
+    //
+    // The module keeps its own tables, so it also owns keeping them honest. The core deletes
+    // a character or an account without telling anyone who pointed at it, and a binding row
+    // that outlives its character is worse than no row at all: the player sees a companion
+    // that cannot be summoned, and two owners can end up pointed at one body. Nothing here
+    // touches core tables - it only removes rows of ours that refer to characters that are
+    // gone, and rows that would make the module act twice on one body.
+    // -----------------------------------------------------------------------
+
+    struct IntegrityReport
+    {
+        uint32 rows = 0;
+        uint32 danglingOwner = 0;
+        uint32 danglingBot = 0;
+        uint32 duplicate = 0;
+        uint32 doubleBound = 0;      // bound in this table and in mod-wowlegends' table
+        uint32 ledgerOrphans = 0;
+        uint32 fixed = 0;
+        std::vector<std::string> notes;
+    };
+
+    /// Check (and with fix, repair) every reference the module owns.
+    IntegrityReport RunIntegrity(bool fix)
+    {
+        IntegrityReport out;
+
+        std::string const nameColumn = g_bindingHasName ? "companion_name" : "''";
+        std::string const createdColumn = g_bindingHasCreatedAt ? "UNIX_TIMESTAMP(created_at)" : "0";
+
+        struct Row
+        {
+            uint32 owner = 0;
+            uint32 bot = 0;
+            std::string name;
+            uint32 created = 0;
+        };
+
+        std::vector<Row> rows;
+        std::set<uint32> guids;
+
+        if (QueryResult result = CharacterDatabase.Query(
+                "SELECT owner_guid, bot_guid, " + nameColumn + ", " + createdColumn +
+                " FROM " + g_cfg.bindingTable))
+        {
+            do
+            {
+                Field* f = result->Fetch();
+                Row row;
+                row.owner = f[0].Get<uint32>();
+                row.bot = f[1].Get<uint32>();
+                row.name = f[2].Get<std::string>();
+                row.created = f[3].Get<uint32>();
+                rows.push_back(row);
+                guids.insert(row.owner);
+                guids.insert(row.bot);
+            } while (result->NextRow());
+        }
+
+        out.rows = uint32(rows.size());
+
+        std::set<uint32> alive;
+        if (!guids.empty())
+        {
+            std::string list;
+            for (uint32 const guid : guids)
+            {
+                if (!list.empty())
+                    list += ",";
+                list += std::to_string(guid);
+            }
+
+            if (QueryResult chars = CharacterDatabase.Query("SELECT guid FROM characters WHERE guid IN ({})", list))
+            {
+                do
+                {
+                    alive.insert(chars->Fetch()[0].Get<uint32>());
+                } while (chars->NextRow());
+            }
+        }
+
+        // the same body under another module: two modules would level and quest one bot
+        std::set<uint32> legacyBound;
+        if (g_cfg.respectLegacyBindings)
+        if (QueryResult legacy = CharacterDatabase.Query("SELECT bot_guid FROM wowlegends_companion"))
+        {
+            do
+            {
+                legacyBound.insert(legacy->Fetch()[0].Get<uint32>());
+            } while (legacy->NextRow());
+        }
+
+        std::set<uint32> seenBots;
+
+        for (Row const& row : rows)
+        {
+            std::string const shown = row.name.empty() ? std::to_string(row.bot) : row.name;
+            bool doomed = false;
+            char const* why = nullptr;
+
+            if (!alive.count(row.owner))
+            {
+                ++out.danglingOwner;
+                doomed = true;
+                why = "the owner character no longer exists";
+            }
+            else if (!alive.count(row.bot))
+            {
+                ++out.danglingBot;
+                doomed = true;
+                why = "the companion body no longer exists";
+            }
+            else if (seenBots.count(row.bot))
+            {
+                ++out.duplicate;
+                doomed = true;
+                why = "the same body is bound twice";
+            }
+            else if (legacyBound.count(row.bot))
+            {
+                ++out.doubleBound;
+                out.notes.push_back(shown + " is also bound in wowlegends_companion");
+            }
+
+            if (!doomed)
+            {
+                seenBots.insert(row.bot);
+                continue;
+            }
+
+            out.notes.push_back(shown + " (" + std::to_string(row.bot) + "): " + why);
+
+            if (fix)
+            {
+                CharacterDatabase.DirectExecute("DELETE FROM {} WHERE owner_guid = {} AND bot_guid = {}",
+                                                g_cfg.bindingTable, row.owner, row.bot);
+                g_bindingCache.erase(row.owner);
+                ++out.fixed;
+            }
+        }
+
+        // ledger rows for bodies that are gone: harmless but misleading at 3am
+        if (QueryResult ledger = CharacterDatabase.Query(
+                "SELECT bot_guid FROM " + g_cfg.poolTable + " WHERE bot_guid NOT IN (SELECT guid FROM characters)"))
+        {
+            do
+            {
+                uint32 const botGuid = ledger->Fetch()[0].Get<uint32>();
+                ++out.ledgerOrphans;
+                out.notes.push_back("ledger entry for missing body " + std::to_string(botGuid));
+
+                if (fix)
+                {
+                    CharacterDatabase.DirectExecute("DELETE FROM " + g_cfg.poolTable + " WHERE bot_guid = {}", botGuid);
+                    ++out.fixed;
+                }
+            } while (ledger->NextRow());
+        }
+
+        // A body the ledger says is back in the pool must carry a pool name. The rename at
+        // release time is written while the body is going offline, and the body's own logout
+        // save has overwritten it with the player-facing name three times today - Soak, Healy
+        // and Brandan all came back named after a completed release. Re-pooling here is
+        // idempotent and does not care who wrote last.
+        if (fix)
+        {
+            if (QueryResult stale = CharacterDatabase.Query(
+                    "SELECT p.bot_guid FROM " + g_cfg.poolTable + " p "
+                    "JOIN characters c ON c.guid = p.bot_guid "
+                    "WHERE c.name <> CONCAT('Zz', p.bot_guid) AND c.online = 0 "
+                    "AND p.bot_guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
+                    + LegacyBindingClause("p.bot_guid") + "LIMIT 20"))
+            {
+                do
+                {
+                    uint32 const guid = stale->Fetch()[0].Get<uint32>();
+
+                    if (RenameBody(guid, PoolNameFor(guid)))
+                    {
+                        LOG_INFO("server.loading",
+                                 "[CompanionQuestSync] re-pooled body {} - it came back from a "
+                                 "release still carrying its player name", guid);
+                        ++out.fixed;
+                    }
+                } while (stale->NextRow());
+            }
+        }
+
+        // The ledger is a record, not state: nothing reads it after the release it describes.
+        // Keeping a sensible window stops it growing without bound on a long-lived realm.
+        if (fix)
+        {
+            CharacterDatabase.DirectExecute(
+                "DELETE FROM " + g_cfg.poolTable + " WHERE released_at < NOW() - INTERVAL 180 DAY");
+
+            // A released companion that was dismissed while its owner was offline leaves its party
+            // row behind: nothing else looks at that body again, and the group keeps a member who
+            // will never come back. Only unbound bodies from the bot accounts qualify, and never
+            // the leader - removing a leader from a loaded group is the group's business.
+            // The bot accounts live in the playerbots database, not this one: ask it there and
+            // pass the ids in, rather than naming a table the characters connection cannot see.
+            std::string const botAccounts = AddClassAccountCsv();
+
+            if (!botAccounts.empty())
+            {
+                CharacterDatabase.Execute(
+                    "DELETE gm FROM group_member gm "
+                    "JOIN `groups` g ON g.guid = gm.guid "
+                    "JOIN characters c ON c.guid = gm.memberGuid "
+                    "WHERE c.online = 0 "
+                    "AND gm.memberGuid <> g.leaderGuid "
+                    "AND c.guid NOT IN (SELECT bot_guid FROM " + g_cfg.bindingTable + ") "
+                    "AND c.account IN (" + botAccounts + ")");
+            }
+        }
+
+        return out;
+    }
+
+    /// Periodic repair: dangling references only, never a row that still points at two
+    /// real characters. Runs rarely, because it is a full scan of our tables.
+    void SweepIntegrity()
+    {
+        static uint32 nextRun = 0;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        if (nextRun && now < nextRun)
+            return;
+
+        nextRun = now + 600;
+
+        IntegrityReport const report = RunIntegrity(true);
+
+        if (report.fixed)
+            LOG_INFO("server.loading",
+                     "[CompanionQuestSync] integrity: repaired {} broken reference(s) of {} binding row(s) "
+                     "({} owner gone, {} body gone, {} duplicate)",
+                     report.fixed, report.rows, report.danglingOwner, report.danglingBot, report.duplicate);
+    }
+
 class CompanionQuestSyncWorldScript : public WorldScript
 {
 public:
@@ -4085,6 +4919,7 @@ public:
         // asked for something should not wait for the next sweep to learn it did not work.
         CheckPendingSummons();
         CheckPendingReleases();
+        SweepIntegrity();
 
         if (!g_cfg.autoSync)
             return;
@@ -4323,12 +5158,12 @@ public:
         if (QueryResult row = CharacterDatabase.Query("SELECT guid FROM characters WHERE name = '{}'", escaped))
         {
             ownerGuid = row->Fetch()[0].Get<uint32>();
-            handler->PSendSysMessage("|cffaaaaaaCompanion quest sync|r: %s is offline - acting on their saved companions.",
-                                     name.c_str());
+            handler->PSendSysMessage("|cffaaaaaaCompanion quest sync|r: {} is offline - acting on their saved companions.",
+                                     name);
             return nullptr;
         }
 
-        handler->PSendSysMessage("|cffff8000Companion quest sync|r: no character called %s.", name.c_str());
+        handler->PSendSysMessage("|cffff8000Companion quest sync|r: no character called {}.", name);
         return nullptr;
     }
 
@@ -4336,6 +5171,113 @@ public:
     {
         uint32 ignored = 0;
         return ConsoleTarget(handler, name, ignored);
+    }
+
+    /// .companionadmin gear <player> - what each bound body is wearing, slot by slot.
+    ///
+    /// Added because "the companion is naked" could not be checked without a client:
+    /// the equipment lives in the live entity, the database lags by a save interval, and
+    /// asking the player to read a character sheet is not a test.
+    static bool HandleAdminGear(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 1);
+        if (a.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin gear <player>");
+            return true;
+        }
+
+        uint32 ownerGuid = 0;
+        ConsoleTarget(handler, a[0], ownerGuid);
+
+        std::vector<uint32> bots;
+        if (!ownerGuid || !FindCompanions(ownerGuid, bots))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} has no companions.", a[0]);
+            return true;
+        }
+
+        for (uint32 const botGuid : bots)
+        {
+            std::string const name = CompanionNameFor(botGuid);
+
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                handler->PSendSysMessage("  |cffffff00{}|r: {}", name, DescribeGear(bot));
+            else
+                handler->PSendSysMessage("  |cffffff00{}|r: not in the world", name);
+        }
+
+        return true;
+    }
+
+    /// .companionadmin dress <player> - run the upkeep that clothes a body, now.
+    static bool HandleAdminDress(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> const a = SplitArgs(args, 1);
+        if (a.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: companionadmin dress <player>");
+            return true;
+        }
+
+        uint32 ownerGuid = 0;
+        ConsoleTarget(handler, a[0], ownerGuid);
+
+        std::vector<uint32> bots;
+        if (!ownerGuid || !FindCompanions(ownerGuid, bots))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} has no companions.", a[0]);
+            return true;
+        }
+
+        for (uint32 const botGuid : bots)
+        {
+            std::string const name = CompanionNameFor(botGuid);
+            Player* bot = FindCompanionPlayer(botGuid);
+
+            if (!bot || !bot->IsInWorld())
+            {
+                handler->PSendSysMessage("  |cffffff00{}|r: not in the world, nothing done", name);
+                continue;
+            }
+
+            EnsureStartingGear(nullptr, bot);
+            handler->PSendSysMessage("  |cffffff00{}|r: {}", name, DescribeGear(bot));
+        }
+
+        return true;
+    }
+
+    /// .companionadmin integrity [fix]
+    ///
+    /// Reports every reference this module owns that no longer resolves: bindings whose
+    /// owner or body was deleted, one body bound twice, a body also bound by
+    /// mod-wowlegends, and ledger rows for bodies that are gone. With "fix" the broken rows
+    /// are removed. Works from the console, because the mess is found when nobody is online.
+    static bool HandleAdminIntegrity(ChatHandler* handler, char const* args)
+    {
+        std::string const mode = args ? TrimArg(args) : std::string();
+        bool const fix = (mode == "fix");
+
+        IntegrityReport const report = RunIntegrity(fix);
+
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: integrity over {} binding row(s){}",
+                                 report.rows, fix ? ", repairing" : ", read only");
+
+        handler->PSendSysMessage("  |cffaaaaaaowners gone: {}   bodies gone: {}   bound twice: {}   "
+                                 "also in wowlegends_companion: {}   ledger orphans: {}|r",
+                                 report.danglingOwner, report.danglingBot, report.duplicate,
+                                 report.doubleBound, report.ledgerOrphans);
+
+        for (std::string const& note : report.notes)
+            handler->PSendSysMessage("  |cffff8000-|r {}", note);
+
+        if (fix)
+            handler->PSendSysMessage("  |cff20ff20{} row(s) removed|r", report.fixed);
+        else if (report.danglingOwner || report.danglingBot || report.duplicate || report.ledgerOrphans)
+            handler->PSendSysMessage("  |cffffd200run 'companionadmin integrity fix' to remove them|r");
+
+        return true;
     }
 
     /// .companionadmin create <player> <race> <class> <name>
@@ -4348,8 +5290,11 @@ public:
             return true;
         }
 
-        Player* player = ConsoleTarget(handler, a[0]);
-        if (!player)
+        // Works for an offline character: support and testing both happen when nobody is
+        // logged in, and a console tool that only works in game is worth much less.
+        uint32 ownerGuid = 0;
+        Player* player = ConsoleTarget(handler, a[0], ownerGuid);
+        if (!ownerGuid)
             return true;
 
         uint8 const race = ParseRaceToken(a[1]);
@@ -4362,17 +5307,20 @@ public:
 
         uint32 botGuid = 0;
         std::string error;
-        if (!CreateCompanion(player, race, clazz, a[3], botGuid, error))
+        if (!CreateCompanion(ownerGuid, a[0], race, clazz, a[3], botGuid, error))
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s.", error.c_str());
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
             return true;
         }
 
-        SendCompSync(player, true);
-        SendPoolStock(player, true);
+        if (player)
+        {
+            SendCompSync(player, true);
+            SendPoolStock(player, true);
+        }
 
-        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: created %s (body %u) for %s.",
-                                 a[3].c_str(), botGuid, player->GetName().c_str());
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: created {} (body {}) for {}.",
+                                 a[3], botGuid, a[0]);
         return true;
     }
 
@@ -4386,34 +5334,35 @@ public:
             return true;
         }
 
-        Player* player = ConsoleTarget(handler, a[0]);
-        if (!player)
+        uint32 ownerGuid = 0;
+        Player* player = ConsoleTarget(handler, a[0], ownerGuid);
+        if (!ownerGuid)
             return true;
 
         std::vector<uint32> bound;
-        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        if (!FindCompanions(ownerGuid, bound))
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s has no companions.", a[0].c_str());
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} has no companions.", a[0]);
             return true;
         }
 
-        uint32 const botGuid = ResolveCompanion(player, a[1], bound);
+        uint32 const botGuid = ResolveCompanionForOwner(ownerGuid, a[1], bound);
         if (!botGuid)
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s is not one of %s's companions.",
-                                     a[1].c_str(), a[0].c_str());
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not one of {}'s companions.",
+                                     a[1], a[0]);
             return true;
         }
 
         std::string error;
-        if (!BeginRelease(player, botGuid, error))
+        if (!BeginRelease(ownerGuid, a[0], botGuid, error))
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: %s.", error.c_str());
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
             return true;
         }
 
-        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: releasing %s (body %u) for %s.",
-                                 a[1].c_str(), botGuid, player->GetName().c_str());
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: releasing {} (body {}) for {}.",
+                                 a[1], botGuid, a[0]);
         return true;
     }
 
@@ -4432,7 +5381,7 @@ public:
             return true;
 
         SendPoolStock(player, true);
-        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: pool stock sent to %s.", a[0].c_str());
+        handler->PSendSysMessage("|cff20ff20Companion quest sync|r: pool stock sent to {}.", a[0]);
         return true;
     }
 
@@ -4443,6 +5392,9 @@ public:
             { "create",  HandleAdminCreate,  SEC_ADMINISTRATOR, Console::Yes },
             { "release", HandleAdminRelease, SEC_ADMINISTRATOR, Console::Yes },
             { "pool",    HandleAdminPool,    SEC_ADMINISTRATOR, Console::Yes },
+            { "integrity", HandleAdminIntegrity, SEC_ADMINISTRATOR, Console::Yes },
+            { "gear",    HandleAdminGear,    SEC_ADMINISTRATOR, Console::Yes },
+            { "dress",   HandleAdminDress,   SEC_ADMINISTRATOR, Console::Yes },
         };
 
         static ChatCommandTable baseTable =
@@ -4457,7 +5409,8 @@ public:
     {
         static ChatCommandTable companionSyncTable =
         {
-            { "pins",   HandlePinsCommand,   SEC_PLAYER, Console::No },
+            { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
+            { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
             { "status", HandleStatusCommand, SEC_PLAYER, Console::No },
             { "level",  HandleLevelCommand,  SEC_PLAYER, Console::No },
@@ -4755,7 +5708,8 @@ public:
         uint32 botGuid = 0;
         std::string error;
 
-        if (!CreateCompanion(player, race, clazz, tokens[2], botGuid, error))
+        if (!CreateCompanion(player->GetGUID().GetCounter(), player->GetName(), race, clazz,
+                             tokens[2], botGuid, error))
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
             return true;
@@ -4766,6 +5720,7 @@ public:
 
         SendCompSync(player, true);
         SendPoolStock(player, true);
+        InvalidatePlayerName(player, botGuid);
 
         DispatchPlayerbots(player, "add " + tokens[2]);
         g_pendingSummon[botGuid] = { botGuid, player->GetGUID().GetCounter(), tokens[2],
@@ -4824,7 +5779,7 @@ public:
         }
 
         std::string error;
-        if (!BeginRelease(player, botGuid, error))
+        if (!BeginRelease(player->GetGUID().GetCounter(), player->GetName(), botGuid, error))
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: {}.", error);
             return true;
@@ -4897,6 +5852,10 @@ public:
         {
             std::string const name = CompanionNameFor(botGuid);
 
+            // a body the core has never seen cannot be added; make it known first
+            EnsureCharacterCache(botGuid, name);
+            InvalidatePlayerName(player, botGuid);
+
             DispatchPlayerbots(player, "add " + name);
             g_pendingSummon[botGuid] = { botGuid, ownerGuid, name, now + 10, true };
 
@@ -4963,7 +5922,27 @@ public:
         {
             std::string const name = CompanionNameFor(botGuid);
 
+            // Give playerbots time to finish the login before pulling the body back out. A
+            // removal issued seconds after a summon has killed this process three times today.
+            uint32 const upAt = g_botUpAt.count(botGuid) ? g_botUpAt[botGuid] : 0;
+            if (upAt && now - upAt < 20)
+            {
+                uint32 const wait = 20 - (now - upAt);
+                handler->PSendSysMessage("|cffffd200Companion quest sync|r: |cffffff00{}|r is still "
+                                         "settling after the summon - give it {}s and ask again.",
+                                         name, wait);
+                continue;
+            }
+
+            // Inline, from the handler - the path mod-wowlegends uses for its own dismiss.
+            // Logged either side: when this path took the process down there was no
+            // dump and nothing in the log, so the boundary has to be visible.
+            LOG_INFO("server.loading", "[CompanionQuestSync] dismiss: dispatching remove {} ({})",
+                     name, botGuid);
+
             DispatchPlayerbots(player, "remove " + name);
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] dismiss: remove {} dispatched", name);
             g_pendingSummon[botGuid] = { botGuid, ownerGuid, name, now + 10, false };
 
             handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r stands down - "
@@ -5031,6 +6010,24 @@ public:
 
     /// .companionsync pins - resend the reconciliation on demand, which is the fix
     /// for "the map says one thing and the companion another" without a relog.
+    /// .companionsync refresh - push the current state to an addon and say nothing.
+    ///
+    /// The client cannot ask for state, so it only ever knew what the server happened to
+    /// push - which is on change and on a five-minute heartbeat. A panel left open showed a
+    /// companion that had been dismissed ten seconds earlier until the player closed and
+    /// reopened it. This is the cheap, silent answer the panel polls while it is visible.
+    static bool HandleRefreshCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player || !g_cfg.enable)
+            return false;
+
+        SendPinSync(player, true);
+        SendCompSync(player, true);
+
+        return true;
+    }
+
     static bool HandlePinsCommand(ChatHandler* handler, char const* /*args*/)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
