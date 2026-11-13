@@ -227,6 +227,9 @@ namespace
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     /// bot guid -> quest id -> { item count last seen, when that count last moved }
     std::map<uint32, std::map<uint32, std::pair<uint32, uint32>>> g_groundStall;
+    /// (bot guid, quest id) whose "I finished gathering this" whisper has already gone out
+    std::set<std::pair<uint32, uint32>> g_gatherAnnounced;
+
     std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
@@ -483,6 +486,13 @@ namespace
     void PurgeCompanionState(uint32 botGuid)
     {
         g_passMemo.erase(botGuid);
+        g_groundStall.erase(botGuid);
+
+        // guids are pooled, so a stale "already announced" pair would silence the next
+        // companion that inherits this body
+        for (auto itr = g_gatherAnnounced.begin(); itr != g_gatherAnnounced.end();)
+            itr = (itr->first == botGuid) ? g_gatherAnnounced.erase(itr) : std::next(itr);
+
         g_seenQuests.erase(botGuid);
         g_repairing.erase(botGuid);
         g_notified.erase(botGuid);
@@ -1223,6 +1233,15 @@ namespace
                     continue;
 
                 what = std::string(gatheredFrom) + " for " + quest->GetTitle();
+
+                // Say so, once. A completion with no word from the companion reads as nothing
+                // having happened, and the useful half of the message is what comes next.
+                if (bot->GetItemCount(itemId, true) >= need
+                    && g_gatherAnnounced.insert({ bot->GetGUID().GetCounter(), entry.first }).second)
+                {
+                    SayToOwner(bot, owner, "I picked up the last of '" + quest->GetTitle() +
+                               "' off the ground - my copy is done, so I can hand it in when we are next at the giver.");
+                }
 
                 if (g_cfg.debug >= 2)
                     LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} took {} x{} from '{}' ({} of {} now)",
