@@ -173,11 +173,11 @@ listener:RegisterEvent("CHAT_MSG_WHISPER")
 listener:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 listener:RegisterEvent("CHAT_MSG_SYSTEM")
 
--- Payloads arrive as system messages prefixed WLCG, not as whispers: a whisper needs a
+-- Payloads arrive as system messages prefixed CSYNC, not as whispers: a whisper needs a
 -- companion to speak it, and the roster matters most when nobody is out. They are hidden
 -- from the chat frame here so the player only ever sees the window.
 local function IsProtocolLine(text)
-    return type(text) == "string" and string.sub(text, 1, 4) == "WLCG"
+    return type(text) == "string" and string.sub(text, 1, 5) == "CSYNC"
 end
 
 if ChatFrame_AddMessageEventFilter then
@@ -227,7 +227,7 @@ listener:SetScript("OnEvent", function(_, event, message)
             end
             return
         end
-        text = StripColors(string.sub(message, 6))   -- drop "WLCG|"
+        text = StripColors(string.sub(message, 7))   -- drop "CSYNC|"
     end
 
     -- companions
@@ -332,21 +332,21 @@ local function Confirm(key, text, onAccept)
     return key
 end
 
-Confirm("WLCG_UNBIND",
+Confirm("CSYNC_UNBIND",
     "Stop tracking %s?\n\nThe bot stays yours and keeps questing - it just stops following your quest log.",
     function(data) if data and data.name then G.Action("unbind", data.name) end end)
 
-Confirm("WLCG_RELEASE",
+Confirm("CSYNC_RELEASE",
     "Release %s for good?\n\nThe body is wiped, renamed and returned to the pool. You cannot get it back.",
     function(data) if data and data.name then G.Action("release", data.name) end end)
 
 function G.ConfirmUnbind(name)
-    local dialog = StaticPopup_Show("WLCG_UNBIND", name)
+    local dialog = StaticPopup_Show("CSYNC_UNBIND", name)
     if dialog then dialog.data = { name = name } end
 end
 
 function G.ConfirmRelease(name)
-    local dialog = StaticPopup_Show("WLCG_RELEASE", name)
+    local dialog = StaticPopup_Show("CSYNC_RELEASE", name)
     if dialog then dialog.data = { name = name } end
 end
 

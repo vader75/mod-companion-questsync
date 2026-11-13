@@ -246,7 +246,7 @@ local function CreateAddPanel()
     Label(addPanel, "Race", 20, -62)
     Label(addPanel, "Class", 216, -62)
 
-    raceDropdown = CreateFrame("Frame", "WLCGRaceDropdown", addPanel, "UIDropDownMenuTemplate")
+    raceDropdown = CreateFrame("Frame", "CSYNCRaceDropdown", addPanel, "UIDropDownMenuTemplate")
     raceDropdown:SetPoint("TOPLEFT", 4, -74)
     UIDropDownMenu_SetWidth(raceDropdown, 150)
     UIDropDownMenu_Initialize(raceDropdown, function()
@@ -264,7 +264,7 @@ local function CreateAddPanel()
         end
     end)
 
-    classDropdown = CreateFrame("Frame", "WLCGClassDropdown", addPanel, "UIDropDownMenuTemplate")
+    classDropdown = CreateFrame("Frame", "CSYNCClassDropdown", addPanel, "UIDropDownMenuTemplate")
     classDropdown:SetPoint("TOPLEFT", 200, -74)
     UIDropDownMenu_SetWidth(classDropdown, 150)
     UIDropDownMenu_Initialize(classDropdown, function()
@@ -286,7 +286,7 @@ local function CreateAddPanel()
     -- row 2: name
     Label(addPanel, "Name", 20, -132)
 
-    nameBox = CreateFrame("EditBox", "WLCGNameBox", addPanel)
+    nameBox = CreateFrame("EditBox", "CSYNCNameBox", addPanel)
     nameBox:SetSize(210, 24)
     nameBox:SetPoint("TOPLEFT", 20, -148)
     nameBox:SetAutoFocus(false)

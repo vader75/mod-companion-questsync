@@ -3427,14 +3427,14 @@ namespace
     /// needed most when no companion is out - the roster, the pool picker, the map. With no
     /// companion in the world there was nobody to whisper, so the client silently got
     /// nothing and the window showed an empty pool. The addon hides these lines from the
-    /// chat frame by their WLCG prefix, so the player never sees them.
+    /// chat frame by their CSYNC prefix, so the player never sees them.
     void SendProtocolLine(Player* owner, std::string const& line)
     {
         if (!owner || !owner->GetSession())
             return;
 
         ChatHandler handler(owner->GetSession());
-        handler.SendSysMessage(("WLCG|" + line).c_str());
+        handler.SendSysMessage(("CSYNC|" + line).c_str());
     }
 
     /// Who speaks the protocol lines (pin and companion payloads).

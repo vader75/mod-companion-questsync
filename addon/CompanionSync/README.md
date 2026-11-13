@@ -4,7 +4,7 @@ A companions window for **several** companions, plus a launcher in the minimap's
 corner. Everything in it is a button; nothing needs typing except a name.
 
 It talks to `mod-companion-questsync` over the server's own protocol lines: the server
-answers with system messages prefixed `WLCG|`, which this addon filters out of the chat
+answers with system messages prefixed `CSYNC|`, which this addon filters out of the chat
 frame and renders, and the window asks for a refresh with the module's dot-commands.
 The only interface between the two is that closed-form grammar, so a server change
 cannot break the client beyond the payload it already understands.
