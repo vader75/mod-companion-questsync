@@ -1,4 +1,4 @@
--- WLCompanionGroup/Core.lua
+-- CompanionSync/Core.lua
 --
 -- Data, names and commands. Everything the server tells us arrives on the whisper
 -- channel, because a 3.3.5 client cannot ask the server anything.
@@ -354,10 +354,12 @@ end
 -- slash (for power users; nothing in the window needs it)
 -- ---------------------------------------------------------------------------
 
-SLASH_WLCOMPANIONGROUP1 = "/wlcg"
-SLASH_WLCOMPANIONGROUP2 = "/companions"
+-- /csync is the name; /wlcg and /companions stay registered because hands remember them
+SLASH_COMPANIONSYNC1 = "/csync"
+SLASH_COMPANIONSYNC2 = "/wlcg"
+SLASH_COMPANIONSYNC3 = "/companions"
 
-SlashCmdList["WLCOMPANIONGROUP"] = function(input)
+SlashCmdList["COMPANIONSYNC"] = function(input)
     local command = string.lower(string.match(input or "", "^(%S*)") or "")
 
     if command == "" or command == "wlcg" or command == "show" then
@@ -367,8 +369,8 @@ SlashCmdList["WLCOMPANIONGROUP"] = function(input)
     elseif command == "quests" then
         G.Run(".companionsync quests")
     else
-        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL Companion Group|r: click everything in /wlcg. "
-            .. "Commands: /wlcg test for a parser check, /wlcg quests for the quest log view.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: click everything in /csync. "
+            .. "Commands: /csync test for a parser check, /csync quests for the quest log view.")
     end
 end
 

@@ -1,4 +1,4 @@
-# WLCompanionGroup
+# CompanionSync
 
 A companions window for **several** companions, plus a launcher in the minimap's
 corner. Everything in it is a button; nothing needs typing except a name.
@@ -52,14 +52,14 @@ to the minimap's own button cluster and read as a stray lens against the clock.
 Everything else is a button, so there are only a few:
 
 ```
-/wlcg            open / close      (/companions also works)
-/wlcg test       parser self-test: two known payloads, one chunked in two parts
-/wlcg quests     ask the server for the quest log view
-/wlcgreset       put the minimap launcher back in its corner
-/wlcgstate       print where the launcher is and what it is anchored to
+/csync            open / close      (/companions also works)
+/csync test       parser self-test: two known payloads, one chunked in two parts
+/csync quests     ask the server for the quest log view
+/csreset       put the minimap launcher back in its corner
+/csstate       print where the launcher is and what it is anchored to
 ```
 
-`/wlcg test` is the in-game sanity check. If the window looks empty or stale, run it
+`/csync test` is the in-game sanity check. If the window looks empty or stale, run it
 first: it separates "the addon cannot parse" from "the server is not sending".
 
 ## How the data arrives

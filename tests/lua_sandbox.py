@@ -13,7 +13,7 @@ from pathlib import Path
 
 from lupa import LuaRuntime
 
-ADDON = Path(__file__).resolve().parent.parent / "addon" / "WLCompanionGroup"
+ADDON = Path(__file__).resolve().parent.parent / "addon" / "CompanionSync"
 
 STUB = r"""
 local function make_stub()
@@ -70,7 +70,7 @@ DEFAULT_CHAT_FRAME = {
 
 
 def main() -> int:
-    addon_name = "WLCompanionGroup"
+    addon_name = "CompanionSync"
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.execute(STUB)
     lua.execute(CHAT_SINK)
@@ -92,8 +92,8 @@ def main() -> int:
     # what the file registered, measured rather than assumed
     report = lua.eval("""function()
         local out = {}
-        out.launcher = WLCompanionGroupLauncher and "created" or "nil"
-        out.slash = SlashCmdList["WLCGSTATE"] and "registered" or "missing"
+        out.launcher = CompanionSyncLauncher and "created" or "nil"
+        out.slash = SlashCmdList["COMPANIONSYNC"] and "registered" or "missing"
         out.toggle = (G_SHARED and G_SHARED.Toggle) and "defined" or "missing"
         out.messages = #MESSAGES
         return out
@@ -101,7 +101,7 @@ def main() -> int:
     r = report()
     print(f"launcher={r['launcher']} slash={r['slash']} toggle={r['toggle']} chat_lines={r['messages']}")
     if r["launcher"] == "created" and r["slash"] == "registered":
-        print("PASS  the addon would build its button and answer /wlcgstate")
+        print("PASS  the addon would build its button and answer /csync")
         return 0
     print("FAIL  the addon loads but does not finish registering")
     return 1

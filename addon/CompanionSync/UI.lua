@@ -1,4 +1,4 @@
--- WLCompanionGroup/UI.lua
+-- CompanionSync/UI.lua
 --
 -- The window. Two regions: a roster of cards (one per companion) and an overlay panel for
 -- minting a new one. Every action is a button; nothing here expects typing except the name.
@@ -28,8 +28,13 @@ local raceDropdown, classDropdown, nameBox, stockLabel, serverLine, createButton
 local pick = { race = 1, class = 5 }
 
 local function InitDB()
-    WLCompanionGroupDB = WLCompanionGroupDB or {}
-    WLCompanionGroupDB.pos = WLCompanionGroupDB.pos or { point = "CENTER", x = 0, y = 60 }
+    -- an install from before the rename keeps its window position
+    if type(CompanionSyncDB) ~= "table" and type(WLCompanionGroupDB) == "table" then
+        CompanionSyncDB = WLCompanionGroupDB
+    end
+
+    CompanionSyncDB = CompanionSyncDB or {}
+    CompanionSyncDB.pos = CompanionSyncDB.pos or { point = "CENTER", x = 0, y = 60 }
 end
 
 local function Button(parent, label, width, onClick, tooltip)
@@ -445,7 +450,7 @@ function G.Refresh()
 end
 
 local function CreateWindow()
-    frame = CreateFrame("Frame", "WLCompanionGroupFrame", UIParent)
+    frame = CreateFrame("Frame", "CompanionSyncFrame", UIParent)
     frame:SetSize(WIDTH, HEIGHT)
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
@@ -456,7 +461,7 @@ local function CreateWindow()
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, _, x, y = self:GetPoint()
-        WLCompanionGroupDB.pos = { point = point, x = x, y = y }
+        CompanionSyncDB.pos = { point = point, x = x, y = y }
     end)
 
     frame.bg = frame:CreateTexture(nil, "BACKGROUND")
@@ -540,13 +545,13 @@ local function CreateWindow()
 end
 
 function G.Toggle()
-    if not WLCompanionGroupDB then InitDB() end
+    if not CompanionSyncDB then InitDB() end
     if not frame then CreateWindow() end
 
     if frame:IsShown() then
         frame:Hide()
     else
-        local pos = WLCompanionGroupDB.pos
+        local pos = CompanionSyncDB.pos
         frame:ClearAllPoints()
         frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
         frame:Show()
@@ -575,12 +580,12 @@ local function CreateLauncher()
     -- Parent to UIParent and anchor to the minimap: a child of Minimap inherits its draw
     -- order and can end up behind the map itself on clients with a restyled minimap.
     local anchor = Minimap or UIParent
-    launcher = CreateFrame("Button", "WLCompanionGroupLauncher", UIParent)
+    launcher = CreateFrame("Button", "CompanionSyncLauncher", UIParent)
 launcher:SetSize(24, 24)
-if WLCompanionGroupDB then
-    WLCompanionGroupDB.launcher = WLCompanionGroupDB.launcher or { x = 6, y = -60 }
+if CompanionSyncDB then
+    CompanionSyncDB.launcher = CompanionSyncDB.launcher or { x = 6, y = -60 }
 end
-local savedPos = (WLCompanionGroupDB and WLCompanionGroupDB.launcher) or { x = 6, y = -60 }
+local savedPos = (CompanionSyncDB and CompanionSyncDB.launcher) or { x = 6, y = -60 }
 launcher:SetPoint("TOPLEFT", anchor, "TOPLEFT", savedPos.x or 6, savedPos.y or -60)
 launcher:SetFrameStrata("HIGH")
 launcher:SetBackdrop({
@@ -648,8 +653,8 @@ launcher:SetScript("OnDragStop", function(self)
     self:ClearAllPoints()
     self:SetPoint("TOPLEFT", anchor, "TOPLEFT", dx, dy)
 
-    if WLCompanionGroupDB then
-        WLCompanionGroupDB.launcher = { x = dx, y = dy }
+    if CompanionSyncDB then
+        CompanionSyncDB.launcher = { x = dx, y = dy }
     end
 end)
 
@@ -685,7 +690,7 @@ end
 -- vanish silently: the first version died on a bad escape and the only symptom was no button.
 local built, failure = pcall(CreateLauncher)
 if not built then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffff6a6aWL Companion Group|r launcher failed: " .. tostring(failure))
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff6a6aCompanion Sync|r launcher failed: " .. tostring(failure))
 end
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("ADDON_LOADED")
@@ -697,18 +702,18 @@ boot:SetScript("OnEvent", function(self, event, arg1)
     end
 
     self:UnregisterEvent("PLAYER_ENTERING_WORLD")
-    if not WLCompanionGroupDB then InitDB() end
+    if not CompanionSyncDB then InitDB() end
     if not frame then CreateWindow() end
 
     -- One line, once per login, so "is it even loaded?" is answerable from chat instead of
     -- from guesswork: the addon version the client actually read, and whether the minimap
     -- button exists.
-    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r Companion Group |cff9d9d9dv1.0.5|r loaded - "
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dCompanion Sync|r |cff9d9d9dv1.0.5|r loaded - "
         .. "minimap button %s"):format(launcher and "|cff20ff20ready|r" or "|cffff6a6aMISSING|r"))
 
     -- Record what was actually built. "Not on the map" has cost us hours of guessing; the
     -- numbers below say whether the button exists, where it sits and what it is drawn over.
-    if WLCompanionGroupDB then
+    if CompanionSyncDB then
         local s = {
             version = "1.0.5",
             launcher = launcher and "created" or "nil",
@@ -727,20 +732,21 @@ boot:SetScript("OnEvent", function(self, event, arg1)
             s.y = math.floor((y or 0) * 10) / 10
             s.parent = launcher:GetParent() and launcher:GetParent():GetName() or "?"
         end
-        WLCompanionGroupDB.state = s
+        CompanionSyncDB.state = s
     end
 
-    local pos = WLCompanionGroupDB.pos
+    local pos = CompanionSyncDB.pos
     frame:ClearAllPoints()
     frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
 end)
 
 
--- /wlcgstate - print what the launcher is, where it is, and what it is anchored to
--- /wlcgreset - put the button back in the minimap's corner
-SLASH_WLCGRESET1 = "/wlcgreset"
-SlashCmdList["WLCGRESET"] = function()
-    if WLCompanionGroupDB then WLCompanionGroupDB.launcher = { x = 6, y = -60 } end
+-- /csstate - print what the launcher is, where it is, and what it is anchored to
+-- /csreset - put the button back in the minimap's corner
+SLASH_CSRESET1 = "/csreset"
+SLASH_CSRESET2 = "/wlcgreset"
+SlashCmdList["CSRESET"] = function()
+    if CompanionSyncDB then CompanionSyncDB.launcher = { x = 6, y = -60 } end
     if launcher then
         launcher:ClearAllPoints()
         launcher:SetPoint("TOPLEFT", Minimap or UIParent, "TOPLEFT", 6, -60)
@@ -748,9 +754,10 @@ SlashCmdList["WLCGRESET"] = function()
     DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r minimap button back in the corner")
 end
 
-SLASH_WLCGSTATE1 = "/wlcgstate"
-SlashCmdList["WLCGSTATE"] = function()
-    local s = WLCompanionGroupDB and WLCompanionGroupDB.state
+SLASH_CSSTATE1 = "/csstate"
+SLASH_CSSTATE2 = "/wlcgstate"
+SlashCmdList["CSSTATE"] = function()
+    local s = CompanionSyncDB and CompanionSyncDB.state
     if not s then
         DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r no recorded state - try /reload")
         return
@@ -779,7 +786,7 @@ probe:SetScript("OnEvent", function(self)
         if waited < 20 then return end
 
         frame:SetScript("OnUpdate", nil)
-        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r companions: the server is not answering - "
+        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: the server is not answering - "
             .. "is mod-companion-questsync enabled?")
     end)
 end)
