@@ -1137,7 +1137,21 @@ namespace
         }
     }
 
-    /// Apply the owner's union of markers, then clear the ones no companion needs.
+    /// What this NPC's icon should be for the *owner's own* quest log.
+    ///
+    /// The marker packet is the same one the core uses for the player's own status, so
+    /// writing a marker also overwrites their icon. Both directions have to respect that:
+    /// marking a companion errand on an NPC the player is already using would hide their
+    /// own turn-in, and clearing a marker with "nothing here" wipes a question mark the
+    /// player had earned - which is exactly why a finished quest showed no `?` over the
+    /// giver until the player spoke to it again and the core re-sent the status.
+    uint8 OwnerStatusFor(Player* owner, ObjectGuid guid)
+    {
+        Creature* npc = ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, guid);
+        return npc ? uint8(owner->GetQuestDialogStatus(npc)) : uint8(DIALOG_STATUS_NONE);
+    }
+
+    /// Apply the owner's union of markers, then restore the icons no companion needs.
     void ApplyMarks(Player* owner, std::set<uint64> const& wanted)
     {
         if (!g_cfg.mapPins || !owner->PlayerTalkClass)
@@ -1146,7 +1160,13 @@ namespace
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
 
         for (uint64 const guid : wanted)
-            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_REWARD, ObjectGuid(guid));
+        {
+            uint8 const own = OwnerStatusFor(owner, ObjectGuid(guid));
+
+            // nothing of the player's own there: borrow the icon for the companion's errand
+            if (own == uint8(DIALOG_STATUS_NONE))
+                owner->PlayerTalkClass->SendQuestGiverStatus(uint8(DIALOG_STATUS_REWARD), ObjectGuid(guid));
+        }
 
         std::set<uint64>& previously = g_markedNpcs[ownerGuid];
         for (uint64 const stale : previously)
@@ -1154,7 +1174,12 @@ namespace
             if (wanted.count(stale))
                 continue;
 
-            owner->PlayerTalkClass->SendQuestGiverStatus(DIALOG_STATUS_NONE, ObjectGuid(stale));
+            // Put back what the player's own log says, never a flat "nothing here".
+            ObjectGuid const guid(stale);
+            if (!ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, guid))
+                continue;                       // out of sight: the client asks again on approach
+
+            owner->PlayerTalkClass->SendQuestGiverStatus(OwnerStatusFor(owner, guid), guid);
         }
 
         previously = wanted;
