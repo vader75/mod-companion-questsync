@@ -1,46 +1,66 @@
 # WLCompanionGroup
 
-A companions window for **several** companions. Fed entirely by the server's `Comp sync`
-line from `mod-companion-questsync`; it never asks the server anything, because a 3.3.5
-client cannot.
+A companions window for **several** companions, plus a launcher in the minimap's
+corner. Everything in it is a button; nothing needs typing except a name.
 
-It replaces the single-companion tab in `WoWLegendsPlayer` (that tab is disabled with a
-one-line early return — see *Re-enabling the original* below).
+It talks to `mod-companion-questsync` over the server's own protocol lines: the server
+answers with system messages prefixed `WLCG|`, which this addon filters out of the chat
+frame and renders, and the window asks for a refresh with the module's dot-commands.
+The only interface between the two is that closed-form grammar, so a server change
+cannot break the client beyond the payload it already understands.
+
+Requires `mod-companion-questsync` on the server. If nothing arrives 20 seconds after
+login, the addon says so in one line rather than showing an empty window.
 
 ## What it shows
 
-One row per companion, up to four (a group of five with you). Each row:
+One card per companion, up to four (a party of five with you):
 
-| Column | Meaning |
+| Part | Meaning |
 |---|---|
 | **name** | class colour, greyed when the body is not in the world |
-| **level** | shown only when it differs from yours, next to the **Level** button that fixes it |
-| **status** | quest count, free bag slots, and any of: `not in your party`, `level differs`, `waiting on you` |
-| **buttons** | `Level` `Summon` `Dismiss` `Map` `Unbind` — only the ones that apply to that row are shown |
+| **subtitle** | race · class · level, in muted text |
+| **status** | quest count, free bag slots, and what is wrong: not in your party, level differs, waiting on you, releasing… |
+| **buttons** | `Summon` / `Dismiss` (one, depending on state), `Level`, `Map`, `Untrack`, `Release` |
 
-`waiting on you` is the flag the quest log cannot give you: the player carries a quest that
-companion has not been given yet.
+The button colours say which is which: `Dismiss` is gold text, `Summon` is green, and
+`Release` is red. One sends the companion away, one calls it back, and the last returns
+the body to the pool for good. `waiting on you` is the flag the quest log cannot give
+you — you carry a quest this companion has not been given yet.
 
-Footer: **Summon missing** (every companion that is not out), **Dismiss all**, **Refresh**,
-**Quest view**. A small button by the minimap opens and closes the window.
+Footer: **Summon missing**, **Dismiss all**, **Refresh**, **Quest log**. While the window
+is open it asks the server for its state every 8 seconds, so a companion dismissed a
+moment ago stops showing as present without closing and reopening the panel.
 
-## Commands
+`+ Add companion` opens the create panel: race and class dropdowns (with pool stock
+counted per combination), a suggested name you can edit, and the server's answer shown
+in the panel when it accepts or refuses. The addon never refuses a create locally — the
+server is the only authority on what the pool holds.
+
+## The minimap launcher
+
+A square dark plate with the class icon, not a disc: the round tracking border belongs
+to the minimap's own button cluster and read as a stray lens against the clock.
+
+- **Drag** it anywhere; a drag is not a click, and the position is saved relative to the
+  minimap so it comes back where you left it.
+- A small count in the corner shows how many companions are bound.
+- The border warms to gold on hover, and the tooltip says whether anything is bound.
+
+## Slash commands
+
+Everything else is a button, so there are only a few:
 
 ```
-/wlcg                     open / close
-/wlcg bind <name>         make an in-world bot a companion (max 4)
-/wlcg unbind <name>       stop tracking it - asks first, the bot stays yours
-/wlcg summon [name]       bring it out, or every one that is missing
-/wlcg dismiss [name]      send it away, or all of them
-/wlcg level [name]        align its level with yours
-/wlcg pins                re-send the map markers
-/wlcg quests              print what each companion is carrying
-/wlcg test                parse a known payload and report pass/fail
+/wlcg            open / close      (/companions also works)
+/wlcg test       parser self-test: two known payloads, one chunked in two parts
+/wlcg quests     ask the server for the quest log view
+/wlcgreset       put the minimap launcher back in its corner
+/wlcgstate       print where the launcher is and what it is anchored to
 ```
 
-`/wlcg test` is the in-game sanity check: it parses a three-row sample and a two-chunk
-sample and prints whether both came out right. If the window ever looks empty or stale, run
-that first — it separates "the addon cannot parse" from "the server is not sending".
+`/wlcg test` is the in-game sanity check. If the window looks empty or stale, run it
+first: it separates "the addon cannot parse" from "the server is not sending".
 
 ## How the data arrives
 
@@ -49,31 +69,28 @@ Comp sync 2: Healy,5,32,4,ogs,110|Soak,1,32,2,o,105
              name,class,level,quests,flags,free slots
 ```
 
-Flags: `o` in world, `g` in your party, `s` same level, `b` behind (you carry a quest it has
-not got). Long payloads arrive as `Comp sync i/n:` and are joined when every part is in.
-Anything not mentioned is not bound — the payload is authoritative, so the window empties
-itself when companions are released.
+Flags: `o` in world, `g` in your party, `s` same level, `b` behind (you carry a quest it
+has not got), `-` offline. Long payloads arrive as `Comp sync i/n:` and are joined when
+every part is in. The payload is authoritative — anything not mentioned is not bound, so
+the window empties itself when companions are released.
 
-## Why a new addon rather than a patch
+Two more payloads share the same channel: `Stock N: race-class=count|…` for the create
+panel, and `Pin sync N: x,y,h|g=Name|…` for the quest pins that go on your world map.
 
-`WoWLegendsPlayer` ships with the repack (v0.5.0, eight tabs, ~2,700 lines). Edits there are
-overwritten by the next repack update, and its Companion tab is hardcoded to "your ONE
-permanent companion". This one only reads a whisper and sends dot-commands, so it survives
-server and repack changes, and the closed-form grammar above is the only interface between
-it and the module.
+## Why a separate addon
 
-## Re-enabling the original tab
+`WoWLegendsPlayer` ships with the repack (v0.5.0, eight tabs, ~2,700 lines). Edits there
+are overwritten by the next repack update, and its Companion tab is built around one
+permanent companion. This addon survives repack updates untouched, and the original tab
+still works if you prefer it — the two do not share state and can run at once.
+
+## Tests
 
 ```
-Interface/AddOns/WoWLegendsPlayer/UI/Tabs/Companion.lua
+python test_parse.py            # the Comp sync / Stock grammar, without a client
+python ../tests/lua_sandbox.py  # loads Core.lua and UI.lua against a stub WoW API
 ```
 
-Delete the `if true then return end` near the top, or restore the backup saved next to it
-(`Companion.lua.disabled-by-wlcompaniongroup`). Both can run at once if you want to compare;
-they do not share state.
-
-## Note on `test_parse.py`
-
-`test_parse.py` mirrors `Core.lua`'s parser in Python so the grammar can be tested without a
-client. It is a check on the *rules* (splitting, fields, flags), not on the Lua itself —
-run `/wlcg test` in game for that.
+`test_parse.py` mirrors `Core.lua`'s parser in Python, so a payload change cannot silently
+break the window. `lua_sandbox.py` catches the failure the client hides — a file that
+does not compile at all, which looks exactly like an addon that simply shows nothing.
