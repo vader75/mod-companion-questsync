@@ -257,6 +257,14 @@ local function LayoutWindow(count)
     if frame.hint then
         if panelOpen then frame.hint:Hide() else frame.hint:Show() end
     end
+
+    if frame.empty then
+        if panelOpen or count > 0 then frame.empty:Hide() else frame.empty:Show() end
+    end
+
+    if frame.notice then
+        if panelOpen then frame.notice:Hide() end
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -321,7 +329,16 @@ local function CreateAddPanel()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
     addPanel.bg:SetAllPoints()
-    addPanel.bg:SetTexture(1, 1, 1, 0.05)
+    addPanel.bg:SetTexture(0.03, 0.03, 0.04, 0.97)
+
+    addPanel.edge = CreateFrame("Frame", nil, addPanel)
+    addPanel.edge:SetAllPoints()
+    addPanel.edge:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    addPanel.edge:SetBackdropBorderColor(1, 1, 1, 0.12)
 
     addPanel.title = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     addPanel.title:SetPoint("TOPLEFT", 18, -14)
@@ -600,7 +617,9 @@ local function CreateWindow()
     local add = Button(frame, "+ Add companion", 124, function()
         if addPanel and addPanel:IsShown() then addPanel:Hide() else G.ShowAddPanel() end
     end, "Mint a new companion from the pool.")
-    add:SetPoint("TOPRIGHT", -34, -14)
+    -- clear of the close button: UIPanelCloseButton is 32 px wide at -6, so anything ending
+    -- before -44 leaves the two controls their own space
+    add:SetPoint("TOPRIGHT", -46, -14)
 
     frame.elapsed = 0
     frame:SetScript("OnUpdate", function(self, delta)
