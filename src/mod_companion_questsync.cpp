@@ -4048,7 +4048,7 @@ namespace
             line += chunks[i];
 
             // Grey and quiet: the addon needs the line, the player does not need to read
-            // it. Colour codes are stripped by WLPins before it parses.
+            // it. Colour codes are stripped by CompanionPins before it parses.
             SendProtocolLine(owner, line);
         }
 

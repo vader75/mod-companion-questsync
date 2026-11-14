@@ -10,24 +10,24 @@
 --       a square badge with a corner flag for work still to do, and both sit on a
 --       black outline plate so nothing can be mistaken for map art.
 
-local ADDON = "WLPins"
+local ADDON = "CompanionPins"
 -- Pins are deleted, never recoloured, once they are this old. /cpins life changes it.
 local PIN_LIFETIME = 30 * 60
 local FLIP_Y = false
 
-local WLPins = CreateFrame("Frame")
-WLPins.debug = false
+local CompanionPins = CreateFrame("Frame")
+CompanionPins.debug = false
 
 -- read the version from our own TOC, because hand-written version comments drift
 do
     local toc = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
-    WLPins.version = (toc and toc("WLPins", "Version")) or "?"
+    CompanionPins.version = (toc and toc("CompanionPins", "Version")) or "?"
 end
-WLPins.offsetX = 0
-WLPins.offsetY = 0
-WLPins.pins = {}
-WLPins.frames = {}
-WLPins.only = nil   -- show one companion's pins, or all
+CompanionPins.offsetX = 0
+CompanionPins.offsetY = 0
+CompanionPins.pins = {}
+CompanionPins.frames = {}
+CompanionPins.only = nil   -- show one companion's pins, or all
 
 -- shape: "round" (hand-in) or "square" (work to do)
 local STYLE = {
@@ -85,25 +85,25 @@ end
 --------------------------------------------------------------------------
 
 local function SaveDB()
-    WLPinsDB = WLPinsDB or {}
-    WLPinsDB.offsetX, WLPinsDB.offsetY = WLPins.offsetX, WLPins.offsetY
-    WLPinsDB.showLegend = WLPins.showLegend
-    WLPinsDB.pins = {}
-    for i, pin in ipairs(WLPins.pins) do
-        WLPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
+    CompanionPinsDB = CompanionPinsDB or {}
+    CompanionPinsDB.offsetX, CompanionPinsDB.offsetY = CompanionPins.offsetX, CompanionPins.offsetY
+    CompanionPinsDB.showLegend = CompanionPins.showLegend
+    CompanionPinsDB.pins = {}
+    for i, pin in ipairs(CompanionPins.pins) do
+        CompanionPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
                              zone = pin.zone, style = pin.style.key }
     end
 end
 
 local function LoadDB()
-    WLPinsDB = WLPinsDB or { pins = {} }
-    WLPins.showLegend = WLPinsDB.showLegend
-    if WLPins.showLegend == nil then WLPins.showLegend = true end
-    WLPins.offsetX = WLPinsDB.offsetX or 0
-    WLPins.offsetY = WLPinsDB.offsetY or 0
-    PIN_LIFETIME = WLPinsDB.lifetime or PIN_LIFETIME
-    for _, saved in ipairs(WLPinsDB.pins or {}) do
-        table.insert(WLPins.pins, {
+    CompanionPinsDB = CompanionPinsDB or { pins = {} }
+    CompanionPins.showLegend = CompanionPinsDB.showLegend
+    if CompanionPins.showLegend == nil then CompanionPins.showLegend = true end
+    CompanionPins.offsetX = CompanionPinsDB.offsetX or 0
+    CompanionPins.offsetY = CompanionPinsDB.offsetY or 0
+    PIN_LIFETIME = CompanionPinsDB.lifetime or PIN_LIFETIME
+    for _, saved in ipairs(CompanionPinsDB.pins or {}) do
+        table.insert(CompanionPins.pins, {
             x = saved.x, y = saved.y, at = saved.at, quest = saved.quest,
             zone = saved.zone, style = STYLE[saved.style or "other"] or STYLE.other,
         })
@@ -111,17 +111,17 @@ local function LoadDB()
 end
 
 local function AddPin(x, y, style, quest, companion)
-    for _, pin in ipairs(WLPins.pins) do
+    for _, pin in ipairs(CompanionPins.pins) do
         if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5 then
             pin.at, pin.style, pin.quest, pin.zone = time(), style, quest, CurrentZoneName()
             pin.companion = companion
-            SaveDB(); WLPins:Redraw()
+            SaveDB(); CompanionPins:Redraw()
             return
         end
     end
-    table.insert(WLPins.pins, { x = x, y = y, at = time(), style = style,
+    table.insert(CompanionPins.pins, { x = x, y = y, at = time(), style = style,
                                 quest = quest, companion = companion, zone = CurrentZoneName() })
-    SaveDB(); WLPins:Redraw()
+    SaveDB(); CompanionPins:Redraw()
 end
 
 -- "Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange" is the server's own
@@ -134,7 +134,7 @@ local function SyncPins(payload)
         if x and y then
             local key = string.lower(name)
             local kept = nil
-            for _, pin in ipairs(WLPins.pins) do
+            for _, pin in ipairs(CompanionPins.pins) do
                 if string.lower(pin.quest or "") == key then kept = pin.at end
             end
             local title, companion = SplitCompanion(name)
@@ -147,13 +147,13 @@ local function SyncPins(payload)
         end
     end
 
-    local removed = #WLPins.pins - #fresh
-    WLPins.pins = fresh
-    SaveDB(); WLPins:Redraw()
+    local removed = #CompanionPins.pins - #fresh
+    CompanionPins.pins = fresh
+    SaveDB(); CompanionPins:Redraw()
 
-    if WLPins.debug then
+    if CompanionPins.debug then
         DEFAULT_CHAT_FRAME:AddMessage(string.format(
-            "|cff00ccffWLPins|r synced: %d pin(s), %d removed", #fresh, removed > 0 and removed or 0))
+            "|cff00ccffCompanionPins|r synced: %d pin(s), %d removed", #fresh, removed > 0 and removed or 0))
     end
 end
 
@@ -161,21 +161,21 @@ local function RemoveByQuest(name)
     if not name then return end
     local target = string.lower(name)
     local stem = string.gsub(target, "%.%.$", "")   -- the sync line shortens titles
-    for i = #WLPins.pins, 1, -1 do
-        local quest = string.lower(WLPins.pins[i].quest or "")
+    for i = #CompanionPins.pins, 1, -1 do
+        local quest = string.lower(CompanionPins.pins[i].quest or "")
         local short = string.gsub(quest, "%.%.$", "")
         if quest == target or short == stem then
-            table.remove(WLPins.pins, i)
+            table.remove(CompanionPins.pins, i)
         end
     end
-    SaveDB(); WLPins:Redraw()
+    SaveDB(); CompanionPins:Redraw()
 end
 
 local function RemovePin(pin)
-    for i, p in ipairs(WLPins.pins) do
-        if p == pin then table.remove(WLPins.pins, i); break end
+    for i, p in ipairs(CompanionPins.pins) do
+        if p == pin then table.remove(CompanionPins.pins, i); break end
     end
-    SaveDB(); WLPins:Redraw()
+    SaveDB(); CompanionPins:Redraw()
 end
 
 --------------------------------------------------------------------------
@@ -227,11 +227,11 @@ local function NewPin(index)
         if button == "RightButton" and self.pin then RemovePin(self.pin) end
     end)
 
-    WLPins.frames[index] = f
+    CompanionPins.frames[index] = f
     return f
 end
 
-function WLPins:Redraw()
+function CompanionPins:Redraw()
     if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
 
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
@@ -250,19 +250,19 @@ function WLPins:Redraw()
     for i, pin in ipairs(self.pins) do
         -- "/cpins only <name>" narrows the map to one companion; the others are hidden
         -- but kept, so clearing the filter brings them straight back.
-        if WLPins.only and pin.companion and WLPins.only ~= string.lower(pin.companion) then
-            if WLPins.frames[i] then WLPins.frames[i]:Hide() end
+        if CompanionPins.only and pin.companion and CompanionPins.only ~= string.lower(pin.companion) then
+            if CompanionPins.frames[i] then CompanionPins.frames[i]:Hide() end
             shown = shown + 0
         else
         -- Reuse the frame at this index: creating a new one per redraw orphaned the old
         -- one, still parented to the map and still visible, so every zoom left another
         -- marker behind that nothing could hide.
-        local f = WLPins.frames[i] or NewPin(i)
+        local f = CompanionPins.frames[i] or NewPin(i)
         f.pin = pin
 
-        local px = ((pin.x + WLPins.offsetX) / 100) * w
-        local py = (FLIP_Y and (1 - (pin.y + WLPins.offsetY) / 100)
-                           or ((pin.y + WLPins.offsetY) / 100)) * h
+        local px = ((pin.x + CompanionPins.offsetX) / 100) * w
+        local py = (FLIP_Y and (1 - (pin.y + CompanionPins.offsetY) / 100)
+                           or ((pin.y + CompanionPins.offsetY) / 100)) * h
         f:ClearAllPoints()
         f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
         f:Show()
@@ -312,7 +312,7 @@ function WLPins:Redraw()
 
     local lg = BuildLegend()
 
-    if WLPins.showLegend == false or #self.pins == 0 then
+    if CompanionPins.showLegend == false or #self.pins == 0 then
         lg:Hide()
     else
         lg:Show()
@@ -374,27 +374,27 @@ end
 -- events
 --------------------------------------------------------------------------
 
-WLPins:RegisterEvent("PLAYER_LOGIN")
+CompanionPins:RegisterEvent("PLAYER_LOGIN")
 -- The module sends its pins as system messages prefixed CSYNC, not whispers: a whisper
 -- needs a live speaker, and the map has to work when no companion is out. This addon kept
 -- listening on the whisper channel after that change, so it silently received nothing and
 -- its pins were whatever an older session had left in saved variables - an old title sitting
 -- on another quest's area.
-WLPins:RegisterEvent("CHAT_MSG_WHISPER")
-WLPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
-WLPins:RegisterEvent("CHAT_MSG_SYSTEM")
-WLPins:RegisterEvent("WORLD_MAP_UPDATE")
+CompanionPins:RegisterEvent("CHAT_MSG_WHISPER")
+CompanionPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
+CompanionPins:RegisterEvent("CHAT_MSG_SYSTEM")
+CompanionPins:RegisterEvent("WORLD_MAP_UPDATE")
 
-WLPins:SetScript("OnEvent", function(self, event, arg1)
+CompanionPins:SetScript("OnEvent", function(self, event, arg1)
     if event == "PLAYER_LOGIN" then
         LoadDB()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r v" .. WLPins.version ..
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r v" .. CompanionPins.version ..
             " loaded - " .. #self.pins .. " pin(s). /cpins for help.")
 
     elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER"
         or event == "CHAT_MSG_SYSTEM" then
         if self.debug then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper: " .. tostring(arg1))
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r whisper: " .. tostring(arg1))
         end
         -- "Finished 'Kobold Candles' - that pin can go." arrives when the companion
         -- actually hands a quest in; the marker has done its job by then.
@@ -414,27 +414,27 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         -- once - applying a part on its own would wipe the pins named in the others.
         local part, total, piece = string.match(text, "^Pin sync (%d+)/(%d+):%s*(.*)$")
         if part then
-            WLPins.syncParts = WLPins.syncParts or {}
+            CompanionPins.syncParts = CompanionPins.syncParts or {}
 
             -- Abandon a torn set. If a part never arrives (rate limit, relog) the held
             -- parts would sit there and pair with a later sync, leaving the map showing
             -- half of one set and half of another. Ten seconds is longer than a
             -- three-part burst ever takes.
             local now = time()
-            for i = #WLPins.syncParts, 1, -1 do
-                if now - (WLPins.syncParts[i].at or 0) > 10 then
-                    table.remove(WLPins.syncParts, i)
+            for i = #CompanionPins.syncParts, 1, -1 do
+                if now - (CompanionPins.syncParts[i].at or 0) > 10 then
+                    table.remove(CompanionPins.syncParts, i)
                 end
             end
 
-            WLPins.syncParts[tonumber(part)] = { text = piece, at = now }
+            CompanionPins.syncParts[tonumber(part)] = { text = piece, at = now }
 
-            if #WLPins.syncParts == tonumber(total) then
+            if #CompanionPins.syncParts == tonumber(total) then
                 local joined = {}
                 for i = 1, tonumber(total) do
-                    joined[i] = WLPins.syncParts[i] and WLPins.syncParts[i].text or ""
+                    joined[i] = CompanionPins.syncParts[i] and CompanionPins.syncParts[i].text or ""
                 end
-                WLPins.syncParts = nil
+                CompanionPins.syncParts = nil
                 SyncPins(table.concat(joined, "|"))
             end
             return
@@ -450,7 +450,7 @@ WLPins:SetScript("OnEvent", function(self, event, arg1)
         if done then
             RemoveByQuest(done)
             if self.debug then
-                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r pin cleared: " .. done)
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r pin cleared: " .. done)
             end
             return
         end
@@ -470,7 +470,7 @@ local zoneWatch = CreateFrame("Frame")
 zoneWatch:RegisterEvent("ZONE_CHANGED")
 zoneWatch:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 zoneWatch:SetScript("OnEvent", function()
-    if WorldMapFrame and WorldMapFrame:IsShown() then WLPins:Redraw() end
+    if WorldMapFrame and WorldMapFrame:IsShown() then CompanionPins:Redraw() end
 end)
 
 --------------------------------------------------------------------------
@@ -484,50 +484,50 @@ SlashCmdList["WLPINS"] = function(msg)
     msg = string.lower(msg or "")
 
     if msg == "clear" then
-        WLPins.pins = {}
-        SaveDB(); WLPins:Redraw()
+        CompanionPins.pins = {}
+        SaveDB(); CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r cleared.")
 
     elseif msg == "legend" then
-        WLPins.showLegend = not WLPins.showLegend
+        CompanionPins.showLegend = not CompanionPins.showLegend
         SaveDB()
-        WLPins:Redraw()
+        CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r legend " ..
-            (WLPins.showLegend and "on" or "off") .. ".")
+            (CompanionPins.showLegend and "on" or "off") .. ".")
 
     elseif msg == "flip" then
         FLIP_Y = not FLIP_Y
-        WLPins:Redraw()
+        CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r vertical flip " ..
             (FLIP_Y and "on" or "off") .. ".")
 
     elseif string.find(msg, "^offset") then
         local ox, oy = string.match(msg, "^offset%s+(-?%d+)%s*(-?%d+)")
         if ox and oy then
-            WLPins.offsetX, WLPins.offsetY = tonumber(ox), tonumber(oy)
-            SaveDB(); WLPins:Redraw()
+            CompanionPins.offsetX, CompanionPins.offsetY = tonumber(ox), tonumber(oy)
+            SaveDB(); CompanionPins:Redraw()
             DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffWLPins|r calibration offset %d, %d.", WLPins.offsetX, WLPins.offsetY))
+                "|cff00ccffCompanionPins|r calibration offset %d, %d.", CompanionPins.offsetX, CompanionPins.offsetY))
         else
             DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffWLPins|r offset is %d, %d - change it with /wlpins offset -7 -3",
-                WLPins.offsetX, WLPins.offsetY))
+                "|cff00ccffCompanionPins|r offset is %d, %d - change it with /wlpins offset -7 -3",
+                CompanionPins.offsetX, CompanionPins.offsetY))
         end
 
     elseif string.find(msg, "^only") then
         local name = string.match(msg, "^only%s+(%S+)")
         if name then
-            WLPins.only = string.lower(name)
-            WLPins:Redraw()
+            CompanionPins.only = string.lower(name)
+            CompanionPins:Redraw()
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " .. name .. ".")
         else
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " ..
-                (WLPins.only or "everyone") .. " - /wlpins only <name>, /wlpins all")
+                (CompanionPins.only or "everyone") .. " - /wlpins only <name>, /wlpins all")
         end
 
     elseif msg == "all" then
-        WLPins.only = nil
-        WLPins:Redraw()
+        CompanionPins.only = nil
+        CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing every companion.")
 
     elseif string.find(msg, "^life") then
@@ -545,20 +545,20 @@ SlashCmdList["WLPINS"] = function(msg)
 
     elseif msg == "test" then
         AddPin(48, 52, STYLE.handin, "TEST PIN")
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r test badge at 48, 52 - press M.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r test badge at 48, 52 - press M.")
 
     elseif msg == "debug" then
-        WLPins.debug = not WLPins.debug
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffWLPins|r whisper logging " ..
-            (WLPins.debug and "on" or "off") .. ".")
+        CompanionPins.debug = not CompanionPins.debug
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r whisper logging " ..
+            (CompanionPins.debug and "on" or "off") .. ".")
 
     elseif msg == "list" then
-        if #WLPins.pins == 0 then
+        if #CompanionPins.pins == 0 then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r: no pins.")
             return
         end
-        for _, pin in ipairs(WLPins.pins) do
-            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cff00ccffWLPins|r %d, %d - %s (%s)",
+        for _, pin in ipairs(CompanionPins.pins) do
+            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cff00ccffCompanionPins|r %d, %d - %s (%s)",
                 pin.x, pin.y, pin.quest or "?", pin.style.label))
         end
 

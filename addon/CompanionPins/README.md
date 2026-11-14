@@ -5,8 +5,10 @@ quests on your world map, and explains each marker in a small key in the corner.
 
 **Client-side only. No server change, no core edit, nothing to configure on the realm.**
 
-The folder is still called `WLPins` because that is where the client keeps its saved
-variables; everything a player sees says **Companion Pins**, and the command is `/cpins`.
+The addon directory is `CompanionPins`, matching the `CompanionSync` addon it belongs with;
+everything a player sees says **Companion Pins**, and the command is `/cpins`. It was called
+`WLPins` before v0.9 — the rename carries the saved variables across (`CompanionPinsDB`), so
+an update in place keeps any pins already on the map.
 
 ## Why an addon at all
 
@@ -38,14 +40,14 @@ CSYNC|Pin sync 3: 57,48,g=Brotherhood of Thieves|42,65,h=Report to Goldshire|55,
 |---|---|
 | Client | 3.3.5a (Interface `30300`) |
 | Dependencies | none — no Ace, no libraries |
-| Saved variables | `WLPinsDB` (pins survive logout, expire after 30 min) |
+| Saved variables | `CompanionPinsDB` (pins survive logout, expire after 30 min) |
 | Server side | `mod-companion-questsync` with `PinSync = 1` (the default) |
 
 ## Install
 
 ```
-Interface/AddOns/WLPins/WLPins.toc
-Interface/AddOns/WLPins/WLPins.lua
+Interface/AddOns/CompanionPins/CompanionPins.toc
+Interface/AddOns/CompanionPins/CompanionPins.lua
 ```
 
 Enable **Companion Pins** on the addon screen.

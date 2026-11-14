@@ -12,8 +12,11 @@ read of that module's binding table, so two modules never level the same body �
 that is switchable off (`RespectLegacyBindings = 0`). Nothing in the core,
 `mod-playerbots` or `mod-wowlegends` is patched.
 
-Design notes: [`docs/companion-lifecycle-report.md`](../../docs/companion-lifecycle-report.md).
-Test plan: [`docs/companion-test-plan.md`](../../docs/companion-test-plan.md).
+Test plan: [`docs/companion-test-plan.md`](docs/companion-test-plan.md) — a 40-minute
+in-game checklist covering every command in this file.
+Lifecycle snapshot: [`docs/companion-lifecycle-report.md`](docs/companion-lifecycle-report.md)
+— what was found and fixed at r76 (12–13 November 2026). A dated record, not the design;
+the design is described under "What it owns" and "Independence" below.
 
 ## Why it is needed
 
@@ -147,7 +150,7 @@ The module pushes state to two addons; it never asks the client for anything.
   rebuilt by the client before anything is drawn.
 
 The addons are `addon/CompanionSync` (the window and the buttons — companion roster, create,
-summon, dismiss, release, **Ground quests**) and `addon/WLPins` (titled **Companion Pins**:
+summon, dismiss, release, **Ground quests**) and `addon/CompanionPins` (titled **Companion Pins**:
 the map markers and the key in the map's corner). Both are client-side only.
 
 ## Configuration
