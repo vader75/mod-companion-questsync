@@ -16,7 +16,7 @@ local PAD = 16                      -- one inset for every edge; nothing is eyeb
 local CARD_HEIGHT = 88
 local CARD_GAP = 8
 local HEADER_HEIGHT = 62
-local FOOTER_HEIGHT = 64          -- buttons, roster hint and the server's answer
+local FOOTER_HEIGHT = 68          -- buttons, roster hint and the server's answer
 local EMPTY_HEIGHT = 108            -- the "no companions yet" copy needs room of its own
 local ADD_PANEL_HEIGHT = 278        -- race/class, name, pool stock, answer, Create/Cancel
 local MAX_CARDS = 4
@@ -638,12 +638,12 @@ local function CreateWindow()
 
     -- Both pinned to the bottom, above the footer, so they travel with the frame's height.
     frame.notice = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.notice:SetPoint("BOTTOMLEFT", PAD, 46)
+    frame.notice:SetPoint("BOTTOMLEFT", PAD, 50)
     Wrap(frame.notice, WIDTH - 2 * PAD)
     frame.notice:Hide()
 
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.hint:SetPoint("BOTTOMLEFT", PAD, 32)
+    frame.hint:SetPoint("BOTTOMLEFT", PAD, 36)
     Wrap(frame.hint, WIDTH - 2 * PAD)
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
