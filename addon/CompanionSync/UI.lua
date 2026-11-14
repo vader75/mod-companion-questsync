@@ -18,6 +18,7 @@ local CARD_GAP = 8
 local HEADER_HEIGHT = 62
 local FOOTER_HEIGHT = 64          -- buttons, roster hint and the server's answer
 local EMPTY_HEIGHT = 108            -- the "no companions yet" copy needs room of its own
+local ADD_PANEL_HEIGHT = 262        -- race/class, name, pool stock, answer, Create/Cancel
 local MAX_CARDS = 4
 local TEXT_RIGHT_INSET = 208        -- leaves room for the button column
 
@@ -231,12 +232,30 @@ local function LayoutWindow(count)
         height = height + EMPTY_HEIGHT
     end
 
+    if addPanel and addPanel:IsShown() then
+        height = math.max(height, HEADER_HEIGHT + ADD_PANEL_HEIGHT + FOOTER_HEIGHT + 6)
+    end
+
     frame:SetHeight(height)
+
+    -- With the Add panel open the cards sit behind it; showing both means reading two layouts
+    -- through each other, which is what "overlapping buttons" looked like.
+    local panelOpen = addPanel and addPanel:IsShown()
 
     for index, card in ipairs(cards or {}) do
         card:ClearAllPoints()
         card:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + (index - 1) * (CARD_HEIGHT + CARD_GAP)))
         card:SetSize(WIDTH - 2 * PAD, CARD_HEIGHT)
+
+        if panelOpen or not card.companion then
+            card:Hide()
+        else
+            card:Show()
+        end
+    end
+
+    if frame.hint then
+        if panelOpen then frame.hint:Hide() else frame.hint:Show() end
     end
 end
 
@@ -291,7 +310,13 @@ local DROPDOWN_TEXT_INSET = 16      -- UIDropDownMenuTemplate puts its text insi
 local function CreateAddPanel()
     addPanel = CreateFrame("Frame", nil, frame)
     addPanel:SetPoint("TOPLEFT", PAD, -HEADER_HEIGHT)
-    addPanel:SetPoint("BOTTOMRIGHT", -PAD, FOOTER_HEIGHT + 14)
+    addPanel:SetSize(WIDTH - 2 * PAD, ADD_PANEL_HEIGHT)
+
+    -- The panel has fixed content, so it must not be sized by what is left of the window:
+    -- anchored to the bottom it got 74 px inside a one-companion frame and every row of
+    -- controls landed on top of the next. It keeps its own height and the window grows.
+    addPanel:SetScript("OnShow", function() LayoutWindow(#G.companions) end)
+    addPanel:SetScript("OnHide", function() LayoutWindow(#G.companions) end)
     addPanel:Hide()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
