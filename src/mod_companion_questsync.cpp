@@ -6835,8 +6835,11 @@ public:
         if (!player || !g_cfg.enable)
             return false;
 
-        SendPinSync(player, true);
-        SendCompSync(player, true);
+        // Not forced: the panel asks every 15 seconds, and a forced send pushed two full
+        // payloads whether or not anything had changed. Left unforced, the server's own
+        // change detection answers "did the roster move" and stays silent when it did not.
+        SendPinSync(player, false);
+        SendCompSync(player, false);
 
         return true;
     }

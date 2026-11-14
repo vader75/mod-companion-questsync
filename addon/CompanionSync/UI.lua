@@ -11,9 +11,15 @@
 
 local addonName, G = ...
 
-local WIDTH, HEIGHT = 660, 540
+local WIDTH = 660
 local CARD_HEIGHT = 98
 local CARD_GAP = 8
+
+-- Header, the card stack, and the footer - derived rather than a constant, so a fifth card
+-- or a taller one cannot silently overflow the frame.
+local HEADER_HEIGHT = 58
+local FOOTER_HEIGHT = 46
+local HEIGHT = HEADER_HEIGHT + 4 * (CARD_HEIGHT + CARD_GAP) + FOOTER_HEIGHT
 local MAX_CARDS = 4
 local TEXT_RIGHT_INSET = 236        -- leaves room for the button column
 
@@ -355,13 +361,22 @@ function G.OnStockChanged() RefreshAddPanel() end
 -- While the window is open, ask the server for the current state every few seconds. Without
 -- this the panel only knew what the server chose to push, so a companion dismissed a moment
 -- ago still showed as with you until the window was closed and reopened.
-local POLL_SECONDS = 8
+local POLL_SECONDS = 15
 
 function G.PollState()
     G.Run(".companionsync refresh")
 end
 
 function G.OnServerMessage(text)
+    -- The server answers button presses with plain system lines ("that is not one of your
+    -- companions", "the pool has no free body"). They used to appear only on the Add panel,
+    -- so a refusal for Summon, Dismiss or Release came back as nothing at all - exactly the
+    -- silence this module exists to end.
+    if frame and frame.notice then
+        frame.notice:SetText(COL_WARN .. text .. COL_RESET)
+        frame.notice:Show()
+    end
+
     if addPanel and addPanel:IsShown() and serverLine then
         serverLine:SetText(COL_WARN .. text .. COL_RESET)
     end
@@ -504,8 +519,13 @@ local function CreateWindow()
     cards = {}
     for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
 
+    frame.notice = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.notice:SetPoint("BOTTOMLEFT", 16, 46)
+    Wrap(frame.notice, WIDTH - 32)
+    frame.notice:Hide()
+
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.hint:SetPoint("TOPLEFT", 18, -300)
+    frame.hint:SetPoint("TOPLEFT", 18, -HEADER_HEIGHT - MAX_CARDS * (CARD_HEIGHT + CARD_GAP) - 6)
     Wrap(frame.hint, WIDTH - 36)
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -529,24 +549,24 @@ local function CreateWindow()
 
     local dismissAll = Button(footer, "Dismiss all", 88, function() G.Action("dismiss") end,
         "Send every companion away. They stay bound.")
-    dismissAll:SetPoint("LEFT", 116, 0)
+    dismissAll:SetPoint("LEFT", summonAll, "RIGHT", 6, 0)
 
     local refresh = Button(footer, "Refresh", 70, function()
         G.Run(".companionsync pins")
         G.Run(".companionsync pool")
     end, "Ask the server for the current state.")
-    refresh:SetPoint("LEFT", 210, 0)
+    refresh:SetPoint("LEFT", dismissAll, "RIGHT", 6, 0)
 
     local quests = Button(footer, "Quest log", 82, function() G.Run(".companionsync quests") end,
         "Print what each companion is carrying to chat.")
-    quests:SetPoint("LEFT", 286, 0)
+    quests:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 
     -- The fallback for a quest that cannot be gathered: items that lie on the ground (oats in
     -- a field, cloth in a crate). The companion tries on its own, and this is for when the
     -- world will not co-operate - the object was taken, or it never respawned.
     local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
         "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
-    catchUp:SetPoint("LEFT", 374, 0)
+    catchUp:SetPoint("LEFT", quests, "RIGHT", 6, 0)
 
     return frame
 end
@@ -715,14 +735,15 @@ boot:SetScript("OnEvent", function(self, event, arg1)
     -- One line, once per login, so "is it even loaded?" is answerable from chat instead of
     -- from guesswork: the addon version the client actually read, and whether the minimap
     -- button exists.
-    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dCompanion Sync|r |cff9d9d9dv1.0.5|r loaded - "
-        .. "minimap button %s"):format(launcher and "|cff20ff20ready|r" or "|cffff6a6aMISSING|r"))
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dCompanion Sync|r |cff9d9d9dv%s|r loaded - "
+        .. "minimap button %s"):format(G.version,
+        launcher and "|cff20ff20ready|r" or "|cffff6a6aMISSING|r"))
 
     -- Record what was actually built. "Not on the map" has cost us hours of guessing; the
     -- numbers below say whether the button exists, where it sits and what it is drawn over.
     if CompanionSyncDB then
         local s = {
-            version = "1.0.5",
+            version = G.version,
             launcher = launcher and "created" or "nil",
             minimap = Minimap and (Minimap:GetWidth() .. "x" .. Minimap:GetHeight()) or "nil",
         }
@@ -758,7 +779,7 @@ SlashCmdList["CSRESET"] = function()
         launcher:ClearAllPoints()
         launcher:SetPoint("TOPLEFT", Minimap or UIParent, "TOPLEFT", 6, -60)
     end
-    DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r minimap button back in the corner")
+    DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r minimap button back in the corner")
 end
 
 SLASH_CSSTATE1 = "/csstate"
@@ -766,10 +787,10 @@ SLASH_CSSTATE2 = "/wlcgstate"
 SlashCmdList["CSSTATE"] = function()
     local s = CompanionSyncDB and CompanionSyncDB.state
     if not s then
-        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dWL|r no recorded state - try /reload")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r no recorded state - try /reload")
         return
     end
-    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dWL|r launcher=%s minimap=%s parent=%s point=%s %.0f,%.0f shown=%s w=%s strata=%s alpha=%s")
+    DEFAULT_CHAT_FRAME:AddMessage(("|cffffc94dCompanion Sync|r launcher=%s minimap=%s parent=%s point=%s %.0f,%.0f shown=%s w=%s strata=%s alpha=%s")
         :format(s.launcher or "?", s.minimap or "?", s.parent or "?", s.point or "?",
                 s.x or 0, s.y or 0, tostring(s.shown), tostring(s.width), s.strata or "?", tostring(s.alpha)))
 end
@@ -797,6 +818,10 @@ probe:SetScript("OnEvent", function(self)
         if waited < patience then return end
 
         frame:SetScript("OnUpdate", nil)
+
+        G.sawServerLine = false   -- proves absence, so G.Run stays quiet from here on
+        G.OnServerMessage("the module is not answering - is mod-companion-questsync enabled?")
+
         DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: the server is not answering - "
             .. "is mod-companion-questsync enabled?")
     end)

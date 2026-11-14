@@ -15,7 +15,20 @@
 
 local addonName, G = ...
 
-G.version = "2.0.0"
+-- The TOC is the only place the version is written down. Three hand-written copies had
+-- already drifted (this line said 2.0.0, the toc 1.3.0, the login line 1.0.5), and the one
+-- the client actually read was the toc - so that is the one to report.
+local function TocVersion()
+    local get = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+
+    if not get or not addonName then
+        return "?"
+    end
+
+    return get(addonName, "Version") or "?"
+end
+
+G.version = TocVersion()
 G.companions = {}
 G.stock = {}            -- ["race-class"] = free bodies
 G.syncParts = {}
@@ -286,6 +299,17 @@ end)
 
 function G.Run(command)
     if not command or command == "" then return end
+
+    -- A dot-command rides chat and is intercepted by the server. With the module absent
+    -- there is nothing to intercept it, and the text would simply be said aloud to everyone
+    -- nearby - so stay quiet once the module has been proved dead, and say so in the panel.
+    if G.sawServerLine == false then
+        if G.OnServerMessage then
+            G.OnServerMessage("mod-companion-questsync is not answering - is it enabled?")
+        end
+        return
+    end
+
     SendChatMessage(command, "SAY")
 end
 

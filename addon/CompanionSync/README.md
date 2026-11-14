@@ -67,7 +67,8 @@ Everything else is a button, so there are only a few:
 /csstate          print where the launcher is and what it is anchored to
 ```
 
-Version 1.3.0.
+Version 2.0.0. The version the client reports now comes from this folder's `.toc` - there
+were three hand-written copies and they had drifted apart.
 
 `/csync test` is the in-game sanity check. If the window looks empty or stale, run it
 first: it separates "the addon cannot parse" from "the server is not sending".
