@@ -75,11 +75,15 @@ Per pass, for each owner with bindings:
    been rewarded**, so the companion catches up rather than running ahead.
    `.companionsync catchup` (and the window's **Ground quests** button) does the same on
    demand.
-6. **Hand-ins** — a completed quest is handed in through the companion's own reward
+6. **Teleports** — a hearthstone, a portal or a summon moves the player, so the companion
+   goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
+   walking away never teleports anything, and a companion is never dragged into a
+   battleground or arena. `FollowThroughTeleport = 0` turns it off.
+7. **Hand-ins** — a completed quest is handed in through the companion's own reward
    command. If the owner is standing at the giver the companion steps to their side;
    if they are anywhere else it goes to the giver itself and says where it went, so
    "cannot talk to the quest giver" is a distance the module never creates.
-7. **Pins and whispers** — the open quests of companions the owner cannot see are
+8. **Pins and whispers** — the open quests of companions the owner cannot see are
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
    is said once, in words, naming the next action. The roster line is only re-sent when
    something that matters changes: free bag slots drift on their own and wait for a
@@ -188,6 +192,7 @@ each one. The defaults that matter most:
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
+| `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `AnnounceAtStartup` / `AnnounceOnLogin` | 1 / 1 | one line, so players know the module is running |
 | `Debug` / `HeartbeatSeconds` | 0 / 300 | log detail, and the heartbeat window for `Debug = 2` |
 

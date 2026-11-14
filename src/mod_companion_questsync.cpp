@@ -91,6 +91,7 @@ namespace
         bool announce           = true;
         bool announceLogin      = true;
         bool catchUpGroundItems = true;    // finish a ground-object quest the world will not yield
+        bool followThroughTeleport = true; // a hearthstone, portal or summon takes the companion too
         uint32 catchUpIdleSeconds = 120;   // how long the count must sit still first
         uint32 intervalSeconds  = 20;
         uint32 heartbeatSeconds = 300;  // Debug >= 2 heartbeat window (0 = off)
@@ -228,6 +229,11 @@ namespace
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     /// bot guid -> { has an unfinished ground objective, when that was last checked }
     std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
+
+    /// Owners whose teleport has just been seen: the companion is brought along a moment
+    /// later, once the client has finished loading the destination.
+    std::map<uint32, uint32> g_pendingFollow;   // owner guid -> when the teleport was seen
+
 
     /// How many grid searches this pass spent looking for ground objects (Debug >= 3).
     uint32 g_gridSearches = 0;
@@ -424,6 +430,7 @@ namespace
         g_cfg.announce           = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceAtStartup", true);
         g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
         g_cfg.catchUpGroundItems = sConfigMgr->GetOption<bool>("CompanionQuestSync.CatchUpGroundItems", true);
+        g_cfg.followThroughTeleport = sConfigMgr->GetOption<bool>("CompanionQuestSync.FollowThroughTeleport", true);
         g_cfg.catchUpIdleSeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.CatchUpIdleSeconds", 120);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
         g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
@@ -827,6 +834,75 @@ namespace
     Player* FindCompanionPlayer(uint32 botGuid)
     {
         return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid));
+    }
+
+    /// Bring companions along when the owner teleports.
+    ///
+    /// A hearthstone, a portal or a summon moves the player and leaves the companion where it
+    /// stood - the one thing in the game that should never be left behind in another zone.
+    /// Hooked on the teleport rather than inferred from distance: walking away must never
+    /// teleport anything, and a hearth must always.
+    void FollowOwnerThroughTeleport()
+    {
+        if (g_pendingFollow.empty())
+            return;
+
+        constexpr uint32 kFollowDelaySeconds = 3;     // the owner's client is still loading
+        constexpr float kFollowDistanceYards = 120.0f;
+
+        uint32 const now = uint32(time(nullptr));
+
+        for (auto itr = g_pendingFollow.begin(); itr != g_pendingFollow.end();)
+        {
+            uint32 const ownerGuid = itr->first;
+
+            if (now - itr->second < kFollowDelaySeconds)
+            {
+                ++itr;
+                continue;
+            }
+
+            Player* owner = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(ownerGuid));
+            std::vector<uint32> bots;
+
+            if (!owner || !owner->IsInWorld() || !FindCompanions(ownerGuid, bots))
+            {
+                itr = g_pendingFollow.erase(itr);
+                continue;
+            }
+
+            for (uint32 const botGuid : bots)
+            {
+                Player* bot = FindCompanionPlayer(botGuid);
+                if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+                    continue;
+
+                bool const elsewhere = bot->GetMapId() != owner->GetMapId();
+                float const away = elsewhere ? 999999.0f : bot->GetDistance(owner);
+
+                if (away <= kFollowDistanceYards)
+                    continue;
+
+                float x = owner->GetPositionX() + 2.0f;
+                float y = owner->GetPositionY();
+                float z = owner->GetPositionZ();
+
+                bot->UpdateGroundPositionZ(x, y, z);
+                bot->StopMoving();
+
+                if (elsewhere)
+                    bot->TeleportTo(owner->GetMapId(), x, y, z, owner->GetOrientation());
+                else
+                    bot->NearTeleportTo(x, y, z, owner->GetOrientation());
+
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] {} followed {} through a teleport - map {}, {} yd behind",
+                         bot->GetName(), owner->GetName(), owner->GetMapId(),
+                         elsewhere ? 0 : uint32(away));
+            }
+
+            itr = g_pendingFollow.erase(itr);
+        }
     }
 
     void AddSkipped(SyncReport& report, Quest const* quest, std::string const& reason)
@@ -5585,6 +5661,8 @@ public:
         {
             _gatherAccumulator = 0;
 
+            FollowOwnerThroughTeleport();
+
             for (auto const& pair : sWorldSessionMgr->GetAllSessions())
             {
                 WorldSession* session = pair.second;
@@ -7132,7 +7210,31 @@ public:
     // did nothing before.
     CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
         { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
-          PLAYERHOOK_ON_QUEST_ABANDON }) { }
+          PLAYERHOOK_ON_QUEST_ABANDON, PLAYERHOOK_ON_BEFORE_TELEPORT }) { }
+
+    /// A hearthstone, a portal or a summon is about to move the player: note it, and let the
+    /// fast tick bring the companion along once the destination has finished loading.
+    bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float /*x*/, float /*y*/, float /*z*/,
+                                float /*orientation*/, uint32 /*options*/, Unit* /*target*/) override
+    {
+        if (!g_cfg.enable || !g_cfg.followThroughTeleport || !player || !player->GetSession())
+            return true;
+
+        if (player->GetSession()->IsBot())      // a bot's own teleports are not the player's
+            return true;
+
+        // never drag a companion into a battleground or an arena
+        if (MapEntry const* entry = sMapStore.LookupEntry(mapid); entry && entry->IsBattlegroundOrArena())
+            return true;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+            return true;
+
+        g_pendingFollow[player->GetGUID().GetCounter()] = uint32(time(nullptr));
+
+        return true;
+    }
 
     void OnPlayerLogin(Player* player) override
     {
@@ -7199,6 +7301,7 @@ public:
         for (uint32 const botGuid : companions)
             PurgeCompanionState(botGuid);
 
+        g_pendingFollow.erase(ownerGuid);
         g_lastPinSync.erase(ownerGuid);
         g_lastCompSync.erase(ownerGuid);
         g_lastCompSyncAt.erase(ownerGuid);

@@ -198,6 +198,13 @@ CompanionQuestSync.CatchUpGroundItems = 1
 #                     every pass; this is the patience it gets first.
 #        Default:     120
 CompanionQuestSync.CatchUpIdleSeconds = 120
+#    CompanionQuestSync.FollowThroughTeleport
+#        Description: Take the companion with you when you teleport - a hearthstone, a
+#                     portal, a summon. Without it the companion stays where it stood and is
+#                     in another zone by the time you land. Walking away never teleports it;
+#                     only a real teleport does, and never into a battleground or arena.
+#        Default:     1 (on)
+CompanionQuestSync.FollowThroughTeleport = 1
 
 #    CompanionQuestSync.DropFailedBotQuests
 #        Description: Drop a companion quest its own AI failed (a dead escort, a timed
