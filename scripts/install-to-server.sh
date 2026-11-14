@@ -39,7 +39,7 @@ echo "module -> $target"
 
 if [ $# -ge 2 ]; then
     addons="$2"
-    for a in CompanionSync WLPins; do
+    for a in CompanionSync CompanionPins; do
         if [ -d "$repo/addon/$a" ]; then
             mkdir -p "$addons/$a"
             cp "$repo"/addon/$a/*.lua "$repo"/addon/$a/*.toc "$addons/$a/"

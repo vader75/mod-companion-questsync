@@ -14,6 +14,8 @@ that is switchable off (`RespectLegacyBindings = 0`). Nothing in the core,
 
 Test plan: [`docs/companion-test-plan.md`](docs/companion-test-plan.md) — a 40-minute
 in-game checklist covering every command in this file.
+State of play: [`docs/state-of-play.md`](docs/state-of-play.md) — where the clones live and
+which one to pull.
 Lifecycle snapshot: [`docs/companion-lifecycle-report.md`](docs/companion-lifecycle-report.md)
 — what was found and fixed at r76 (12–13 November 2026). A dated record, not the design;
 the design is described under "What it owns" and "Independence" below.
