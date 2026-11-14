@@ -12,6 +12,11 @@ cannot break the client beyond the payload it already understands.
 Requires `mod-companion-questsync` on the server. If nothing arrives 20 seconds after
 login, the addon says so in one line rather than showing an empty window.
 
+The window is as tall as its roster: one companion is a short panel, four is a full one.
+The height is derived from the same arithmetic that places the cards, so a new row cannot
+quietly overflow the frame, and the footer band always has room for the buttons, the slot
+count and the server's last answer.
+
 ## What it shows
 
 One card per companion, up to four (a party of five with you):

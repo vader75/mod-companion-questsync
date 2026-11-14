@@ -11,17 +11,15 @@
 
 local addonName, G = ...
 
-local WIDTH = 660
-local CARD_HEIGHT = 98
+local WIDTH = 620
+local PAD = 16                      -- one inset for every edge; nothing is eyeballed
+local CARD_HEIGHT = 88
 local CARD_GAP = 8
-
--- Header, the card stack, and the footer - derived rather than a constant, so a fifth card
--- or a taller one cannot silently overflow the frame.
-local HEADER_HEIGHT = 58
-local FOOTER_HEIGHT = 46
-local HEIGHT = HEADER_HEIGHT + 4 * (CARD_HEIGHT + CARD_GAP) + FOOTER_HEIGHT
+local HEADER_HEIGHT = 62
+local FOOTER_HEIGHT = 64          -- buttons, roster hint and the server's answer
+local EMPTY_HEIGHT = 108            -- the "no companions yet" copy needs room of its own
 local MAX_CARDS = 4
-local TEXT_RIGHT_INSET = 236        -- leaves room for the button column
+local TEXT_RIGHT_INSET = 208        -- leaves room for the button column
 
 local COL_MUTED = "|cff9d9d9d"
 local COL_GOOD  = "|cff20ff20"
@@ -47,16 +45,42 @@ local function Button(parent, label, width, onClick, tooltip)
     local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     button:SetSize(width or 64, 22)
     button:SetText(label)
-    button:GetFontString():SetFontObject(GameFontNormalSmall)
-    button:SetScript("OnClick", onClick)
-    if tooltip then
-        button:SetScript("OnEnter", function(self)
+
+    local text = button:GetFontString()
+    text:SetFontObject(GameFontNormalSmall)
+    text:SetTextColor(0.88, 0.88, 0.9)
+
+    -- Flat plate rather than the stock bevels: a 2008 button sitting on a dark panel reads as
+    -- a different program. The template's own textures are hidden and one quiet plate drawn,
+    -- so every button in the window changes together.
+    for _, getter in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture" }) do
+        local tex = button[getter] and button[getter](button)
+        if tex and tex.SetAlpha then tex:SetAlpha(0) end
+    end
+
+    local highlight = button.GetHighlightTexture and button:GetHighlightTexture()
+    if highlight then highlight:SetTexture(1, 1, 1, 0.05) end
+
+    button.plate = button:CreateTexture(nil, "BACKGROUND")
+    button.plate:SetAllPoints()
+    button.plate:SetTexture(1, 1, 1, 0.07)
+
+    button:SetScript("OnEnter", function(self)
+        self.plate:SetTexture(1, 1, 1, 0.16)
+
+        if tooltip then
             GameTooltip:SetOwner(self, "ANCHOR_TOP")
             GameTooltip:AddLine(tooltip, 1, 1, 1, true)
             GameTooltip:Show()
-        end)
-        button:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    end
+        end
+    end)
+
+    button:SetScript("OnLeave", function(self)
+        self.plate:SetTexture(1, 1, 1, 0.07)
+        GameTooltip:Hide()
+    end)
+
+    button:SetScript("OnClick", onClick)
     return button
 end
 
@@ -118,12 +142,18 @@ end
 
 local function CreateCard(index)
     local card = CreateFrame("Frame", nil, frame)
-    card:SetSize(WIDTH - 28, CARD_HEIGHT)
-    card:SetPoint("TOPLEFT", 14, -58 - (index - 1) * (CARD_HEIGHT + CARD_GAP))
+    card:SetSize(WIDTH - 2 * PAD, CARD_HEIGHT)
 
     card.bg = card:CreateTexture(nil, "BACKGROUND")
     card.bg:SetAllPoints()
-    card.bg:SetTexture(1, 1, 1, 0.05)
+    card.bg:SetTexture(1, 1, 1, 0.045)
+
+    -- a hairline along the top edge separates stacked cards without boxing each one in
+    card.top = card:CreateTexture(nil, "BORDER")
+    card.top:SetPoint("TOPLEFT", 0, 0)
+    card.top:SetPoint("TOPRIGHT", 0, 0)
+    card.top:SetHeight(1)
+    card.top:SetTexture(1, 1, 1, 0.06)
 
     card.stripe = card:CreateTexture(nil, "ARTWORK")
     card.stripe:SetPoint("TOPLEFT", 0, 0)
@@ -131,19 +161,25 @@ local function CreateCard(index)
     card.stripe:SetWidth(3)
 
     card.dot = card:CreateTexture(nil, "ARTWORK")
-    card.dot:SetSize(9, 9)
-    card.dot:SetPoint("TOPLEFT", 16, -18)
+    card.dot:SetSize(8, 8)
+    card.dot:SetPoint("TOPLEFT", 16, -17)
 
     card.name = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    card.name:SetPoint("TOPLEFT", 32, -12)
+    card.name:SetPoint("TOPLEFT", 30, -9)
 
     card.subtitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    card.subtitle:SetPoint("TOPLEFT", 16, -32)
+    card.subtitle:SetPoint("TOPLEFT", 16, -29)
 
     card.status = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    card.status:SetPoint("TOPLEFT", 16, -54)
-    Wrap(card.status, WIDTH - 28 - TEXT_RIGHT_INSET - 24)
+    card.status:SetPoint("TOPLEFT", 16, -50)
+    Wrap(card.status, WIDTH - 2 * PAD - TEXT_RIGHT_INSET - 12)
     card.status:SetJustifyH("LEFT")
+
+    -- the whole card responds to the cursor, so the row under it is obviously the one the
+    -- buttons belong to
+    card:EnableMouse(true)
+    card:SetScript("OnEnter", function(self) self.bg:SetTexture(1, 1, 1, 0.075) end)
+    card:SetScript("OnLeave", function(self) self.bg:SetTexture(1, 1, 1, 0.045) end)
 
     card.primary = Button(card, "Summon", 84, function()
         if not card.companion then return end
@@ -178,6 +214,30 @@ local function CreateCard(index)
     card.mapButton:SetPoint("BOTTOMRIGHT", -144, -12)
 
     return card
+end
+
+-- The window is exactly as tall as the roster it is showing.
+--
+-- A fixed height meant a four-slot frame around one companion (mostly empty) and a second
+-- thing to remember every time a row changed. Rows are placed from the same arithmetic that
+-- sets the frame height, so the two cannot disagree.
+local function LayoutWindow(count)
+    if not frame then return end
+
+    local rows = math.max(1, math.min(count or 0, MAX_CARDS))
+    local height = HEADER_HEIGHT + rows * CARD_HEIGHT + (rows - 1) * CARD_GAP + FOOTER_HEIGHT
+
+    if count == 0 then
+        height = height + EMPTY_HEIGHT
+    end
+
+    frame:SetHeight(height)
+
+    for index, card in ipairs(cards or {}) do
+        card:ClearAllPoints()
+        card:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + (index - 1) * (CARD_HEIGHT + CARD_GAP)))
+        card:SetSize(WIDTH - 2 * PAD, CARD_HEIGHT)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -230,13 +290,13 @@ local DROPDOWN_TEXT_INSET = 16      -- UIDropDownMenuTemplate puts its text insi
 
 local function CreateAddPanel()
     addPanel = CreateFrame("Frame", nil, frame)
-    addPanel:SetPoint("TOPLEFT", 14, -58)
-    addPanel:SetPoint("BOTTOMRIGHT", -14, 56)
+    addPanel:SetPoint("TOPLEFT", PAD, -HEADER_HEIGHT)
+    addPanel:SetPoint("BOTTOMRIGHT", -PAD, FOOTER_HEIGHT + 14)
     addPanel:Hide()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
     addPanel.bg:SetAllPoints()
-    addPanel.bg:SetTexture(1, 1, 1, 0.06)
+    addPanel.bg:SetTexture(1, 1, 1, 0.05)
 
     addPanel.title = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     addPanel.title:SetPoint("TOPLEFT", 18, -14)
@@ -441,13 +501,10 @@ function G.Refresh()
         end
     end
 
-    -- With fewer than four companions the roster leaves empty rows. Rather than a window that
-    -- looks unfinished, the space carries the one line that matters: how many slots are left.
+    -- The footer line says what the roster cannot: how many slots are left. It is anchored to
+    -- the bottom of the frame, so it moves with the height instead of being repositioned.
     if frame.hint then
         local free = MAX_CARDS - count
-
-        frame.hint:ClearAllPoints()
-        frame.hint:SetPoint("TOPLEFT", 18, -58 - count * (CARD_HEIGHT + CARD_GAP) - 6)
 
         if count == 0 then
             frame.hint:SetText("")
@@ -460,13 +517,15 @@ function G.Refresh()
         end
     end
 
+    LayoutWindow(count)
+
     if count == 0 then frame.empty:Show() else frame.empty:Hide() end
     if addPanel and addPanel:IsShown() and count > 0 then addPanel:Hide() end
 end
 
 local function CreateWindow()
     frame = CreateFrame("Frame", "CompanionSyncFrame", UIParent)
-    frame:SetSize(WIDTH, HEIGHT)
+    frame:SetSize(WIDTH, HEADER_HEIGHT + CARD_HEIGHT + FOOTER_HEIGHT)
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
     frame:SetMovable(true)
@@ -479,30 +538,43 @@ local function CreateWindow()
         CompanionSyncDB.pos = { point = point, x = x, y = y }
     end)
 
+    -- Shadow, then the panel: depth without a visible frame edge, which is what made the old
+    -- version read as a dialogue box from a different expansion.
+    frame.shadow = frame:CreateTexture(nil, "BACKGROUND")
+    frame.shadow:SetPoint("TOPLEFT", -3, 3)
+    frame.shadow:SetPoint("BOTTOMRIGHT", 3, -3)
+    frame.shadow:SetTexture(0, 0, 0, 0.5)
+
     frame.bg = frame:CreateTexture(nil, "BACKGROUND")
     frame.bg:SetAllPoints()
-    frame.bg:SetTexture(0, 0, 0, 0.8)
+    frame.bg:SetTexture(0.05, 0.05, 0.06, 0.95)
 
     frame.border = CreateFrame("Frame", nil, frame)
     frame.border:SetAllPoints()
     frame.border:SetBackdrop({
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 14,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
-    frame.border:SetBackdropBorderColor(1, 1, 1, 0.18)
+    frame.border:SetBackdropBorderColor(1, 1, 1, 0.10)
 
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    frame.title:SetPoint("TOPLEFT", 16, -12)
+    frame.title:SetPoint("TOPLEFT", PAD, -12)
     frame.title:SetText("|cffffc94dCompanions|r")
 
     frame.count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.count:SetPoint("TOPLEFT", 16, -36)
+    frame.count:SetPoint("TOPLEFT", PAD, -34)
+
+    frame.divider = frame:CreateTexture(nil, "BORDER")
+    frame.divider:SetPoint("TOPLEFT", PAD, -HEADER_HEIGHT + 1)
+    frame.divider:SetPoint("TOPRIGHT", -PAD, -HEADER_HEIGHT + 1)
+    frame.divider:SetHeight(1)
+    frame.divider:SetTexture(1, 1, 1, 0.07)
 
     local add = Button(frame, "+ Add companion", 124, function()
         if addPanel and addPanel:IsShown() then addPanel:Hide() else G.ShowAddPanel() end
     end, "Mint a new companion from the pool.")
-    add:SetPoint("TOPRIGHT", -36, -14)
+    add:SetPoint("TOPRIGHT", -34, -14)
 
     frame.elapsed = 0
     frame:SetScript("OnUpdate", function(self, delta)
@@ -519,18 +591,19 @@ local function CreateWindow()
     cards = {}
     for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
 
+    -- Both pinned to the bottom, above the footer, so they travel with the frame's height.
     frame.notice = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.notice:SetPoint("BOTTOMLEFT", 16, 46)
-    Wrap(frame.notice, WIDTH - 32)
+    frame.notice:SetPoint("BOTTOMLEFT", PAD, 46)
+    Wrap(frame.notice, WIDTH - 2 * PAD)
     frame.notice:Hide()
 
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.hint:SetPoint("TOPLEFT", 18, -HEADER_HEIGHT - MAX_CARDS * (CARD_HEIGHT + CARD_GAP) - 6)
-    Wrap(frame.hint, WIDTH - 36)
+    frame.hint:SetPoint("BOTTOMLEFT", PAD, 32)
+    Wrap(frame.hint, WIDTH - 2 * PAD)
 
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.empty:SetPoint("TOPLEFT", 20, -84)
-    Wrap(frame.empty, WIDTH - 44)
+    frame.empty:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + 8))
+    Wrap(frame.empty, WIDTH - 2 * PAD)
     frame.empty:SetSpacing(4)
     frame.empty:SetText(COL_MUTED .. "No companions yet." .. COL_RESET .. "\n\n" ..
         COL_MUTED .. "Press " .. COL_RESET .. "|cffffff00+ Add companion|r" .. COL_MUTED ..
@@ -538,26 +611,32 @@ local function CreateWindow()
         COL_RESET .. "\n" ..
         COL_MUTED .. "Four is the most: a party of five, counting you." .. COL_RESET)
 
+    frame.footline = frame:CreateTexture(nil, "BORDER")
+    frame.footline:SetPoint("BOTTOMLEFT", PAD, FOOTER_HEIGHT)
+    frame.footline:SetPoint("BOTTOMRIGHT", -PAD, FOOTER_HEIGHT)
+    frame.footline:SetHeight(1)
+    frame.footline:SetTexture(1, 1, 1, 0.07)
+
     local footer = CreateFrame("Frame", nil, frame)
-    footer:SetPoint("BOTTOMLEFT", 14, 14)
-    footer:SetPoint("BOTTOMRIGHT", -14, 14)
+    footer:SetPoint("BOTTOMLEFT", PAD, 10)
+    footer:SetPoint("BOTTOMRIGHT", -PAD, 10)
     footer:SetHeight(22)
 
-    local summonAll = Button(footer, "Summon missing", 110, function() G.Action("summon") end,
+    local summonAll = Button(footer, "Summon missing", 108, function() G.Action("summon") end,
         "Bring out every companion that is not with you.")
     summonAll:SetPoint("LEFT", 0, 0)
 
-    local dismissAll = Button(footer, "Dismiss all", 88, function() G.Action("dismiss") end,
+    local dismissAll = Button(footer, "Dismiss all", 84, function() G.Action("dismiss") end,
         "Send every companion away. They stay bound.")
     dismissAll:SetPoint("LEFT", summonAll, "RIGHT", 6, 0)
 
-    local refresh = Button(footer, "Refresh", 70, function()
+    local refresh = Button(footer, "Refresh", 66, function()
         G.Run(".companionsync pins")
         G.Run(".companionsync pool")
     end, "Ask the server for the current state.")
     refresh:SetPoint("LEFT", dismissAll, "RIGHT", 6, 0)
 
-    local quests = Button(footer, "Quest log", 82, function() G.Run(".companionsync quests") end,
+    local quests = Button(footer, "Quest log", 76, function() G.Run(".companionsync quests") end,
         "Print what each companion is carrying to chat.")
     quests:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 
@@ -567,6 +646,8 @@ local function CreateWindow()
     local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
         "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
     catchUp:SetPoint("LEFT", quests, "RIGHT", 6, 0)
+
+    LayoutWindow(0)
 
     return frame
 end
