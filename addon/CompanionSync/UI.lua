@@ -18,7 +18,7 @@ local CARD_GAP = 8
 local HEADER_HEIGHT = 62
 local FOOTER_HEIGHT = 64          -- buttons, roster hint and the server's answer
 local EMPTY_HEIGHT = 108            -- the "no companions yet" copy needs room of its own
-local ADD_PANEL_HEIGHT = 262        -- race/class, name, pool stock, answer, Create/Cancel
+local ADD_PANEL_HEIGHT = 278        -- race/class, name, pool stock, answer, Create/Cancel
 local MAX_CARDS = 4
 local TEXT_RIGHT_INSET = 208        -- leaves room for the button column
 
@@ -410,7 +410,8 @@ local function CreateAddPanel()
     Wrap(stockLabel, WIDTH - 64)
 
     serverLine = addPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    serverLine:SetPoint("TOPLEFT", 20, -208)
+    serverLine:SetPoint("TOPLEFT", 20, -206)
+    serverLine:SetHeight(32)          -- two lines; the actions sit below it
     Wrap(serverLine, WIDTH - 64)
     serverLine:SetText(COL_MUTED .. "the server's answer appears here" .. COL_RESET)
 
@@ -420,10 +421,10 @@ local function CreateAddPanel()
             nameBox:ClearFocus()
         end
     end, "Claim a body from the pool with this race, class and name.")
-    createButton:SetPoint("BOTTOMLEFT", 20, 16)
+    createButton:SetPoint("BOTTOMLEFT", 20, 12)
 
     local cancel = Button(addPanel, "Cancel", 80, function() addPanel:Hide() end)
-    cancel:SetPoint("BOTTOMLEFT", 218, 16)
+    cancel:SetPoint("BOTTOMLEFT", 218, 12)
 
     return addPanel
 end
