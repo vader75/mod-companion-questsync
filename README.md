@@ -97,7 +97,12 @@ Per pass, for each owner with bindings:
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
    is said once, in words, naming the next action. The roster line is only re-sent when
    something that matters changes: free bag slots drift on their own and wait for a
-   slower clock rather than being broadcast every pass.
+   slower clock rather than being broadcast every pass. A quest owing work in several
+   areas draws one pin per area (deduped by converted point, capped at four per quest),
+   each on its own zone's map; a ready hand-in is one pin at the giver. The module
+   publishes the full payload once a minute alongside its `Hello` heartbeat, so a client
+   that just `/reloaded` is repopulated without waiting for a change or the 10-minute
+   cycle (`SendHeartbeat`).
 
 Class- and race-locked quests are expected for a differently-built companion: they
 are counted separately and reported (`NotifySkippedQuests`). Objective counters are
