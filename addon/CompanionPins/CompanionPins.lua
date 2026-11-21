@@ -107,7 +107,12 @@ local function SyncPins(payload)
 
     local removed = #CompanionPins.pins - #fresh
     CompanionPins.pins = fresh
-    SaveDB(); CompanionPins:Redraw()
+    SaveDB()
+
+    local ok, err = pcall(function() CompanionPins:Redraw() end)
+    if not ok then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff6060CompanionPins|r draw failed: " .. tostring(err))
+    end
 
     if CompanionPins.debug then
         DEFAULT_CHAT_FRAME:AddMessage(string.format(
@@ -181,7 +186,13 @@ function CompanionPins:Redraw()
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
     local shown = 0
     local placed = {}
-    local mapName = select(1, GetMapInfo())
+    -- The zone filter must fail OPEN: if the client API is missing or misbehaves,
+    -- every pin draws (the pre-filter behaviour) rather than none.
+    local mapName = nil
+    if GetMapInfo then
+        local ok, value = pcall(GetMapInfo)
+        if ok and value then mapName = tostring(value) end
+    end
 
 
     for i, pin in ipairs(self.pins) do
