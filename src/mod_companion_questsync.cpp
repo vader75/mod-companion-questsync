@@ -637,11 +637,14 @@ namespace
     {
         uint8 priority = 0;      // 3 hand-in ready, 2 work owed, 1 chatter
         std::string text;
+        uint32 questId = 0;      // a hand-in note dies with its hand-in (SayToOwner validates)
+        bool handIn = false;
     };
 
     std::map<uint32, PassNote> g_passNotes;   // owner guid -> best note this pass
 
-    void Note(Player* owner, uint8 priority, std::string const& text)
+    void Note(Player* owner, uint8 priority, std::string const& text,
+              uint32 questId = 0, bool handIn = false)
     {
         if (!owner || text.empty())
             return;
@@ -659,7 +662,7 @@ namespace
                          owner->GetName(), uint32(priority), uint32(note.priority), note.text);
             }
 
-            note = PassNote{ priority, text };
+            note = PassNote{ priority, text, questId, handIn };
         }
         else if (g_cfg.debug >= 3)
         {
@@ -1208,13 +1211,15 @@ namespace
 
         std::string const text = itr->second.text;
         uint8 const priority = itr->second.priority;
+        uint32 const noteQuest = itr->second.questId;
+        bool const noteHandIn = itr->second.handIn;
         g_passNotes.erase(itr);
 
         if (g_cfg.debug >= 3)
             LOG_INFO("server.loading", "[CompanionQuestSync]   note for {}: sending priority {}", owner->GetName(), uint32(priority));
 
         if (!text.empty() && speaker)
-            SayToOwner(speaker, owner, text);
+            SayToOwner(speaker, owner, text, 45, noteQuest, noteHandIn);
     }
 
     /// Tell the owner, once per quest, that the companion could not take it.
@@ -2200,12 +2205,14 @@ namespace
                     Note(owner, 2, "I still owe " + spot.name + " my own copy of '" +
                                    quest->GetTitle() +
                                    "' - I will hand it in next time we are near" +
-                                   (coords.empty() ? "." : " (" + coords + ")."));
+                                   (coords.empty() ? "." : " (" + coords + ")."),
+                                   questId, true);
                 else
                     Note(owner, 3, "When we get a chance, could we stop by " + spot.name +
                                    "? I can hand in '" + quest->GetTitle() + "' there - about " +
                                    std::to_string(uint32(dist)) + " yards from me" +
-                                   (coords.empty() ? "." : ", " + coords + "."));
+                                   (coords.empty() ? "." : ", " + coords + "."),
+                                   questId, true);
                 return;
             }
         }
@@ -3178,11 +3185,23 @@ namespace
                 // the quest completes.
                 if (g_cfg.handInDelaySeconds > 0)
                 {
+                    // The owner standing at the giver beside the companion is the state
+                    // the delay exists to show them - right in front of them now. Hand in
+                    // on this pass, so the module's own voice (what it kept) is the one
+                    // that speaks: the bot AI's turn-in narrator, which fires on the
+                    // owner's gossip click, finds the copy already rewarded and stays
+                    // quiet instead of echoing "Quest Rewarded" a second time.
+                    bool const ownerAtGiver = owner &&
+                        owner->GetDistance(spot.x, spot.y, spot.z) <= 10.0f;
+
                     uint32& readyAt = g_readyAt[readyKey];
 
                     if (readyAt == 0)
                     {
                         readyAt = nowTs;
+
+                        if (ownerAtGiver)
+                            continue;      // next pass: it is already in front of the player
 
                         if (g_cfg.debug >= 1)
                             LOG_INFO("server.loading",
@@ -3200,7 +3219,7 @@ namespace
                         continue;
                     }
 
-                    if (nowTs - readyAt < g_cfg.handInDelaySeconds)
+                    if (!ownerAtGiver && nowTs - readyAt < g_cfg.handInDelaySeconds)
                         continue;
 
                     g_readyAt.erase(readyKey);
