@@ -1598,12 +1598,11 @@ namespace
             if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
                 continue;
 
-            // "map 43, 65" -> "43,65"
-            std::string numbers = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
-            numbers = numbers.substr(4);
-            numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
-                                         [](char c) { return c == ' '; }), numbers.end());
-            if (numbers.empty())
+            // Keep the "map X, Y" form: BuildPinLine strips the prefix itself, and this
+            // function stripping it too once ate the first coordinate - "80,45" became
+            // "5" and the pin could not be parsed by anyone.
+            std::string const numbers = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+            if (numbers.size() <= 5)
                 continue;
 
             numbersOut = numbers;
