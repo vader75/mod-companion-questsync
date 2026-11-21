@@ -208,7 +208,7 @@ each one. The defaults that matter most:
 | `ExtraArmourSlots` | 1 | belt, bracers, gloves and cloak in the class's armour type |
 | `PoolAccountType` | 2 | `playerbots_account_type` value that marks an AddClass body |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 all refusals |
-| `TidyInventory` / `KeepFreeSlots` | 1 / 2 | keep bag room so pickups never stall; the tidy ladder starts 4 slots before the wall (`BagMargin`) |
+| `TidyInventory` / `KeepFreeSlots` / `BagMargin` | 1 / 2 / 8 | keep bag room so pickups never stall; the ladder starts 8 slots before the wall. Everything below the keep-quality line (whites AND greys) is posted home in a letter - only what a full letter cannot carry falls to the destroy ladder, cheapest first - and the AI vendor-junk and surplus passes run from the margin, not only at zero slots |
 | `MailHome` | 1 | white-and-better overflow is posted to the owner instead of destroyed; the letter carries up to 12 items, at most one per 120 s |
 | `SellJunk` / `TidyVendorJunk` / `TidySurplus` | 1 / 1 / 1 | what it may sell or destroy to make room |
 | `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |

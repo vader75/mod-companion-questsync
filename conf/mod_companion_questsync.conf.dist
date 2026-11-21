@@ -255,6 +255,8 @@ CompanionQuestSync.TidyInventory = 1
 #        Default:     1 - post home; 0 = destroy whites like the rest
 CompanionQuestSync.MailHome = 1
 CompanionQuestSync.KeepFreeSlots = 2
+# The tidy ladder starts this many slots before the wall (see KeepFreeSlots)
+CompanionQuestSync.BagMargin = 8
 CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TidyVendorJunk = 1
 CompanionQuestSync.MapPins = 1

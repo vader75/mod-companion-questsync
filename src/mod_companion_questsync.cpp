@@ -119,6 +119,7 @@ namespace
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
         uint32 keepFreeSlots   = 2;
+        uint32 bagMargin       = 8;  // the tidy ladder starts this many slots before the wall
         bool mailHome          = true;    // post keep-worthy overflow to the owner
         std::string bindingTable = "cq_bindings";   // this module's own table
         std::string poolTable    = "cq_pool";       // this module's own ledger
@@ -199,7 +200,6 @@ namespace
         constexpr uint32 RewardProd        = 60;  // how often a hand-in attempt is repeated
         constexpr uint32 AcceptWindow      = 60;  // a quest accepted this recently is still settling
         constexpr uint32 MailHome          = 120; // how often a "posted home" letter may go out
-        constexpr uint32 BagMargin         = 4;   // stay this many slots ahead of the wall
     }
 
     uint32 constexpr kBindingCacheSeconds = 60;
@@ -537,6 +537,7 @@ namespace
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
         g_cfg.keepFreeSlots      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.KeepFreeSlots", 2);
+        g_cfg.bagMargin          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.BagMargin", 8);
         g_cfg.mailHome           = sConfigMgr->GetOption<bool>("CompanionQuestSync.MailHome", true);
         g_cfg.bindingTable       = sConfigMgr->GetOption<std::string>("CompanionQuestSync.BindingTable", "cq_bindings");
         g_cfg.poolTable          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.PoolTable", "cq_pool");
@@ -4019,7 +4020,7 @@ namespace
         // Soft margin: act while there are still a few slots left, not at the wall. A
         // companion that tidies at zero free slots destroys in a panic; one that tidies
         // at the margin mails a letter and carries on.
-        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots + Timing::BagMargin)
+        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots + g_cfg.bagMargin)
             return 0;
 
         // Item ids the companion's own live quests need: never destroy these.
@@ -4070,15 +4071,19 @@ namespace
             if (wanted.count(proto->ItemId))
                 return;                                  // a live quest still needs it
 
-            // White-tier items are never destroyed any more: they go home in a letter.
-            // Whites (quality 1) are the floor - greys stay vendor trash - and anything
-            // the ladder itself would keep (green and better) is mailed too, since
-            // sitting in a full bag protects nobody.
-            if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
+            // Everything below the keep-quality line goes home in a letter - whites
+            // and greys alike, the player can vendor a grey for more than its slot is
+            // worth. Only what a full letter cannot carry (the 12-item cap) falls
+            // through, and a grey's slot is worth more than its copper, so the cap's
+            // greys join the destroy ladder while the cap's whites wait for the next
+            // letter.
+            if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_POOR &&
                 proto->Bonding != BIND_WHEN_PICKED_UP)
             {
                 if (postHome.size() < 12)                // the mail slot limit
                     offerPost(item);
+                else if (proto->Quality < g_cfg.itemKeepQuality)
+                    victims.emplace_back(proto->SellPrice, proto->ItemId);
                 return;
             }
 
@@ -4100,12 +4105,12 @@ namespace
                 for (uint8 j = 0; j < bag->GetBagSize(); ++j)
                     consider(bot->GetItemByPos(i, j));
 
-        // Nothing but white gear left? At zero free slots the companion cannot
+        // Nothing but white gear left? Down at the wall the companion cannot
         // pick up a quest item at all - it cannot even loot the Gold Dust it owes -
         // which is worse than losing a few copper of vendor trash. Ask playerbots
         // what it would vendor and bin exactly that; nothing it rates EQUIP,
         // QUEST, SKILL, DISENCHANT or AH is touched.
-        if (g_cfg.tidyVendorJunk && bot->GetFreeInventorySpace() == 0)
+        if (g_cfg.tidyVendorJunk && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots + g_cfg.bagMargin)
         {
             if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             {
@@ -4152,10 +4157,10 @@ namespace
         }
 
         // Still wedged? Spare consumables and materials are worth a few copper each and
-        // the companion does not craft - at zero free slots one of them is worth more as
+        // the companion does not craft - down at the wall one of them is worth more as
         // an empty slot than as an item. Cheapest first, surplus stacks only, and never
         // the hearthstone, gear or anything a quest needs.
-        if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() == 0)
+        if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots + g_cfg.bagMargin)
         {
             auto considerSurplus = [&wanted, &victims, &postHome, &offerPost](Item* item)
             {
