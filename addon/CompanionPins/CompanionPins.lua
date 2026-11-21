@@ -88,15 +88,27 @@ local function SyncPins(payload)
         local x, y, style, name, zone = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+),z=([^+|]+)")
         if x and y then
             name = string.match(name, "^[^,]+") or name
-            local title, companion = SplitCompanion(name)
-            if companion then
-                CompanionPins.companions = CompanionPins.companions or {}
-                CompanionPins.companions[companion] = true
+            -- a merged entry reads "Title@Drodan + Title@Ilyrin": every segment is the
+            -- same quest with a different companion, so collect the names whole instead
+            -- of letting the last @ win and calling the rest of the string a title
+            local title, ownerList = nil, {}
+            for segment in string.gmatch(name, "[^+]+") do
+                local q, c = SplitCompanion((segment:gsub("^%s+", ""):gsub("%s+$", "")))
+                if q and q ~= "" then
+                    title = q
+                    if c and c ~= "" then
+                        ownerList[#ownerList + 1] = c
+                        CompanionPins.companions = CompanionPins.companions or {}
+                        CompanionPins.companions[c] = true
+                    end
+                end
             end
             table.insert(fresh, {
                 x = tonumber(x), y = tonumber(y),
                 style = (style == "h") and STYLE.handin or STYLE.gather,
-                quest = title, companion = companion,
+                quest = title or "companion quest",
+                companion = ownerList[1],
+                owners = table.concat(ownerList, " + "),
                 at = time(),
                 -- the zone is the SERVER's word for where the pin lives; the player's
                 -- own location at receive time was never the pin's location
@@ -159,11 +171,23 @@ local function NewPin(index)
     f.label:SetPoint("LEFT", f, "RIGHT", 4, 0)
     f.label:SetJustifyH("LEFT")
 
+    -- who owes this: its own line under the quest, so ownership never fights the title
+    -- for characters and never gets truncated into "@Dr..."
+    f.owner = f:CreateFontString(nil, "OVERLAY")
+    f.owner:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
+    f.owner:SetPoint("TOPLEFT", f.label, "BOTTOMLEFT", 0, -1)
+    f.owner:SetJustifyH("LEFT")
+
     f:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         local pin = self.pin
         if pin then
             GameTooltip:AddLine(pin.quest or "companion quest", 1, 0.92, 0.6)
+            if pin.owners and pin.owners ~= "" then
+                for owner in string.gmatch(pin.owners, "[^+]+") do
+                    GameTooltip:AddLine("owed by" .. owner, 0.8, 0.8, 0.8)
+                end
+            end
             GameTooltip:AddLine(string.format("%s - %s", pin.style.label,
                 (pin.zone and pin.zone ~= "" and pin.zone or "here")), 0.85, 0.85, 0.85)
             GameTooltip:AddLine(string.format("map %d, %d", pin.x, pin.y), 0.6, 0.6, 0.6)
@@ -256,10 +280,15 @@ function CompanionPins:Redraw()
 
         local text = pin.quest or "companion quest"
         if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
-        local questName, companion = SplitCompanion(text)
-        if companion then text = questName .. "  |cff9a9a9a" .. companion .. "|r" end
         f.label:SetText(text)
         f.label:SetTextColor(r, g, b)
+
+        -- the companions that owe it, on their own muted line - every name whole
+        if pin.owners and pin.owners ~= "" then
+            f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
+        else
+            f.owner:SetText("")
+        end
 
         -- Nudge the label down a row when it would land on one already placed: two
         -- Goldshire hand-ins are four percent apart, invisible at map scale.
