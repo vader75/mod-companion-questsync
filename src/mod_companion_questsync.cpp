@@ -4724,6 +4724,10 @@ namespace
 
         last = now;
         SendProtocolLine(owner, "Hello " + std::to_string(g_cfg.intervalSeconds));
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat -> {}: Hello {}",
+                     owner->GetName(), g_cfg.intervalSeconds);
     }
 
     void SendPinSync(Player* owner, bool force = false)
