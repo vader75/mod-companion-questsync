@@ -259,6 +259,7 @@ namespace
     std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
+    std::map<uint32, uint32> g_heartbeatAt;               // owner guid -> last Hello
     /// Quest items that lie on the ground, by item id -> the game objects that hold them.
     ///
     /// Filled once at startup from `gameobject_questitem`. A "pick it off the ground" quest
@@ -1616,6 +1617,7 @@ namespace
 
 
     void SendPinSync(Player* owner, bool force);  // defined below
+    void SendHeartbeat(Player* owner);            // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
     ///
@@ -4379,6 +4381,9 @@ namespace
         // minutes for something to change before it may speak.
         FlushWhisperQueue(owner, bot);
 
+        // Presence: one Hello a minute, so the client's patience window never reads a quiet stretch as a dead module.
+        SendHeartbeat(owner);
+
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -4697,6 +4702,28 @@ namespace
         }
 
         return nullptr;
+    }
+
+    /// The presence heartbeat. Payloads are coalesced - a quiet stretch sends nothing -
+    /// and the client reads silence as "the module stopped answering" after its patience
+    /// window, which is exactly what it should read. So the module must speak inside that
+    /// window even when nothing changed: the login Hello becomes a per-owner heartbeat,
+    /// throttled to once a minute, hidden by the client's CSYNC filter like every
+    /// payload. With it, "not answering" finally means what it says.
+    void SendHeartbeat(Player* owner)
+    {
+        if (!owner || !owner->GetSession())
+            return;
+
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        uint32& last = g_heartbeatAt[ownerGuid];
+
+        if (last && now - last < 60)
+            return;
+
+        last = now;
+        SendProtocolLine(owner, "Hello " + std::to_string(g_cfg.intervalSeconds));
     }
 
     void SendPinSync(Player* owner, bool force = false)
@@ -8102,6 +8129,7 @@ public:
 
         g_pendingFollow.erase(ownerGuid);
         g_lastPinSync.erase(ownerGuid);
+        g_heartbeatAt.erase(ownerGuid);
         g_lastCompSync.erase(ownerGuid);
         g_lastCompSyncAt.erase(ownerGuid);
         g_lastPoolStock.erase(ownerGuid);
