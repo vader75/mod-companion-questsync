@@ -223,11 +223,16 @@ namespace
         uint32 reopened = 0;
         uint32 refused = 0;
         uint32 gathered = 0;    // items taken off the ground, by the step or the fallback
+        uint32 handedIn = 0;    // server-side rewards (HandInMode = 1)
+        uint32 mailed = 0;      // items posted home (MailHome)
+        uint32 letters = 0;     // letters sent home
+        uint32 destroyed = 0;   // items the tidy ladder destroyed (grey trash only)
         uint8 levelFrom = 0;
         uint8 levelTo = 0;
     };
 
     std::unordered_map<uint32, SessionTally> g_session;   // owner guid -> tally
+    std::map<uint32, std::string> g_lastSessionSummary;   // owner guid -> last logout's digest
     std::map<uint32, std::set<uint32>> g_sessionRefused;  // owner guid -> quests refused once
     std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
@@ -2894,6 +2899,13 @@ namespace
                                      "[CompanionQuestSync] {} is ready to hand in '{}' - showing for {}s",
                                      bot->GetName(), quest->GetTitle(), g_cfg.handInDelaySeconds);
 
+                        // The pin is the state, the whisper is the invitation: the delay
+                        // would otherwise show the player a gold pin they never notice.
+                        SayToOwner(bot, owner,
+                                   "I am ready to hand in '" + quest->GetTitle() + "' at " +
+                                   spot.name + " - about " +
+                                   std::to_string(uint32(dist)) + " yards from me. Want to come?", 45);
+
                         continue;
                     }
 
@@ -2965,6 +2977,7 @@ namespace
 
                 bot->RewardQuest(quest, reward, giver, true);
                 g_readyAt.erase((uint64(botGuid) << 32) | questId);
+                ++g_session[owner->GetGUID().GetCounter()].handedIn;
 
                 if (g_cfg.debug >= 1)
                     LOG_INFO("server.loading",
@@ -3154,8 +3167,15 @@ namespace
 
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
 
-        MailDraft draft(std::string("From ") + bot->GetName(),
-                        "Loot I could not carry - yours to keep, sell or wear as you like.");
+        // The body lists what is inside: a letter worth opening is the point.
+        std::string body = "Loot I could not carry - yours to keep, sell or wear as you like:\n";
+        for (Item* item : items)
+        {
+            if (ItemTemplate const* proto = item->GetTemplate())
+                body += "- " + std::string(proto->Name1) + " x" + std::to_string(item->GetCount()) + "\n";
+        }
+
+        MailDraft draft(std::string("From ") + bot->GetName(), body);
 
         uint32 mailed = 0;
         for (Item* item : items)
@@ -3182,6 +3202,10 @@ namespace
             LOG_INFO("server.loading",
                      "[CompanionQuestSync] {} posted {} item(s) home to {}",
                      bot->GetName(), mailed, owner->GetName());
+
+        SessionTally& tally = g_session[owner->GetGUID().GetCounter()];
+        tally.mailed += mailed;
+        ++tally.letters;
 
         return mailed;
     }
@@ -3742,6 +3766,8 @@ namespace
 
             bot->DestroyItemCount(entry, count, true);
             ++destroyed;
+            if (owner)
+                g_session[owner->GetGUID().GetCounter()].destroyed += count;
 
             if (g_cfg.debug >= 1)
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} destroyed {}x item {} to free bag space",
@@ -5265,6 +5291,19 @@ namespace
                     {
                         Player* master = ObjectAccessor::FindConnectedPlayer(
                             ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+
+                        if (master)
+                        {
+                            // The companion answers "what have you been up to?" before it
+                            // is asked: the last session's digest, once, then it is gone.
+                            auto last = g_lastSessionSummary.find(pending.ownerGuid);
+                            if (last != g_lastSessionSummary.end())
+                            {
+                                SayToOwner(fresh, master,
+                                           "Welcome back! Since we last parted: " + last->second + ".", 0);
+                                g_lastSessionSummary.erase(last);
+                            }
+                        }
 
                         EnsureBags(master, fresh);
                         EnsureStartingGear(master, fresh);
@@ -7636,17 +7675,35 @@ public:
         g_session.erase(itr);
 
         if (!tally.added && !tally.onAccept && !tally.completed && !tally.refused && !tally.reopened &&
-            !tally.gathered && !tally.levelFrom)
+            !tally.gathered && !tally.handedIn && !tally.mailed && !tally.destroyed && !tally.levelFrom)
             return;
 
         std::string level;
         if (tally.levelFrom && tally.levelTo)
             level = ", level " + std::to_string(tally.levelFrom) + " -> " + std::to_string(tally.levelTo);
 
+        // Carry a one-line summary across sessions: the owner's next companion arrival
+        // opens with it, so "what did we do?" never needs the log.
+        std::string summary = std::to_string(tally.added + tally.onAccept) + " quest(s) accepted, " +
+                              std::to_string(tally.completed + tally.handedIn) + " completed";
+        if (tally.handedIn)
+            summary += " (" + std::to_string(tally.handedIn) + " handed in)";
+        if (tally.gathered)
+            summary += ", " + std::to_string(tally.gathered) + " gathered";
+        if (tally.letters)
+            summary += ", " + std::to_string(tally.mailed) + " item(s) posted home in " +
+                       std::to_string(tally.letters) + " letter(s)";
+        if (tally.destroyed)
+            summary += ", " + std::to_string(tally.destroyed) + " grey item(s) binned";
+        if (level.size())
+            summary += level;
+
+        g_lastSessionSummary[ownerGuid] = summary;
+
         LOG_INFO("server.loading",
-                 "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground{}",
+                 "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground, {} handed in, {} mailed ({} letter(s)), {} destroyed{}",
                  player->GetName(), tally.added + tally.onAccept, tally.onAccept, tally.completed, tally.reopened,
-                 tally.refused, tally.gathered, level);
+                 tally.refused, tally.gathered, tally.handedIn, tally.mailed, tally.letters, tally.destroyed, level);
     }
     /// Instant mirror: the moment a real player accepts a quest, hand it to the
     /// companion. The 20 s sweep stays as the safety net (logins, level gates,
