@@ -1538,6 +1538,28 @@ namespace
         return false;
     }
 
+    /// The zone that owns a world position, probed at the TERRAIN HEIGHT of the point.
+    ///
+    /// Three authorities were tried and each lied differently: the terrain probe at z=0
+    /// (underground - garbage areas), the WorldMapArea bounds (border overlaps are
+    /// genuinely inside two rectangles, and a size tie-break cannot know which side of
+    /// an invisible line a farm stands on), and GetAreaEntryByAreaID's name round-trip.
+    /// The one probe that never lied is the one the core itself runs for players:
+    /// height first (vmaps are sound - bodies walk on this terrain), then zone. The
+    /// bounds table stays as the fallback for the rare tile the probe cannot read.
+    uint32 ZoneAtHeight(uint32 mapId, uint32 phaseMask, float x, float y)
+    {
+        Map* map = sMapMgr->FindMap(mapId, 0);
+        if (!map)
+            return WorldMapZoneAt(mapId, x, y);
+
+        float const ground = map->GetHeight(x, y, MAX_HEIGHT);
+        uint32 const zone = map->GetZoneId(phaseMask, x, y, ground + 2.0f);
+
+        return zone ? zone : WorldMapZoneAt(mapId, x, y);
+    }
+
+
     /// content-keyed, bounded by the quests that exist (same policy as g_poiCache)
     std::map<uint32, std::pair<std::string, std::string>> g_poiPinCache;
 
@@ -1566,11 +1588,11 @@ namespace
             float x = float(entry.points[0].x);
             float y = float(entry.points[0].y);
 
-            uint32 const zone = WorldMapZoneAt(entry.MapId, x, y);
+            uint32 const zone = ZoneAtHeight(entry.MapId, bot->GetPhaseMask(), x, y);
             if (!zone)
                 continue;
 
-            if (!WmaConvert(x, y, int32(zone)))
+            if (!WmaConvert(x, y, int32(zone)) && zone != 12)
                 continue;
 
             if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
@@ -4552,7 +4574,7 @@ namespace
                     // which is exactly when the player needs pointing.
                     if (spot.found && spot.map == bot->GetMapId())
                     {
-                        uint32 const zone = WorldMapZoneAt(spot.map, spot.x, spot.y);
+                        uint32 const zone = ZoneAtHeight(spot.map, 1, spot.x, spot.y);
                         int32 const useZone = int32(zone ? zone : spot.zone);
 
                         float gx = spot.x, gy = spot.y;
