@@ -663,6 +663,14 @@ namespace
         for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
             g_gearCreatedAt.erase((uint64(botGuid) << 8) | slot);   // guids are pooled
 
+        g_walkAt.erase(botGuid);            // an inherited throttle delays the first step
+        g_positionNoticeAt.erase(botGuid);
+        g_gearCreatedAt.erase(uint64(botGuid) << 8);   // stray slot-0 key from older builds
+
+        // (bot, quest) pairs: the next body may need the "I made a mess" whisper again
+        for (auto itr = g_failedSeen.begin(); itr != g_failedSeen.end();)
+            itr = (itr->first == botGuid) ? g_failedSeen.erase(itr) : std::next(itr);
+
         EraseByBot(g_nudgeAt, botGuid);
         EraseByBot(g_openLatch, botGuid);
         EraseByBot(g_turnInHintAt, botGuid);
@@ -1098,7 +1106,7 @@ namespace
             // until the next full pin sync. It is spoken first and never aged out.
             bool const vital = text.rfind("Finished '", 0) == 0;
 
-            if (queue.size() < 4 && !dup)
+            if (!dup && (vital || queue.size() < 4))
             {
                 if (vital)
                     queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true });
@@ -2170,14 +2178,39 @@ namespace
         // companion wins every window simply because its pass runs first, and with four
         // companions the last one is never heard at all.
         auto chosen = queue.begin();
-        for (auto entry = queue.begin(); entry != queue.end(); ++entry)
-        {
-            uint32 const entryHeard = g_lastWhisperByBot[entry->botGuid];
-            uint32 const chosenHeard = g_lastWhisperByBot[chosen->botGuid];
 
-            if (entryHeard < chosenHeard ||
-                (entryHeard == chosenHeard && entry->queuedAt < chosen->queuedAt))
-                chosen = entry;
+        bool const hasVital = [&queue]()
+        {
+            for (auto const& entry : queue)
+                if (entry.vital)
+                    return true;
+            return false;
+        }();
+
+        if (hasVital)
+        {
+            // The pin-clear jumps the fairness queue: it is the message that keeps the
+            // map honest, and a full burst of chatter must not delay it a window.
+            for (auto entry = queue.begin(); entry != queue.end(); ++entry)
+            {
+                if (entry->vital)
+                {
+                    chosen = entry;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            for (auto entry = queue.begin(); entry != queue.end(); ++entry)
+            {
+                uint32 const entryHeard = g_lastWhisperByBot[entry->botGuid];
+                uint32 const chosenHeard = g_lastWhisperByBot[chosen->botGuid];
+
+                if (entryHeard < chosenHeard ||
+                    (entryHeard == chosenHeard && entry->queuedAt < chosen->queuedAt))
+                    chosen = entry;
+            }
         }
 
         Player* speaker = FindCompanionPlayer(chosen->botGuid);
@@ -3611,7 +3644,20 @@ namespace
         // slot.
         std::vector<std::pair<uint32, uint32>> victims;   // (sell price, item id)
         std::vector<Item*> postHome;                      // white-tier, goes to the owner
-        auto consider = [&wanted, &victims, &postHome](Item* item)
+        std::set<Item*> posted;                           // one pointer, one letter: the three
+                                                          // passes below walk the same slots, and
+                                                          // a white trade good qualifies in all of
+                                                          // them - moving the same Item* twice is
+                                                          // how mail corrupts and worlds crash
+        auto offerPost = [&posted, &postHome](Item* item)
+        {
+            if (postHome.size() >= 12)
+                return;
+
+            if (posted.insert(item).second)
+                postHome.push_back(item);
+        };
+        auto consider = [&wanted, &victims, &postHome, &offerPost](Item* item)
         {
             if (!item)
                 return;
@@ -3635,7 +3681,7 @@ namespace
                 proto->Bonding != BIND_WHEN_PICKED_UP)
             {
                 if (postHome.size() < 12)                // the mail slot limit
-                    postHome.push_back(item);
+                    offerPost(item);
                 return;
             }
 
@@ -3666,7 +3712,7 @@ namespace
         {
             if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             {
-                auto considerVendorJunk = [&wanted, &victims, &postHome, ai](Item* item)
+                auto considerVendorJunk = [&wanted, &victims, &postHome, &offerPost, ai](Item* item)
                 {
                     if (!item)
                         return;
@@ -3683,7 +3729,7 @@ namespace
                         proto->Bonding != BIND_WHEN_PICKED_UP)
                     {
                         if (postHome.size() < 12)
-                            postHome.push_back(item);
+                            offerPost(item);
                         return;
                     }
                     if (proto->Quality >= g_cfg.itemKeepQuality)
@@ -3714,7 +3760,7 @@ namespace
         // the hearthstone, gear or anything a quest needs.
         if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() == 0)
         {
-            auto considerSurplus = [&wanted, &victims, &postHome](Item* item)
+            auto considerSurplus = [&wanted, &victims, &postHome, &offerPost](Item* item)
             {
                 if (!item)
                     return;
@@ -3735,7 +3781,7 @@ namespace
                     proto->Bonding != BIND_WHEN_PICKED_UP)
                 {
                     if (postHome.size() < 12)
-                        postHome.push_back(item);
+                        offerPost(item);
                     return;
                 }
 
@@ -3774,7 +3820,7 @@ namespace
                 MailHome(owner, bot, postHome);
                 lastAt = nowTs;
 
-                SayToOwner(owner, bot,
+                SayToOwner(bot, owner,
                            "I posted what I could not carry home to you - the letter is in your mailbox.");
             }
         }
@@ -4133,6 +4179,11 @@ namespace
 
             return report;
         }
+
+        // The queue drains even on a clean pass: the memo gate is about quest work, not
+        // about speech - on a long run of quiet passes a queued line otherwise waits
+        // minutes for something to change before it may speak.
+        FlushWhisperQueue(owner, bot);
 
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
@@ -7724,6 +7775,11 @@ public:
         g_whisperQueue.erase(ownerGuid);
         g_lastWhisperAt.erase(ownerGuid);
         g_pinnedQuests.erase(ownerGuid);
+
+        // owner+bot keyed: a stale 10-minute window would suppress the "summon it"
+        // notice for the next body this owner binds
+        for (auto itr = g_stuckNoticeAt.begin(); itr != g_stuckNoticeAt.end();)
+            itr = (itr->first >> 32 == ownerGuid) ? g_stuckNoticeAt.erase(itr) : std::next(itr);
 
         auto itr = g_session.find(ownerGuid);
         if (itr == g_session.end())

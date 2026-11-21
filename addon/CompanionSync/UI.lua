@@ -632,6 +632,22 @@ local function CreateWindow()
         self.elapsed = self.elapsed + delta
         if self.elapsed >= POLL_SECONDS then
             self.elapsed = 0
+
+            -- sawServerLine used to be a ratchet: once the module had spoken, the poll
+            -- trusted it forever. If the module died mid-session, the poll went on
+            -- sending dot-commands through /say every 15 seconds - the player audibly
+            -- reciting commands to everyone nearby. Patience is derived from the
+            -- server's own Hello interval, so slow realms do not false-alarm.
+            if G.sawServerLine then
+                local patience = math.max(45, (G.serverInterval or 30) * 2 + 15)
+                if not G.lastServerLineAt or (time() - G.lastServerLineAt) > patience then
+                    G.sawServerLine = false
+                    if frame.notice then
+                        frame.notice:SetText("|cffff6060the module stopped answering - the window pauses until it speaks again|r")
+                    end
+                end
+            end
+
             G.PollState()
         end
     end)

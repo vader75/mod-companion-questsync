@@ -224,7 +224,10 @@ listener:SetScript("OnEvent", function(_, event, message)
     if event == "CHAT_MSG_SYSTEM" then
         -- anything the server says proves the module is loaded and talking; the window uses
         -- this to tell "no companions yet" apart from "no module answering at all"
-        if IsProtocolLine(message) then G.sawServerLine = true end
+        if IsProtocolLine(message) then
+            G.sawServerLine = true
+            G.lastServerLineAt = time()   -- the watchdog's heartbeat
+        end
 
         if not IsProtocolLine(message) then
             -- the module answers button presses with a plain system line ("{} is not one of
@@ -241,6 +244,7 @@ listener:SetScript("OnEvent", function(_, event, message)
                 plain = plain:gsub("^Companion quest sync:?%s*", "")
                 G.lastServerMessage = plain
                 G.sawServerLine = true
+                G.lastServerLineAt = time()
 
                 if G.OnServerMessage then G.OnServerMessage(plain) end
             end

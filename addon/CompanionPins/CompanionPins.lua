@@ -138,6 +138,10 @@ local function SyncPins(payload)
                 if string.lower(pin.quest or "") == key then kept = pin.at end
             end
             local title, companion = SplitCompanion(name)
+            if companion then
+                CompanionPins.companions = CompanionPins.companions or {}
+                CompanionPins.companions[companion] = true
+            end
             table.insert(fresh, {
                 x = tonumber(x), y = tonumber(y),
                 style = (style == "h") and STYLE.handin or STYLE.gather,
@@ -385,7 +389,7 @@ CompanionPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 CompanionPins:RegisterEvent("CHAT_MSG_SYSTEM")
 CompanionPins:RegisterEvent("WORLD_MAP_UPDATE")
 
-CompanionPins:SetScript("OnEvent", function(self, event, arg1)
+CompanionPins:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "PLAYER_LOGIN" then
         LoadDB()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r v" .. CompanionPins.version ..
@@ -429,7 +433,16 @@ CompanionPins:SetScript("OnEvent", function(self, event, arg1)
 
             CompanionPins.syncParts[tonumber(part)] = { text = piece, at = now }
 
-            if #CompanionPins.syncParts == tonumber(total) then
+            -- '#' on a sparse table is undefined in Lua: parts arriving as 1 and 3
+            -- reported a length of 3, the set was declared complete with part 2 still
+            -- missing, and SyncPins then deleted the valid pins the missing part named.
+            -- Completeness is checked explicitly, key by key.
+            local complete = true
+            for i = 1, tonumber(total) do
+                if not CompanionPins.syncParts[i] then complete = false break end
+            end
+
+            if complete then
                 local joined = {}
                 for i = 1, tonumber(total) do
                     joined[i] = CompanionPins.syncParts[i] and CompanionPins.syncParts[i].text or ""
@@ -455,8 +468,18 @@ CompanionPins:SetScript("OnEvent", function(self, event, arg1)
             return
         end
 
+        -- Coordinate whispers create trusted pins, so the sender must be one: any
+        -- player could whisper "meet me at map 99, 42" and plant a marker that
+        -- survives reload and leads you away from a real turn-in. Only a companion
+        -- the server has named in a sync line may speak coordinates.
+        local sender = tostring(arg2 or "")
+        local trusted = false
+        for name in pairs(CompanionPins.companions or {}) do
+            if string.lower(sender) == string.lower(name) then trusted = true break end
+        end
+
         local x, y = ParseCoords(text)
-        if x and y then
+        if x and y and trusted then
             local title, companion = SplitCompanion(ParseQuestName(text) or "companion quest")
             AddPin(x, y, Classify(text), title, companion)
         end
