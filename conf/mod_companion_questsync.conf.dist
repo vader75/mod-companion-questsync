@@ -216,6 +216,14 @@ CompanionQuestSync.FollowThroughTeleport = 1
 #                         "I cannot talk to the quest giver".
 #        Default:     1
 CompanionQuestSync.HandInMode = 1
+#    CompanionQuestSync.HandInDelaySeconds
+#        Description: How long a finished quest stays visible before it rewards itself.
+#                     The gold hand-in pin and the companion standing at the giver are the
+#                     visible half of an instant hand-in - without this pause the quest
+#                     completes and rewards within one tick, and the player only ever sees
+#                     the aftermath. 0 rewards immediately.
+#        Default:     20
+CompanionQuestSync.HandInDelaySeconds = 20
 
 #    CompanionQuestSync.DropFailedBotQuests
 #        Description: Drop a companion quest its own AI failed (a dead escort, a timed

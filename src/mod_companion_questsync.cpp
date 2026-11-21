@@ -93,6 +93,7 @@ namespace
         bool catchUpGroundItems = true;    // finish a ground-object quest the world will not yield
         bool followThroughTeleport = true; // a hearthstone, portal or summon takes the companion too
         uint8 handInMode         = 1;      // 1 = server-side, 0 = through the bot's own AI
+        uint32 handInDelaySeconds = 20;    // a finished quest is visible this long before it rewards
         uint32 catchUpIdleSeconds = 120;   // how long the count must sit still first
         uint32 intervalSeconds  = 20;
         uint32 heartbeatSeconds = 300;  // Debug >= 2 heartbeat window (0 = off)
@@ -262,6 +263,12 @@ namespace
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     /// bot guid -> { has an unfinished ground objective, when that was last checked }
     std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
+
+    /// (bot guid, quest id) -> when the copy first became ready to hand in.
+    ///
+    /// The middle ground between instant and manual: the finished quest is visible as a gold
+    /// pin for HandInDelaySeconds, then rewards itself.
+    std::map<uint64, uint32> g_readyAt;
 
     /// Owners whose teleport has just been seen: the companion is brought along a moment
     /// later, once the client has finished loading the destination.
@@ -465,6 +472,7 @@ namespace
         g_cfg.catchUpGroundItems = sConfigMgr->GetOption<bool>("CompanionQuestSync.CatchUpGroundItems", true);
         g_cfg.followThroughTeleport = sConfigMgr->GetOption<bool>("CompanionQuestSync.FollowThroughTeleport", true);
         g_cfg.handInMode         = sConfigMgr->GetOption<uint8>("CompanionQuestSync.HandInMode", 1);
+        g_cfg.handInDelaySeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HandInDelaySeconds", 20);
         g_cfg.catchUpIdleSeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.CatchUpIdleSeconds", 120);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
         g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
@@ -612,6 +620,10 @@ namespace
         g_passMemo.erase(botGuid);
         g_groundStall.erase(botGuid);
         g_gatherPending.erase(botGuid);
+
+        // guids are pooled: a stale ready-timer would hand the next body's quest in early
+        for (auto itr = g_readyAt.begin(); itr != g_readyAt.end();)
+            itr = (itr->first >> 32 == botGuid) ? g_readyAt.erase(itr) : std::next(itr);
 
         // guids are pooled, so a stale "already announced" pair would silence the next
         // companion that inherits this body
@@ -2831,11 +2843,17 @@ namespace
         {
             uint32 const questId = bot->GetQuestSlotQuestId(slot);
             if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+            {
+                g_readyAt.erase((uint64(botGuid) << 32) | questId);
                 continue;
+            }
 
             Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
             if (!quest || !DescribeMissingItems(bot, quest).empty())
+            {
+                g_readyAt.erase((uint64(botGuid) << 32) | questId);
                 continue;                          // still owes items: cannot reward
+            }
 
             EnderSpot const& spot = FindQuestEnder(questId);
             if (!spot.found || spot.map != bot->GetMapId())
@@ -2848,6 +2866,33 @@ namespace
 
             if (g_cfg.handInMode == 1)
             {
+                uint64 const readyKey = (uint64(botGuid) << 32) | questId;
+
+                // A finished quest is shown first - the gold pin and the companion standing
+                // at the giver - and rewarded after HandInDelaySeconds. 0 rewards the tick
+                // the quest completes.
+                if (g_cfg.handInDelaySeconds > 0)
+                {
+                    uint32& readyAt = g_readyAt[readyKey];
+
+                    if (readyAt == 0)
+                    {
+                        readyAt = nowTs;
+
+                        if (g_cfg.debug >= 1)
+                            LOG_INFO("server.loading",
+                                     "[CompanionQuestSync] {} is ready to hand in '{}' - showing for {}s",
+                                     bot->GetName(), quest->GetTitle(), g_cfg.handInDelaySeconds);
+
+                        continue;
+                    }
+
+                    if (nowTs - readyAt < g_cfg.handInDelaySeconds)
+                        continue;
+
+                    g_readyAt.erase(readyKey);
+                }
+
                 uint32& prodAt = g_rewardProdAt[{ botGuid, questId }];
                 if (prodAt && nowTs - prodAt < Timing::RewardProd)
                     continue;
@@ -2909,6 +2954,7 @@ namespace
                     continue;                      // the core refuses: say nothing twice
 
                 bot->RewardQuest(quest, reward, giver, true);
+                g_readyAt.erase((uint64(botGuid) << 32) | questId);
 
                 if (g_cfg.debug >= 1)
                     LOG_INFO("server.loading",
