@@ -180,6 +180,12 @@ local function NewPin(index)
     return f
 end
 
+-- Forward declarations: Redraw (below) draws the legend, and BuildLegend is defined
+-- after it. Without the forward declaration Redraw resolved the name to the global -
+-- nil at call time - and every redraw since the redesign died on it, which is why
+-- pins stopped appearing no matter how correct their data was.
+local BuildLegend
+
 function CompanionPins:Redraw()
     if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
 
