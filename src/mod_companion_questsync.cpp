@@ -4408,11 +4408,35 @@ namespace
                 if (std::find(ownerQuests.begin(), ownerQuests.end(), questId) != ownerQuests.end())
                     continue;
 
-                // Already handed in by the owner: the companion is catching up, not
-                // carrying a stray copy. Leave it alone - that is the whole point of
-                // the module.
+                // Already handed in by the owner. A copy the companion can still
+                // progress by itself (it owes items) is catching up - leave it alone,
+                // that is the whole point of the module. But a copy with nothing to
+                // gather has no credit it can earn on its own: the owner's COMPLETE
+                // window it could have synced from is transient, and a quest the
+                // player finishes and turns in inside one pass (a feast-table
+                // minigame, an instant hand-in) leaves the companion standing at
+                // INCOMPLETE forever, narrating it every cycle. The durable truth is
+                // the owner's reward; with the owed guard showing nothing skipped,
+                // completing the copy now is honest - the work was done together at
+                // the same table, and the hand-in flow takes it from here.
                 if (owner->IsQuestRewarded(questId))
+                {
+                    Quest const* rewarded = sObjectMgr->GetQuestTemplate(questId);
+                    if (!rewarded || !DescribeMissingItems(bot, rewarded).empty())
+                        continue;      // still gathering its own copy: catching up
+
+                    if (bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
+                    {
+                        bot->CompleteQuest(questId);
+                        ++report.completed;
+
+                        if (g_cfg.debug >= 1)
+                            LOG_INFO("server.loading",
+                                     "[CompanionQuestSync] {} = '{}' ({}) completed alongside the owner's reward",
+                                     bot->GetName(), rewarded->GetTitle(), questId);
+                    }
                     continue;
+                }
 
                 Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
                 if (!quest)
