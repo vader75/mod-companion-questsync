@@ -205,6 +205,20 @@ listener:RegisterEvent("CHAT_MSG_WHISPER")
 listener:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 listener:RegisterEvent("CHAT_MSG_SYSTEM")
 
+    -- One timestamp, one derived truth. sawServerLine was a stored flag that could go
+    -- stale in both directions: a ratchet that stayed true after the module died, and a
+    -- latch that said dead across a world restart until a line arrived. The module is
+    -- "answering" iff a line arrived inside a patience window derived from the module's
+    -- own Hello interval - computed, never stored, self-healing by construction.
+    function G.ServerAlive()
+        if not G.lastServerLineAt then
+            return false
+        end
+
+        local patience = math.max(45, (G.serverInterval or 30) * 2 + 15)
+        return (time() - G.lastServerLineAt) <= patience
+    end
+
 -- Payloads arrive as system messages prefixed CSYNC, not as whispers: a whisper needs a
 -- companion to speak it, and the roster matters most when nobody is out. They are hidden
 -- from the chat frame here so the player only ever sees the window.
@@ -244,8 +258,7 @@ listener:SetScript("OnEvent", function(_, event, message)
         -- anything the server says proves the module is loaded and talking; the window uses
         -- this to tell "no companions yet" apart from "no module answering at all"
         if IsProtocolLine(message) then
-            G.sawServerLine = true
-            G.lastServerLineAt = time()   -- the watchdog's heartbeat
+            G.lastServerLineAt = time()   -- the only stored truth: when the server last spoke
         end
 
         if not IsProtocolLine(message) then
@@ -262,7 +275,6 @@ listener:SetScript("OnEvent", function(_, event, message)
             if plain:find("Companion quest sync", 1, true) then
                 plain = plain:gsub("^Companion quest sync:?%s*", "")
                 G.lastServerMessage = plain
-                G.sawServerLine = true
                 G.lastServerLineAt = time()
 
                 if G.OnServerMessage then G.OnServerMessage(plain) end
@@ -325,8 +337,8 @@ function G.Run(command)
 
     -- A dot-command rides chat and is intercepted by the server. With the module absent
     -- there is nothing to intercept it, and the text would simply be said aloud to everyone
-    -- nearby - so stay quiet once the module has been proved dead, and say so in the panel.
-    if G.sawServerLine == false then
+    -- nearby - so stay quiet while the module has not spoken inside its patience window.
+    if not G.ServerAlive() then
         if G.OnServerMessage then
             G.OnServerMessage("mod-companion-questsync is not answering - is it enabled?")
         end

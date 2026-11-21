@@ -28,8 +28,20 @@ local function make_stub()
         __tostring = function() return "stub" end,
     }
     setmetatable(stub, mt)
+    stub.SetScript = function(self, kind, fn)
+        _FRAME_SCRIPTS[tostring(self) .. ':' .. tostring(kind)] = fn
+        return stub
+    end
+    stub.GetScript = function(self, kind)
+        return _FRAME_SCRIPTS[tostring(self) .. ':' .. tostring(kind)]
+    end
+    stub.UnregisterEvent = function() end
+    stub.RegisterEvent = function() end
+    stub.IsEventRegistered = function() return true end
     return stub
 end
+
+_FRAME_SCRIPTS = {}
 
 unpack = table.unpack
 UIParent = make_stub()
@@ -52,6 +64,14 @@ UIDropDownMenu_SetText = function() end
 CreateFrame = function(kind, name, parent, template)
     local frame = make_stub()
     if name then _G[name] = frame end   -- the client publishes named frames as globals
+    return frame
+end
+
+_FRAME_SCRIPTS = {}
+local _origMakeStub = make_stub
+make_stub = function()
+    local frame = _origMakeStub()
+    frame.SetScript = function(self, kind, fn) _FRAME_SCRIPTS[tostring(kind)] = fn; return frame end
     return frame
 end
 GetLocale = function() return "enUS" end

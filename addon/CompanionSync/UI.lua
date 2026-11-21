@@ -510,7 +510,7 @@ function G.Refresh()
     if frame.count then
         -- The header subtitle was created and never written - dead space that looked like
         -- missing state. It now answers the first question a returning player has.
-        local state = G.sawServerLine and "|cff20ff20server answering|r" or "|cffff6060server not answering|r"
+        local state = G.ServerAlive() and "|cff20ff20server answering|r" or "|cffff6060server not answering|r"
         if G.releasing and next(G.releasing) then
             state = "|cffffc94dworking - releasing...|r"
         end
@@ -663,18 +663,19 @@ local function CreateWindow()
         if self.elapsed >= POLL_SECONDS then
             self.elapsed = 0
 
-            -- sawServerLine used to be a ratchet: once the module had spoken, the poll
-            -- trusted it forever. If the module died mid-session, the poll went on
-            -- sending dot-commands through /say every 15 seconds - the player audibly
-            -- reciting commands to everyone nearby. Patience is derived from the
-            -- server's own Hello interval, so slow realms do not false-alarm.
-            if G.sawServerLine then
-                local patience = math.max(45, (G.serverInterval or 30) * 2 + 15)
-                if not G.lastServerLineAt or (time() - G.lastServerLineAt) > patience then
-                    G.sawServerLine = false
-                    if frame.notice then
-                        frame.notice:SetText("|cffff6060the module stopped answering - the window pauses until it speaks again|r")
-                    end
+            -- The poll is honest by construction now: G.ServerAlive() is derived from
+            -- the last line's age, so a dead module starves the poll without any
+            -- bookkeeping here, and one live line brings it straight back. The banner
+            -- that says so clears itself on revival - a stale "not answering" over a
+            -- live roster read as broken.
+            if frame.notice then
+                if not G.ServerAlive() then
+                    frame.notice:SetText("|cffff6060the module is not answering - the window resumes when it speaks again|r")
+                    frame.deadNotice = true
+                elseif frame.deadNotice then
+                    frame.notice:SetText("")
+                    frame.notice:Hide()
+                    frame.deadNotice = nil
                 end
             end
 
@@ -992,7 +993,7 @@ probe:SetScript("OnEvent", function(self)
 
     local waited = 0
     self:SetScript("OnUpdate", function(frame, delta)
-        if G.sawServerLine then
+        if G.ServerAlive() then
             frame:SetScript("OnUpdate", nil)
             return
         end
@@ -1006,7 +1007,8 @@ probe:SetScript("OnEvent", function(self)
 
         frame:SetScript("OnUpdate", nil)
 
-        G.sawServerLine = false   -- proves absence, so G.Run stays quiet from here on
+        -- no timestamp written: the absence is proven by there being nothing to be
+        -- alive from, which is exactly what G.ServerAlive() already reports
         G.OnServerMessage("the module is not answering - is mod-companion-questsync enabled?")
 
         DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: the server is not answering - "
