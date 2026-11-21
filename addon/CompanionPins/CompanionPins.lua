@@ -297,6 +297,37 @@ CompanionPins:SetScript("OnEvent", function(self, event, arg1, arg2)
             text = string.sub(text, 7)
         end
 
+        -- "Finished 'X' - that pin can go." is spoken the moment a companion hands a
+        -- quest in, which can be most of a payload window ahead of the next "Pin sync".
+        -- Remove that quest's marker on the spot: the next payload is still the whole
+        -- truth and re-syncs everything, this just refuses to show a cleared pin for a
+        -- minute. The pin's title is the server-truncated form, so match it as a
+        -- prefix of the full quest name the notice carries.
+        local finished = string.match(text, "Finished%s+'(.+)'%s+-%s+that pin can go")
+        if finished then
+            local done = string.lower(finished)
+            local before = #self.pins
+            local kept = {}
+            for _, pin in ipairs(self.pins) do
+                local q = string.gsub(string.lower(pin.quest or ""), "%s*%.%.$", "")
+                if q == "" or string.find(done, q, 1, true) then
+                    kept[#kept + 1] = pin
+                end
+            end
+            if #kept < before then
+                self.pins = kept
+                SaveDB()
+                local ok, err = pcall(function() self:Redraw() end)
+                if not ok then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffff6060CompanionPins|r draw failed: " .. tostring(err))
+                end
+                if self.debug then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r cleared a finished quest's pin: " .. finished)
+                end
+            end
+            return
+        end
+
         -- "Pin sync 1/3: ..." arrives in parts when the companion carries more quests
         -- than one whisper can hold. Hold them until the set is complete, then rebuild
         -- once - applying a part on its own would wipe the pins named in the others.
