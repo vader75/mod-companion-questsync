@@ -38,8 +38,8 @@
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
+#include <fstream>
 
-extern DBCStorage<WorldMapAreaEntry> sWorldMapAreaStore;   // defined in DBCStores.cpp - the pin path needs WorldMapArea bounds
 #include "GossipDef.h"   // PlayerTalkClass::SendQuestGiverStatus
 #include "Group.h"
 #include "Item.h"
@@ -1419,36 +1419,116 @@ namespace
     /// meant a quest's pin changed identity (and visibility on other maps) with every
     /// walk. The quest's area is the authority: the same quest, the same pin, the same
     /// zone name, wherever the body is.
-    /// The zone that owns a world position, from WorldMapArea bounds - data, not terrain.
+    /// Our own WorldMapArea table, parsed straight from the .dbc file.
     ///
-    /// ZoneAt walks terrain, and on this repack it has been quietly wrong: Elwynn POI
-    /// points reported as Tkashi Ruins, a Dun Morogh dam turning up where neither is.
-    /// Every pin that trusted the probe inherited the lie. The DBC's own bounds cannot
-    /// lie about which map rectangle a point sits in; the smallest-area match wins, so
-    /// a sub-zone beats its parent when both contain the point.
+    /// Two reasons this exists instead of anything the core offers: the terrain probe
+    /// (ZoneAt) has been quietly wrong on this repack - Elwynn POI points reporting as
+    /// Tkashi Ruins, a Dun Morogh dam where neither is - and the core's
+    /// WorldMapAreaEntry struct does not match its own load format here (the format
+    /// string loads column 2 as a string where the struct expects an int), so every
+    /// float bound read through it was shifted, and its store is indexed by map_id
+    /// besides. The raw file has no such drift.
+    struct WorldMapAreaRow
+    {
+        uint32 mapId;
+        int32 areaId;
+        float y1, y2, x1, x2;
+    };
+
+    std::vector<WorldMapAreaRow> g_worldMapAreas;
+
+    void LoadWorldMapAreas()
+    {
+        g_worldMapAreas.clear();
+
+        std::string const path = sConfigMgr->GetOption<std::string>("DataDir", "data") + "/dbc/WorldMapArea.dbc";
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+        {
+            LOG_ERROR("server.loading", "[CompanionQuestSync] cannot open {} - pin zones fall back to the terrain probe", path);
+            return;
+        }
+
+        uint32 header[5] = {};
+        in.read(reinterpret_cast<char*>(header), sizeof(header));
+
+        uint32 const rows = header[1];
+        uint32 const fieldCount = header[2];
+        uint32 const rowSize = header[3];
+
+        if (fieldCount < 8 || rowSize < fieldCount * 4)
+        {
+            LOG_ERROR("server.loading", "[CompanionQuestSync] unexpected WorldMapArea.dbc shape ({} rows, {} fields)", rows, fieldCount);
+            return;
+        }
+
+        for (uint32 r = 0; r < rows; ++r)
+        {
+            char row[512] = {};
+            in.read(row, rowSize);
+
+            int32 const* f = reinterpret_cast<int32 const*>(row);
+            g_worldMapAreas.push_back({ uint32(f[1]), f[2],
+                                        reinterpret_cast<float const&>(f[4]), reinterpret_cast<float const&>(f[5]),
+                                        reinterpret_cast<float const&>(f[6]), reinterpret_cast<float const&>(f[7]) });
+        }
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] loaded {} WorldMapArea bound(s) for pin zones", uint32(g_worldMapAreas.size()));
+    }
+
+    /// The zone that owns a world position, from WorldMapArea bounds - data, not terrain.
+    /// The smallest-area match wins, so a sub-zone beats its parent when both contain
+    /// the point. Bounds are stored high-low on some rows; normalise both axes.
     uint32 WorldMapZoneAt(uint32 mapId, float x, float y)
     {
         uint32 best = 0;
         float bestSize = 0.0f;
 
-        for (uint32 i = 1; i < sWorldMapAreaStore.GetNumRows(); ++i)
+        for (WorldMapAreaRow const& row : g_worldMapAreas)
         {
-            WorldMapAreaEntry const* entry = sWorldMapAreaStore.LookupEntry(i);
-            if (!entry || entry->map_id != mapId)
+            if (row.mapId != mapId)
                 continue;
 
-            if (x < entry->x1 || x > entry->x2 || y < entry->y1 || y > entry->y2)
+            float const xlo = std::min(row.x1, row.x2);
+            float const xhi = std::max(row.x1, row.x2);
+            float const ylo = std::min(row.y1, row.y2);
+            float const yhi = std::max(row.y1, row.y2);
+
+            if (x < xlo || x > xhi || y < ylo || y > yhi)
                 continue;
 
-            float const size = (entry->x2 - entry->x1) * (entry->y2 - entry->y1);
+            float const size = (xhi - xlo) * (yhi - ylo);
             if (!best || size < bestSize)
             {
-                best = entry->area_id;
+                best = uint32(row.areaId);
                 bestSize = size;
             }
         }
 
         return best;
+    }
+
+    /// World -> client map percentages, from the same bounds row. This mirrors the
+    /// core's Map2ZoneCoordinates math but reads OUR table - the core's typed struct
+    /// does not match its load format on this repack, and its store is indexed by
+    /// map_id, so an area id cannot be looked up through it at all.
+    bool WmaConvert(float& x, float& y, int32 areaId)
+    {
+        for (WorldMapAreaRow const& row : g_worldMapAreas)
+        {
+            if (row.areaId != areaId)
+                continue;
+
+            float px = (x - row.x1) / ((row.x2 - row.x1) / 100.0f);
+            float py = (y - row.y1) / ((row.y2 - row.y1) / 100.0f);
+            std::swap(px, py);                       // client axes are swapped
+
+            x = px;
+            y = py;
+            return true;
+        }
+
+        return false;
     }
 
     /// content-keyed, bounded by the quests that exist (same policy as g_poiCache)
@@ -1483,7 +1563,8 @@ namespace
             if (!zone)
                 continue;
 
-            Map2ZoneCoordinates(x, y, zone);
+            if (!WmaConvert(x, y, int32(zone)))
+                continue;
 
             if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
                 continue;
@@ -4465,11 +4546,15 @@ namespace
                     if (spot.found && spot.map == bot->GetMapId())
                     {
                         uint32 const zone = WorldMapZoneAt(spot.map, spot.x, spot.y);
-                        uint32 const useZone = zone ? zone : spot.zone;
+                        int32 const useZone = int32(zone ? zone : spot.zone);
 
-                        coords = MapCoords(spot.x, spot.y, useZone);
-                        zoneName = ZoneName(useZone);
-                        style = 'h';
+                        float gx = spot.x, gy = spot.y;
+                        if (WmaConvert(gx, gy, useZone) && gx >= 0.0f && gx <= 100.0f && gy >= 0.0f && gy <= 100.0f)
+                        {
+                            coords = "map " + std::to_string(uint32(gx)) + ", " + std::to_string(uint32(gy));
+                            zoneName = ZoneName(uint32(useZone));
+                            style = 'h';
+                        }
                     }
                 }
                 else if (!owner->IsQuestRewarded(questId))
@@ -6422,6 +6507,7 @@ private:
             return;
 
         g_tableReady = CheckBindingTable();
+        LoadWorldMapAreas();
 
         if (g_tableReady)
         {
