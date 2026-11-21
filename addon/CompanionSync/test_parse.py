@@ -1,7 +1,7 @@
 """The Comp sync grammar, tested without a client.
 
 This mirrors the parser in Core.lua line for line: split the payload on '|', then each
-entry on ',' into name,class,level,quests,flags,free. It cannot catch a Lua typo - run
+entry on ',' into name,class,race,level,quests,flags,free. It cannot catch a Lua typo - run
 `/csync test` in game for that - but it does catch a change in the payload that would break
 the window, which is the failure that matters after a server-side edit.
 
@@ -99,13 +99,19 @@ def main() -> int:
         failures += 1
         print("FAIL chunked join lost an entry")
 
+    # the death flag: a dead companion parses and keeps its flag visible
+    dead = parse_payload("Wounded,5,1,9,2,ogd,16")
+    if len(dead) != 1 or "d" not in dead[0].get("flags", ""):
+        failures += 1
+        print(f"FAIL dead flag lost: {dead}")
+
     # ordering: online first, then alphabetical
     ordered = [r["name"] for r in parse_payload("Zed,1,1,1,0,-,0|Amy,1,1,1,0,o,0")]
     if ordered != ["Amy", "Zed"]:
         failures += 1
         print(f"FAIL ordering was {ordered}")
 
-    total = len(CASES) + 4
+    total = len(CASES) + 5
     print(f"{total - failures}/{total} payload cases passed")
     return 1 if failures else 0
 

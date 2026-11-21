@@ -334,6 +334,7 @@ namespace
     std::map<std::pair<uint32, uint32>, std::string> g_poiCache;      // (zone, quest) -> "map X, Y"
     std::map<std::pair<uint32, uint32>, uint32> g_extraSince;         // (bot, quest) -> first seen extra
     std::set<std::pair<uint32, uint32>> g_failedSeen;                 // (bot, quest) already reported failed
+    std::set<uint32> g_deadNoticeAt;                      // bots whose death was announced, one per death
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -933,6 +934,16 @@ namespace
         {
             uint32 const ownerGuid = itr->first;
 
+            // The one-time window used to vanish while a companion was mid-fight: it was
+            // skipped for combat, the entry was erased anyway, and the wipe at the hearth
+            // left it behind permanently. Sixty seconds of retry covers a wipe or an
+            // escort fight; after that the follow has genuinely missed its moment.
+            if (now - itr->second > 60)
+            {
+                itr = g_pendingFollow.erase(itr);
+                continue;
+            }
+
             if (now - itr->second < kFollowDelaySeconds)
             {
                 ++itr;
@@ -948,11 +959,29 @@ namespace
                 continue;
             }
 
+            // The owner releasing to a ghost used to drag the living companion to the
+            // graveyard, where it stood abandoned for the whole corpse run. Hold the
+            // pending follow instead - the resurrect hook re-arms it - and give up only
+            // if the owner stays dead for three minutes.
+            if (!owner->IsAlive())
+            {
+                if (now - itr->second > 180)
+                    itr = g_pendingFollow.erase(itr);
+                else
+                    ++itr;
+                continue;
+            }
+
+            bool anySkipped = false;
+
             for (uint32 const botGuid : bots)
             {
                 Player* bot = FindCompanionPlayer(botGuid);
                 if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+                {
+                    anySkipped = true;   // held for the retry window, not abandoned
                     continue;
+                }
 
                 bool const elsewhere = bot->GetMapId() != owner->GetMapId();
                 float const away = elsewhere ? 999999.0f : bot->GetDistance(owner);
@@ -978,7 +1007,12 @@ namespace
                          elsewhere ? 0 : uint32(away));
             }
 
-            itr = g_pendingFollow.erase(itr);
+            // The owner's own death path holds its entry explicitly; a combat-skipped
+            // companion holds it for the retry window instead of losing it forever.
+            if (!anySkipped)
+                itr = g_pendingFollow.erase(itr);
+            else
+                ++itr;
         }
     }
 
@@ -3998,6 +4032,18 @@ namespace
             return report;
         }
 
+        // Death used to be silent: the player found the corpse only by looking. Say it
+        // once per death - the set latches at the first pass of the death and clears
+        // when the body breathes again - never once per 30 s.
+        if (!bot->IsAlive())
+        {
+            if (g_deadNoticeAt.insert(botGuid).second)
+                SayToOwner(bot, owner, "I have fallen where I stood - I will need a revive, "
+                                       "or summon me once you are somewhere safe.", 0);
+        }
+        else
+            g_deadNoticeAt.erase(botGuid);
+
         // Combat defers only the LEVEL change. Quest copying used to be blocked
         // here outright, which is why a companion refused to pick up a quest
         // mid-fight and the owner had to share it by hand - questing is mostly
@@ -5136,6 +5182,10 @@ namespace
 
                 if (OwnerHasQuestCompanionLacks(owner, bot))
                     flags += "b";
+
+                // Dead or ghost: the card in the window must not read like a healthy one.
+                if (!bot->IsAlive())
+                    flags += "d";
             }
             else
             {
@@ -7148,6 +7198,43 @@ public:
         std::string const want = TrimArg(args);
         std::vector<uint32> targets;
 
+        // ReportPosition advises "Summon me" to a companion left in another zone, and the
+        // old command answered "already with you" - the one refusal that contradicted the
+        // module's own advice and left the companion stranded with no remedy. An in-world
+        // companion beyond 120 yd is RECALLED; only a body at your side earns that phrase.
+        auto recall = [player](Player* bot) -> std::string
+        {
+            if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+                return "dead or absent";
+
+            if (bot->IsInCombat())
+                return "fighting";
+
+            if (MapEntry const* entry = sMapStore.LookupEntry(player->GetMapId());
+                entry && (entry->IsDungeon() || entry->IsRaid()))
+                return "you are inside an instanced dungeon";
+
+            if (bot->GetMapId() == player->GetMapId() && bot->GetDistance(player) <= 120.0f)
+                return "";   // genuinely beside the player
+
+            float x = player->GetPositionX() + 2.0f;
+            float y = player->GetPositionY();
+            float z = player->GetPositionZ();
+            bot->UpdateGroundPositionZ(x, y, z);
+            bot->StopMoving();
+
+            if (bot->GetMapId() != player->GetMapId())
+                bot->TeleportTo(player->GetMapId(), x, y, z, player->GetOrientation());
+            else
+                bot->NearTeleportTo(x, y, z, player->GetOrientation());
+
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} recalled to {} - was {} yd away",
+                     bot->GetName(), player->GetName(),
+                     bot->GetMapId() == player->GetMapId() ? uint32(bot->GetDistance(player)) : 0);
+
+            return "";
+        };
+
         if (want.empty())
         {
             for (uint32 const botGuid : bound)
@@ -7159,7 +7246,31 @@ public:
 
             if (targets.empty())
             {
-                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: all {} are already with you.", uint32(bound.size()));
+                uint32 recalled = 0;
+                std::string blocked;
+
+                for (uint32 const botGuid : bound)
+                {
+                    if (Player* bot = FindCompanionPlayer(botGuid))
+                    {
+                        std::string const why = recall(bot);
+                        if (why.empty())
+                            ++recalled;
+                        else if (blocked.empty())
+                            blocked = why;
+                    }
+                }
+
+                if (recalled)
+                {
+                    handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} companion(s) recalled to your side.",
+                                             recalled);
+                    return true;
+                }
+
+                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: all {} are already with you{}.",
+                                         uint32(bound.size()),
+                                         blocked.empty() ? std::string(".") : " (one could not be moved: " + blocked + ")");
                 return true;
             }
         }
@@ -7176,7 +7287,28 @@ public:
             Player* bot = FindCompanionPlayer(botGuid);
             if (bot && bot->IsInWorld())
             {
-                handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} is already with you.", bot->GetName());
+                std::string const why = recall(bot);
+                if (why.empty())
+                {
+                    handler->PSendSysMessage("|cff20ff20Companion quest sync|r: |cffffff00{}|r recalled to your side.",
+                                             bot->GetName());
+                    SayToOwner(bot, player, "I am here - recalled to your side.");
+                }
+                else if (why == "fighting")
+                {
+                    handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is fighting - I will not pull it "
+                                             "out of combat. Try again once it is safe.", bot->GetName());
+                }
+                else if (why == "dead or absent")
+                {
+                    handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is dead - revive it, or release and "
+                                             "re-summon once you are safe.", bot->GetName());
+                }
+                else
+                {
+                    handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} cannot be recalled: {}.",
+                                             bot->GetName(), why);
+                }
                 return true;
             }
 
@@ -7690,6 +7822,17 @@ public:
         if (MapEntry const* entry = sMapStore.LookupEntry(mapid); entry && entry->IsBattlegroundOrArena())
             return true;
 
+        // Nor into a dungeon or raid: TeleportTo on an instancable map resolves to the
+        // BOT's own instance copy, so the companion "teleports" and never appears at the
+        // player's side. Better visibly left behind than invisibly lost.
+        if (MapEntry const* entry = sMapStore.LookupEntry(mapid); entry && (entry->IsDungeon() || entry->IsRaid()))
+            return true;
+
+        // A ghost's teleport is a corpse run; the living companion stays where it is and
+        // the resurrect hook re-arms the follow when the owner is themselves again.
+        if (!player->IsAlive())
+            return true;
+
         std::vector<uint32> bots;
         if (!FindCompanions(player->GetGUID().GetCounter(), bots))
             return true;
@@ -7832,6 +7975,67 @@ public:
     /// a grace period and only ticks while the player is in world - drop a quest and log
     /// out and the companion kept gathering for nothing. This runs in the same call the
     /// client made, so the copy goes at the same moment.
+    void OnPlayerResurrect(Player* player, float /*restore_percent*/, bool& /*applySickness*/) override
+    {
+        if (!g_cfg.enable || !g_cfg.followThroughTeleport || !player || !player->GetSession())
+            return;
+
+        if (player->GetSession()->IsBot())
+            return;
+
+        // After a spirit heal the pair may start the run apart: re-arm the follow so the
+        // companion closes the gap (or crosses back from wherever the corpse run left it).
+        std::vector<uint32> bots;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+            return;
+
+        g_pendingFollow[player->GetGUID().GetCounter()] = uint32(time(nullptr));
+    }
+
+    void OnPlayerUpdateZone(Player* player, uint32 /*newZone*/, uint32 /*newArea*/) override
+    {
+        if (!g_cfg.enable || !g_cfg.followThroughTeleport || !player || !player->GetSession())
+            return;
+
+        if (player->GetSession()->IsBot())
+            return;
+
+        // A cross-continent flight is the one routine trip the companion never made:
+        // movement is not a teleport, so it stayed behind and whispered "I have lost
+        // you" every three minutes. Arm the follow when the flight ENDS - the zone
+        // change that lands - never mid-flight, which would drop the companion onto a
+        // moving griffon. Zone changes while grounded are ordinary walking; the
+        // executor's own distance gate (120 yd) keeps them harmless.
+        if (player->IsInFlight() || player->IsInCombat() || !player->IsAlive())
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+            return;
+
+        g_pendingFollow[player->GetGUID().GetCounter()] = uint32(time(nullptr));
+    }
+
+    void OnPlayerMapChanged(Player* player) override
+    {
+        if (!g_cfg.enable || !g_cfg.followThroughTeleport || !player || !player->GetSession())
+            return;
+
+        if (player->GetSession()->IsBot())
+            return;
+
+        // Map changes: continent switches and ports. The BeforeTeleport hook covers
+        // casts and items; this catches the paths those miss.
+        if (player->IsInFlight() || player->IsInCombat() || !player->IsAlive())
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+            return;
+
+        g_pendingFollow[player->GetGUID().GetCounter()] = uint32(time(nullptr));
+    }
+
     void OnPlayerQuestAbandon(Player* player, uint32 questId) override
     {
         if (!g_cfg.enable || !g_cfg.dropExtraBotQuests || !g_tableReady || !questId)
@@ -7845,33 +8049,48 @@ public:
         if (player->GetQuestStatus(questId) != QUEST_STATUS_NONE)
             return;
 
-        SyncReport report;
-        Player* bot = ResolveCompanion(player, report);
-        if (!bot)
-            return;
-
-        bool holds = false;
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE && !holds; ++slot)
-            holds = bot->GetQuestSlotQuestId(slot) == questId;
-
-        if (!holds)
-            return;
-
-        if (bot->IsQuestRewarded(questId))
-            return;
-
         Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
 
-        bot->RemoveActiveQuest(questId, false);
-        g_extraSince.erase({ bot->GetGUID().GetCounter(), questId });
+        // Every bound copy drops, not just the first: with four companions, mirroring the
+        // abandon on companion 1 alone left the other three gathering for a quest the
+        // player had thrown away until the sweep's grace period expired.
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+            return;
 
-        if (quest)
+        for (uint32 const botGuid : bound)
         {
-            SayToOwner(bot, player, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
-                                  "it made no sense to keep gathering for it on my own.", 120);
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+                continue;
 
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} dropped '{}' ({}) - {} abandoned it",
-                     bot->GetName(), quest->GetTitle(), questId, player->GetName());
+            if (bot->IsQuestRewarded(questId))
+                continue;
+
+            uint16 slot = UINT16_MAX;
+            for (uint16 s = 0; s < MAX_QUEST_LOG_SIZE; ++s)
+                if (bot->GetQuestSlotQuestId(s) == questId) { slot = s; break; }
+
+            if (slot == UINT16_MAX)
+                continue;
+
+            // The full drop sequence, as the sweep does it: the instant hook used to
+            // RemoveActiveQuest alone, leaving the quest's source item orphaned in the
+            // bags - later mailed home as "loot" for a quest nobody holds.
+            bot->SetQuestSlot(slot, 0);
+            bot->TakeQuestSourceItem(questId, false);
+            bot->RemoveActiveQuest(questId, false);
+            g_extraSince.erase({ botGuid, questId });
+            g_readyAt.erase((uint64(botGuid) << 32) | questId);
+
+            if (quest)
+            {
+                SayToOwner(bot, player, "You let '" + quest->GetTitle() + "' go, so I laid mine down too - "
+                                      "it made no sense to keep gathering for it on my own.", 120);
+
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} dropped '{}' ({}) - {} abandoned it",
+                         bot->GetName(), quest->GetTitle(), questId, player->GetName());
+            }
         }
     }
 
@@ -7884,35 +8103,45 @@ public:
         if (!player->GetSession() || player->GetSession()->IsBot())
             return;
 
-        SyncReport report;
-        Player* bot = ResolveCompanion(player, report);
-        if (!bot)
-            return;
-
         // Bag contents are the thing this hook is about to change; a value cached by the
         // last sweep would describe the state before the accept.
         g_missingCache.clear();
 
-        uint32 const questId = quest->GetQuestId();
-        QuestStatus const before = bot->GetQuestStatus(questId);
-
-        SyncQuestToBot(player, bot, quest, nullptr);
-
-        bool const landed = before == QUEST_STATUS_NONE && bot->GetQuestStatus(questId) != QUEST_STATUS_NONE;
-        if (!landed)
+        // Every bound copy takes the quest at once, not just the first: mirroring onto
+        // companion 1 alone left the others waiting a full interval, which reads as
+        // "the others are broken" when the player can see them all standing there.
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
             return;
 
-        // Count it: this path is how most quests actually arrive, so leaving it
-        // out of the window totals made the heartbeat under-report the truth.
-        ++g_hbAdded;
-        ++g_hbHookAdds[player->GetGUID().GetCounter()];
-        ++g_session[player->GetGUID().GetCounter()].onAccept;
+        uint32 const questId = quest->GetQuestId();
 
-        FlushNotices(player, bot);
+        for (uint32 const botGuid : bound)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+                continue;
 
-        if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] accept hook: {} picked up '{}' ({}) immediately",
-                     bot->GetName(), quest->GetTitle(), questId);
+            QuestStatus const before = bot->GetQuestStatus(questId);
+
+            SyncQuestToBot(player, bot, quest, nullptr);
+
+            bool const landed = before == QUEST_STATUS_NONE && bot->GetQuestStatus(questId) != QUEST_STATUS_NONE;
+            if (!landed)
+                continue;
+
+            // Count it: this path is how most quests actually arrive, so leaving it
+            // out of the window totals made the heartbeat under-report the truth.
+            ++g_hbAdded;
+            ++g_hbHookAdds[player->GetGUID().GetCounter()];
+            ++g_session[player->GetGUID().GetCounter()].onAccept;
+
+            FlushNotices(player, bot);
+
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] accept hook: {} picked up '{}' ({}) immediately",
+                         bot->GetName(), quest->GetTitle(), questId);
+        }
     }
 };
 

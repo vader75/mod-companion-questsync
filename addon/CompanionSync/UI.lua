@@ -115,6 +115,12 @@ local function StatusText(companion)
         return COL_WARN .. "releasing - wiping and returning it to the pool..." .. COL_RESET
     end
 
+    -- a dead companion used to read like a healthy one: same card, same buttons, the
+    -- truth discoverable only from a refusal line. The flag dominates everything else.
+    if G.HasFlag(companion, "d") then
+        return COL_BAD .. "dead - revive it, or release and re-summon once you are safe" .. COL_RESET
+    end
+
     if not G.HasFlag(companion, "o") then
         return COL_WARN .. "not in the world - Summon brings it back" .. COL_RESET
     end
