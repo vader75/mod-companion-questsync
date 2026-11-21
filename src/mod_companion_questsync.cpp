@@ -8287,6 +8287,61 @@ public:
 /// real player enters the world, and a module the player can actually use should
 /// say so too. Bots are skipped; the message respects the same Enable switch and
 /// stays quiet if the companion table is missing (nothing could sync anyway).
+    /// The owner is interacting with an NPC - accepting, gossiping, buying bread.
+    /// Pull each bound body that is within a short walk but not beside the owner to the
+    /// owner's side. The companions' own AI can only process a quest menu within
+    /// interaction distance of the target, and it says "Cannot talk to quest giver" on
+    /// every attempt from a body-length away - including for an innkeeper the owner
+    /// merely clicked, whose menu is empty. Tightening the party removes the distance
+    /// from the equation entirely; the step is throttled and never fights combat.
+    void PullPartyClose(Player* player)
+    {
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+            return;
+
+        uint32 const nowTs = static_cast<uint32>(time(nullptr));
+        for (uint32 const botGuid : bound)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+                continue;
+
+            float const toOwner = bot->GetDistance(player);
+            if (toOwner <= 4.0f || toOwner > 40.0f)
+                continue;
+
+            uint32& stepAt = g_walkAt[bot->GetGUID().GetCounter()];
+            if (stepAt && nowTs - stepAt < Timing::WalkStep)
+                continue;
+
+            stepAt = nowTs;
+            StepBesideOwner(player, bot, player->GetPositionX(), player->GetPositionY());
+        }
+    }
+
+class CompanionQuestSyncCreatureScript : public AllCreatureScript
+{
+public:
+    CompanionQuestSyncCreatureScript() : AllCreatureScript("CompanionQuestSyncCreatureScript") {}
+
+    /// The owner clicked an NPC - an innkeeper, a vendor, a banker, anything. The
+    /// companions' AI mirrors the owner's target and tries to process it as a quest menu,
+    /// and its distance gate says "Cannot talk to quest giver" while a body stands a few
+    /// yards off - even for an NPC that has no quests at all. The gossip moment is the
+    /// signal: tighten the party around the owner and the distance never matters.
+    /// Returning false leaves the gossip itself untouched.
+    bool CanCreatureGossipHello(Player* player, Creature* /*creature*/) override
+    {
+        if (!g_cfg.enable || !g_tableReady || !player
+            || !player->GetSession() || player->GetSession()->IsBot())
+            return false;
+
+        PullPartyClose(player);
+        return false;
+    }
+};
+
 class CompanionQuestSyncPlayerScript : public PlayerScript
 {
 public:
@@ -8638,31 +8693,9 @@ public:
                          bot->GetName(), quest->GetTitle(), questId);
         }
 
-        // The companions' own AI can only take quests within interaction distance of the
-        // giver, and it says "Cannot talk to quest giver" on every attempt while it stands
-        // a body-length too far away - the accept itself is never lost (the mirror above
-        // lands it, and a later in-range cycle reads back "Already on"), but the spam reads
-        // as a failure. The owner accepting is the moment a giver matters: pull each bound
-        // body that is within a short walk but not beside the owner to the owner's side, so
-        // the AI's next attempt is in range and the party stays tight at the giver.
-        uint32 const nowTs = static_cast<uint32>(time(nullptr));
-        for (uint32 const botGuid : bound)
-        {
-            Player* bot = FindCompanionPlayer(botGuid);
-            if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
-                continue;
-
-            float const toOwner = bot->GetDistance(player);
-            if (toOwner <= 4.0f || toOwner > 40.0f)
-                continue;
-
-            uint32& stepAt = g_walkAt[bot->GetGUID().GetCounter()];
-            if (stepAt && nowTs - stepAt < Timing::WalkStep)
-                continue;
-
-            stepAt = nowTs;
-            StepBesideOwner(player, bot, player->GetPositionX(), player->GetPositionY());
-        }
+        // The owner accepting a quest is the moment a giver matters: keep the party
+        // tight, so the AI's own take succeeds within interaction distance.
+        PullPartyClose(player);
     }
 };
 
@@ -8671,4 +8704,5 @@ void Addmod_companion_questsyncScripts()
     new CompanionQuestSyncWorldScript();
     new CompanionQuestSyncCommandScript();
     new CompanionQuestSyncPlayerScript();
+    new CompanionQuestSyncCreatureScript();
 }
