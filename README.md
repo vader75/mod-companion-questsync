@@ -196,7 +196,8 @@ each one. The defaults that matter most:
 | `ExtraArmourSlots` | 1 | belt, bracers, gloves and cloak in the class's armour type |
 | `PoolAccountType` | 2 | `playerbots_account_type` value that marks an AddClass body |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 all refusals |
-| `TidyInventory` / `KeepFreeSlots` | 1 / 2 | keep bag room so pickups never stall |
+| `TidyInventory` / `KeepFreeSlots` | 1 / 2 | keep bag room so pickups never stall; the tidy ladder starts 4 slots before the wall (`BagMargin`) |
+| `MailHome` | 1 | white-and-better overflow is posted to the owner instead of destroyed; the letter carries up to 12 items, at most one per 120 s |
 | `SellJunk` / `TidyVendorJunk` / `TidySurplus` | 1 / 1 / 1 | what it may sell or destroy to make room |
 | `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |

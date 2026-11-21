@@ -247,6 +247,13 @@ CompanionQuestSync.PoolAccountType = 2
 CompanionQuestSync.RespectLegacyBindings = 1
 CompanionQuestSync.NotifySkippedQuests = 2
 CompanionQuestSync.TidyInventory = 1
+#    CompanionQuestSync.MailHome
+#        Description: When the bags run tight, white-and-better items the companion cannot
+#                     use are posted to the owner instead of destroyed. The player keeps the
+#                     loot and the vendor decision; the destroy ladder is then left only with
+#                     true grey trash. Works anywhere - it does not need a vendor in range.
+#        Default:     1 - post home; 0 = destroy whites like the rest
+CompanionQuestSync.MailHome = 1
 CompanionQuestSync.KeepFreeSlots = 2
 CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TidyVendorJunk = 1

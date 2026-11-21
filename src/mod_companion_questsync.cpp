@@ -42,6 +42,7 @@
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
+#include "Mail.h"
 #include "LootMgr.h"
 #include "Map.h"
 #include "MapMgr.h"
@@ -108,6 +109,7 @@ namespace
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
         uint32 keepFreeSlots   = 2;
+        bool mailHome          = true;    // post keep-worthy overflow to the owner
         std::string bindingTable = "cq_bindings";   // this module's own table
         std::string poolTable    = "cq_pool";       // this module's own ledger
     };
@@ -169,6 +171,8 @@ namespace
         constexpr uint32 JunkNotice        = 120; // "your bags were full" repeats after this
         constexpr uint32 RewardProd        = 60;  // how often a hand-in attempt is repeated
         constexpr uint32 AcceptWindow      = 60;  // a quest accepted this recently is still settling
+        constexpr uint32 MailHome          = 120; // how often a "posted home" letter may go out
+        constexpr uint32 BagMargin         = 4;   // stay this many slots ahead of the wall
     }
 
     uint32 constexpr kBindingCacheSeconds = 60;
@@ -263,6 +267,9 @@ namespace
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
     /// bot guid -> { has an unfinished ground objective, when that was last checked }
     std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
+
+    /// bot guid -> when the last "posted home" letter went out
+    std::map<uint32, uint32> g_mailAt;
 
     /// (bot guid, quest id) -> when the copy first became ready to hand in.
     ///
@@ -487,6 +494,7 @@ namespace
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
         g_cfg.keepFreeSlots      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.KeepFreeSlots", 2);
+        g_cfg.mailHome           = sConfigMgr->GetOption<bool>("CompanionQuestSync.MailHome", true);
         g_cfg.bindingTable       = sConfigMgr->GetOption<std::string>("CompanionQuestSync.BindingTable", "cq_bindings");
         g_cfg.poolTable          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.PoolTable", "cq_pool");
         g_cfg.respectLegacyBindings =
@@ -624,6 +632,8 @@ namespace
         // guids are pooled: a stale ready-timer would hand the next body's quest in early
         for (auto itr = g_readyAt.begin(); itr != g_readyAt.end();)
             itr = (itr->first >> 32 == botGuid) ? g_readyAt.erase(itr) : std::next(itr);
+
+        g_mailAt.erase(botGuid);
 
         // guids are pooled, so a stale "already announced" pair would silence the next
         // companion that inherits this body
@@ -3131,7 +3141,50 @@ namespace
     }
 
     std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
-    uint32 TidyInventory(Player* bot);   // defined below, used by the accept path
+    uint32 TidyInventory(Player* owner, Player* bot);   // defined below, used by the accept path
+
+    /// Post the keep-worthy overflow home instead of binning it. Whites that the tidy
+    /// ladder would destroy and greens the ladder spares both go to the owner: nothing
+    /// with value is lost, the vendor decision stays with the player, and the letter
+    /// works anywhere - unlike "s vendor", which needs a vendor in range.
+    uint32 MailHome(Player* owner, Player* bot, std::vector<Item*>& items)
+    {
+        if (items.empty())
+            return 0;
+
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+        MailDraft draft(std::string("From ") + bot->GetName(),
+                        "Loot I could not carry - yours to keep, sell or wear as you like.");
+
+        uint32 mailed = 0;
+        for (Item* item : items)
+        {
+            // the send path the mail handler itself uses: out of the bags, into the letter
+            item->SetNotRefundable(bot);
+            bot->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
+            item->DeleteFromInventoryDB(trans);
+            if (item->GetState() == ITEM_UNCHANGED)
+                item->FSetState(ITEM_CHANGED);
+            item->SetOwnerGUID(owner->GetGUID());
+            item->SaveToDB(trans);
+
+            draft.AddItem(item);
+            ++mailed;
+        }
+
+        draft.SendMailTo(trans, MailReceiver(owner->GetGUID().GetCounter()),
+                         MailSender(MAIL_NORMAL, bot->GetGUID().GetCounter()),
+                         MAIL_CHECK_MASK_HAS_BODY);
+        CharacterDatabase.CommitTransaction(trans);
+
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading",
+                     "[CompanionQuestSync] {} posted {} item(s) home to {}",
+                     bot->GetName(), mailed, owner->GetName());
+
+        return mailed;
+    }
     /// The companion bins grey loot when its bags are full - say so, once per
     /// couple of minutes, so nothing appears to vanish unexplained.
     void NotifyJunk(Player* owner, Player* bot, uint32 count)
@@ -3369,7 +3422,7 @@ namespace
                 {
                     // Bags full: free real junk and try once more before giving
                     // up, so a full companion stops silently skipping quests.
-                    TidyInventory(bot);
+                    TidyInventory(owner, bot);
 
                     if (!bot->CanAddQuest(quest, false))
                     {
@@ -3478,12 +3531,15 @@ namespace
     /// destroy genuine junk: Poor quality only, never a quest item, never a quest
     /// starter, never an item one of the companion's own live quests still wants.
     /// Returns how many stacks were destroyed.
-    uint32 TidyInventory(Player* bot)
+    uint32 TidyInventory(Player* owner, Player* bot)
     {
         if (!g_cfg.tidyInventory)
             return 0;
 
-        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
+        // Soft margin: act while there are still a few slots left, not at the wall. A
+        // companion that tidies at zero free slots destroys in a panic; one that tidies
+        // at the margin mails a letter and carries on.
+        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots + Timing::BagMargin)
             return 0;
 
         // Item ids the companion's own live quests need: never destroy these.
@@ -3504,7 +3560,8 @@ namespace
         // least valuable junk disappears instead of whatever sat in the first bag
         // slot.
         std::vector<std::pair<uint32, uint32>> victims;   // (sell price, item id)
-        auto consider = [&wanted, &victims](Item* item)
+        std::vector<Item*> postHome;                      // white-tier, goes to the owner
+        auto consider = [&wanted, &victims, &postHome](Item* item)
         {
             if (!item)
                 return;
@@ -3515,16 +3572,29 @@ namespace
 
             // Never a container: a bag in the backpack looks like a disposable white item
             // and destroying one costs more slots than it frees.
-            // The keep-quality rule: at or above it, the item is safe. Default green, so
-            // greys and whites are disposable and green-and-better never is. This is the
-            // knob that stops "inventory is full" being permanent - a companion that can
-            // never shed a white item has no way out of a full bag on its own.
-            if (proto->Quality >= g_cfg.itemKeepQuality)
-                return;
             if (proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->StartQuest)
                 return;                                  // quest item / quest starter
             if (wanted.count(proto->ItemId))
                 return;                                  // a live quest still needs it
+
+            // White-tier items are never destroyed any more: they go home in a letter.
+            // Whites (quality 1) are the floor - greys stay vendor trash - and anything
+            // the ladder itself would keep (green and better) is mailed too, since
+            // sitting in a full bag protects nobody.
+            if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
+                proto->Bonding != BIND_WHEN_PICKED_UP)
+            {
+                if (postHome.size() < 12)                // the mail slot limit
+                    postHome.push_back(item);
+                return;
+            }
+
+            // The keep-quality rule: at or above it, the item is safe. Default green, so
+            // greys are disposable. This is the knob that stops "inventory is full" being
+            // permanent - a companion that can never shed an item has no way out of a
+            // full bag on its own.
+            if (proto->Quality >= g_cfg.itemKeepQuality)
+                return;
 
             victims.emplace_back(proto->SellPrice, proto->ItemId);
         };
@@ -3546,7 +3616,7 @@ namespace
         {
             if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             {
-                auto considerVendorJunk = [&wanted, &victims, ai](Item* item)
+                auto considerVendorJunk = [&wanted, &victims, &postHome, ai](Item* item)
                 {
                     if (!item)
                         return;
@@ -3559,6 +3629,13 @@ namespace
                         return;
                     if (wanted.count(proto->ItemId))
                         return;
+                    if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
+                        proto->Bonding != BIND_WHEN_PICKED_UP)
+                    {
+                        if (postHome.size() < 12)
+                            postHome.push_back(item);
+                        return;
+                    }
                     if (proto->Quality >= g_cfg.itemKeepQuality)
                         return;                       // green and better are never binned
 
@@ -3587,7 +3664,7 @@ namespace
         // the hearthstone, gear or anything a quest needs.
         if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() == 0)
         {
-            auto considerSurplus = [&wanted, &victims](Item* item)
+            auto considerSurplus = [&wanted, &victims, &postHome](Item* item)
             {
                 if (!item)
                     return;
@@ -3603,6 +3680,14 @@ namespace
 
                 if (proto->StartQuest || wanted.count(proto->ItemId))
                     return;
+
+                if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
+                    proto->Bonding != BIND_WHEN_PICKED_UP)
+                {
+                    if (postHome.size() < 12)
+                        postHome.push_back(item);
+                    return;
+                }
 
                 if (proto->Quality >= g_cfg.itemKeepQuality)
                     return;
@@ -3625,6 +3710,24 @@ namespace
         std::sort(victims.begin(), victims.end(),
                   [](std::pair<uint32, uint32> const& a, std::pair<uint32, uint32> const& b)
                   { return a.first < b.first; });
+
+        // The letter goes first and often enough to matter: posting home frees the same
+        // slots destroying would, and the cooldown keeps the mailbox from filling with
+        // one letter per pass.
+        if (!postHome.empty() && owner)
+        {
+            uint32& lastAt = g_mailAt[bot->GetGUID().GetCounter()];
+            uint32 const nowTs = static_cast<uint32>(time(nullptr));
+
+            if (!lastAt || nowTs - lastAt >= Timing::MailHome)
+            {
+                MailHome(owner, bot, postHome);
+                lastAt = nowTs;
+
+                SayToOwner(owner, bot,
+                           "I posted what I could not carry home to you - the letter is in your mailbox.");
+            }
+        }
 
         uint32 destroyed = 0;
         for (auto const& victim : victims)
@@ -3996,7 +4099,7 @@ namespace
         // when an accept is refused.
         TryEquipUpgrades(owner, bot);                  // better gear goes on as it arrives
         TrySellJunk(owner, bot);                       // earn coin first
-        NotifyJunk(owner, bot, TidyInventory(bot));    // destroy only what is left
+        NotifyJunk(owner, bot, TidyInventory(owner, bot));    // mail home, then destroy only what is left
 
         // A level change is the one thing here that other modules react to
         // (mod-playerbots re-evaluates spells/gear, mod-wowlegends' path rules
