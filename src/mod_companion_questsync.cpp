@@ -383,6 +383,12 @@ namespace
         uint32 questId = 0;      // 0 = no revalidation possible, only age applies
         uint32 queuedAt = 0;
         bool vital = false;      // pin-clear notices: never dropped as stale, always first
+        bool handIn = false;     // an invitation to hand in: true while the quest is
+                                 // still COMPLETE - the opposite predicate to the
+                                 // pre-accept lines, which are true while the quest
+                                 // is MISSING. Without this, an invitation held
+                                 // through the rate limit could outlive its hand-in
+                                 // and arrive claiming what already happened.
     };
 
     struct PendingNotice
@@ -1129,7 +1135,7 @@ namespace
     /// player can act on. Unthrottled per-quest whispering is what makes a rough
     /// levelling session feel like an error console.
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
-                    uint32 validWhileMissing = 0)
+                    uint32 validWhileMissing = 0, bool handIn = false)
     {
         if (!owner || !owner->GetSession())
             return false;
@@ -1170,9 +1176,9 @@ namespace
             if (!dup && (vital || queue.size() < 4))
             {
                 if (vital)
-                    queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true });
+                    queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true, handIn });
                 else
-                    queue.push_back({ text, botGuid, validWhileMissing, now, false });
+                    queue.push_back({ text, botGuid, validWhileMissing, now, false, handIn });
             }
 
             if (g_cfg.debug >= 2)
@@ -2349,11 +2355,19 @@ namespace
                 // A held-back line about work that finished inside the window reads
                 // like a broken module. But the pin-clear notice IS the work finishing -
                 // it must survive its own completion.
-                if (entry->queuedAt && now > entry->queuedAt)
-                    stale = now - entry->queuedAt > 120;
+                if (entry->questId && entry->handIn)
+                {
+                    // An invitation to hand in is only true while the quest is still
+                    // complete: the moment it is rewarded (or gone), a held-back
+                    // "close to the giver" line would arrive describing a past event.
+                    // Truth wins over age here - no expiry window can save a lie.
+                    stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_COMPLETE;
+                }
                 else if (entry->questId)
                     stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_NONE ||
                             speaker->IsQuestRewarded(entry->questId);
+                else if (entry->queuedAt && now > entry->queuedAt)
+                    stale = now - entry->queuedAt > 120;
             }
 
             if (!stale)
@@ -3149,7 +3163,8 @@ namespace
                     nudgedAt = nowTs;
                     SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' at " +
                                spot.name + " myself, but only up close - lead me within about " +
-                               std::to_string(uint32(g_cfg.handInNear)) + " yards of it and I will do the rest.", 90);
+                               std::to_string(uint32(g_cfg.handInNear)) + " yards of it and I will do the rest.", 90,
+                               quest->GetQuestId(), true);
                 }
                 continue;
             }
@@ -3179,7 +3194,8 @@ namespace
                         SayToOwner(bot, owner,
                                    "I am ready to hand in '" + quest->GetTitle() + "' at " +
                                    spot.name + " - about " +
-                                   std::to_string(uint32(dist)) + " yards from me. Want to come?", 45);
+                                   std::to_string(uint32(dist)) + " yards from me. Want to come?", 45,
+                                   quest->GetQuestId(), true);
 
                         continue;
                     }
@@ -3210,7 +3226,8 @@ namespace
                         if (owner && owner->GetDistance(spot.x, spot.y, spot.z) > 10.0f)
                             SayToOwner(bot, owner, "I have gone ahead to " + spot.name +
                                        " to hand in '" + quest->GetTitle() +
-                                       "' myself - catch up when you can.", 90);
+                                       "' myself - catch up when you can.", 90,
+                                       quest->GetQuestId(), true);
                     }
                 }
 
