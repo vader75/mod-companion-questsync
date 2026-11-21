@@ -1855,87 +1855,11 @@ namespace
     /// group's work.
     void SendQuestPins(Player* owner, std::vector<uint32> const& bots)
     {
-        if (!g_cfg.mapPins || !owner->GetSession())
-            return;
-
-        uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::set<uint32> wanted;
-
-        for (uint32 const botGuid : bots)
-        {
-            Player* bot = FindCompanionPlayer(botGuid);
-            if (!bot || !bot->IsInWorld())
-                continue;
-
-            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
-            {
-                uint32 const questId = bot->GetQuestSlotQuestId(slot);
-                if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
-                    continue;
-
-                // Only skip what the owner has already been credited for. Their copy being
-                // COMPLETE does not draw the area any more (the objectives are done), and
-                // that is exactly the case where the companion still has work to do there.
-                if (owner->IsQuestRewarded(questId))
-                    continue;
-
-                if (!sObjectMgr->GetQuestPOIVector(questId))
-                    continue;
-
-                wanted.insert(questId);
-            }
-        }
-
-        std::string key;
-        for (uint32 const id : wanted)
-            key += std::to_string(id) + ",";
-
-        if (g_pinnedQuests[ownerGuid] == key)
-            return;
-
-        g_pinnedQuests[ownerGuid] = key;
-
-        if (wanted.empty())
-            return;
-
-        std::vector<uint32> const list(wanted.begin(), wanted.end());
-
-        WorldPacket data(SMSG_QUEST_POI_QUERY_RESPONSE, 8 + list.size() * 40);
-        data << uint32(list.size());
-
-        for (uint32 const questId : list)
-        {
-            QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(questId);
-            data << uint32(questId);
-            data << uint32(poi ? poi->size() : 0);
-
-            if (!poi)
-                continue;
-
-            for (QuestPOI const& entry : *poi)
-            {
-                data << uint32(entry.Id);
-                data << int32(entry.ObjectiveIndex);
-                data << uint32(entry.MapId);
-                data << uint32(entry.AreaId);
-                data << uint32(entry.FloorId);
-                data << uint32(entry.Unk3);
-                data << uint32(entry.Unk4);
-                data << uint32(entry.points.size());
-
-                for (QuestPOIPoint const& point : entry.points)
-                {
-                    data << int32(point.x);
-                    data << int32(point.y);
-                }
-            }
-        }
-
-        owner->GetSession()->SendPacket(&data);
-
-        if (g_cfg.debug >= 2)
-            LOG_INFO("server.loading", "[CompanionQuestSync] pushed {} quest area(s) to {} map",
-                     uint32(list.size()), owner->GetName());
+        // Retired: the client renders POI circles only for quests in the player's own
+        // quest log, so the pushed packet's data for companion-held quests was never
+        // drawn - a session with it in place showed no markers at all. The glyph
+        // payload is the only thing that reaches the map for a companion's errands.
+        (void)owner; (void)bots;
     }
 
     /// Position is the other half of a desync: the two logs can match while the
@@ -4423,13 +4347,16 @@ namespace
                 if (!quest)
                     continue;
 
-                // The native POI circles the module pushes are the map's own language
-                // for "work left": true coordinates, true zone, self-cleaning. Drawing
-                // glyphs for the same errands was the second cartographer the player
-                // caught disagreeing with the first. Only the state POIs cannot express
-                // is a glyph: ready to hand in, at the giver.
+                // Two glyph kinds, both with server-computed coordinates and a zone
+                // the server names - the client never guesses location:
+                //   h = ready to hand in, at the giver (a POI circle cannot say this)
+                //   g = work left, at the objective area - necessary because the client
+                //       only draws native POI circles for quests in the PLAYER's own log;
+                //       the pushed packets for companion-held quests display nothing,
+                //       which the first session without g glyphs proved in the field.
                 std::string coords;
                 std::string zoneName;
+                char style = 'g';
 
                 if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
                 {
@@ -4442,6 +4369,20 @@ namespace
                     {
                         coords = MapCoords(spot.x, spot.y, spot.zone);
                         zoneName = ZoneName(spot.zone);
+                        style = 'h';
+                    }
+                }
+                else if (!owner->IsQuestRewarded(questId))
+                {
+                    // Same rule the POI push used: the area is worth drawing while the
+                    // owner has not been credited for the quest themselves.
+                    std::string const poi = PoiCoords(bot, quest);
+                    if (!poi.empty())
+                    {
+                        // "map X, Y" -> numbers; the zone named alongside them is the one
+                        // the conversion was computed against
+                        coords = poi;
+                        zoneName = ZoneName(bot->GetZoneId());
                     }
                 }
 
@@ -4486,7 +4427,7 @@ namespace
                 }
 
                 if (!merged)
-                    entries.push_back({ numbers, 'h', title, zoneName, 0 });
+                    entries.push_back({ numbers, style, title, zoneName, 0 });
             }
         }
 

@@ -281,6 +281,7 @@ end
 -- glyphs, so a legend that is a box with a border fights the map the same way a plated
 -- pin did. Small, dim, and it only appears while there is something to explain.
 local LEGEND = {
+    { style = STYLE.gather, text = "work left" },
     { style = STYLE.handin, text = "ready to hand in" },
 }
 
@@ -502,7 +503,7 @@ SlashCmdList["WLPINS"] = function(msg)
     else
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r - a renderer for what the server says")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  ready to hand in, at the giver")
-        DEFAULT_CHAT_FRAME:AddMessage("  the game's own yellow circles mark the companion's work - those are the server's doing")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff9a9a9a/cpins legend|r  show or hide the key on the map")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge the glyph if it sits off the road")
