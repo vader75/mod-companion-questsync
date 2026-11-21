@@ -12,9 +12,10 @@
 
 local ADDON = "CompanionPins"
 -- Pins are deleted, never recoloured, once they are this old. /cpins life changes it.
-local PIN_LIFETIME = 30 * 60          -- work-left pins: a standing errand
-local HANDIN_LIFETIME = 5 * 60        -- hand-in pins: a ready state, and the 'Finished'
-                                      -- whisper or the next sync is the real cleanup
+-- A pin exists exactly as long as the server says it does. No lifetimes, no saved
+-- pin sets, no whisper parsing: the server's payload is the whole truth, and this
+-- addon is a renderer. Every "leftover pin" bug here came from the client guessing
+-- at state it could not see.
 local FLIP_Y = false
 
 local CompanionPins = CreateFrame("Frame")
@@ -43,30 +44,6 @@ local STYLE = {
                ring = { 0.40, 0.70, 1.00 } },
 }
 
-local function ParseCoords(text)
-    if type(text) ~= "string" then return nil end
-    local x, y = string.match(text, "map%s+(%d+)%s*,%s*(%d+)")
-    if not x or not y then return nil end
-    x, y = tonumber(x), tonumber(y)
-    if not x or not y or x < 0 or x > 100 or y < 0 or y > 100 then return nil end
-    return x, y
-end
-
-local function ParseQuestName(text)
-    if type(text) ~= "string" then return nil end
-    local name = string.match(text, "'([^']+)'")      -- 'Kobold Candles'
-    if name then return name end
-    return string.match(text, "\"([^\"]+)\"")
-end
-
-local function Classify(text)
-    local lower = string.lower(text or "")
-    if string.find(lower, "my own copy") or string.find(lower, "hand it in") then return STYLE.handin end
-    if string.find(lower, "i still owe") then return STYLE.gather end
-    if string.find(lower, "to finish") then return STYLE.finish end
-    return STYLE.other
-end
-
 -- A pin may name the companion it belongs to ("Kobold Candles@Beta") once there is
 -- more than one. Splitting on '@' now means the wire format can grow without the
 -- client misreading a pinned quest literally called "Kobold Candles@Beta".
@@ -90,12 +67,6 @@ local function SaveDB()
     CompanionPinsDB = CompanionPinsDB or {}
     CompanionPinsDB.offsetX, CompanionPinsDB.offsetY = CompanionPins.offsetX, CompanionPins.offsetY
     CompanionPinsDB.showLegend = CompanionPins.showLegend
-    CompanionPinsDB.lifetime = PIN_LIFETIME
-    CompanionPinsDB.pins = {}
-    for i, pin in ipairs(CompanionPins.pins) do
-        CompanionPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
-                             zone = pin.zone, style = pin.style.key }
-    end
 end
 
 local function LoadDB()
@@ -103,46 +74,8 @@ local function LoadDB()
     CompanionPins.showLegend = CompanionPinsDB.showLegend
     if CompanionPins.showLegend == nil then CompanionPins.showLegend = true end
 
-    -- A pin restored from the DB was drawn last session; anything past its life is a
-    -- ghost for a quest that may have been abandoned server-side. Prune here and save,
-    -- so closing the client straight after does not resurrect them next login.
-    if CompanionPinsDB.pins then
-        local now = time()
-        local kept = {}
-        for i, pin in ipairs(CompanionPinsDB.pins) do
-            local life = (pin.style == "handin") and HANDIN_LIFETIME or PIN_LIFETIME
-            if not pin.at or (now - pin.at) <= life then
-                kept[#kept + 1] = pin
-            end
-        end
-        CompanionPinsDB.pins = kept
-    end
     CompanionPins.offsetX = CompanionPinsDB.offsetX or 0
     CompanionPins.offsetY = CompanionPinsDB.offsetY or 0
-    PIN_LIFETIME = CompanionPinsDB.lifetime or PIN_LIFETIME
-    for _, saved in ipairs(CompanionPinsDB.pins or {}) do
-        table.insert(CompanionPins.pins, {
-            x = saved.x, y = saved.y, at = saved.at, quest = saved.quest,
-            zone = saved.zone, style = STYLE[saved.style or "other"] or STYLE.other,
-        })
-    end
-end
-
-local function AddPin(x, y, style, quest, companion)
-    for _, pin in ipairs(CompanionPins.pins) do
-        -- coordinates alone collapsed two different quests whose turn-ins were blocks
-        -- apart; the quest name joins the key, and the label-nudge rows handle overlap
-        if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5
-           and string.lower(pin.quest or "") == string.lower(quest or "") then
-            pin.at, pin.style, pin.quest, pin.zone = time(), style, quest, CurrentZoneName()
-            pin.companion = companion
-            SaveDB(); CompanionPins:Redraw()
-            return
-        end
-    end
-    table.insert(CompanionPins.pins, { x = x, y = y, at = time(), style = style,
-                                quest = quest, companion = companion, zone = CurrentZoneName() })
-    SaveDB(); CompanionPins:Redraw()
 end
 
 -- "Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange" is the server's own
@@ -151,20 +84,10 @@ end
 local function SyncPins(payload)
     local fresh = {}
     for entry in string.gmatch(payload or "", "[^|]+") do
-        local x, y, style, name = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+)$")
+        -- grammar: x,y,h=Title@Companion[,z=ZoneName][ +N]
+        local x, y, style, name, zone = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+),z=([^+|]+)")
         if x and y then
-            local key = string.lower(name)
-            local kept = nil
-            local oldStyle = nil
-            for _, pin in ipairs(CompanionPins.pins) do
-                if string.lower(pin.quest or "") == key then
-                    kept = pin.at
-                    oldStyle = pin.style and pin.style.key or nil
-                end
-            end
-            -- g -> h means "it is ready NOW": the old timestamp would carry the errand's
-            -- whole history, and a pin could expire minutes after it became useful
-            if oldStyle ~= style then kept = nil end
+            name = string.match(name, "^[^,]+") or name
             local title, companion = SplitCompanion(name)
             if companion then
                 CompanionPins.companions = CompanionPins.companions or {}
@@ -174,7 +97,10 @@ local function SyncPins(payload)
                 x = tonumber(x), y = tonumber(y),
                 style = (style == "h") and STYLE.handin or STYLE.gather,
                 quest = title, companion = companion,
-                at = kept or time(), zone = CurrentZoneName(),
+                at = time(),
+                -- the zone is the SERVER's word for where the pin lives; the player's
+                -- own location at receive time was never the pin's location
+                zone = zone and (zone:gsub("%s+$", "")) or nil,
             })
         end
     end
@@ -187,20 +113,6 @@ local function SyncPins(payload)
         DEFAULT_CHAT_FRAME:AddMessage(string.format(
             "|cff00ccffCompanionPins|r synced: %d pin(s), %d removed", #fresh, removed > 0 and removed or 0))
     end
-end
-
-local function RemoveByQuest(name)
-    if not name then return end
-    local target = string.lower(name)
-    local stem = string.gsub(target, "%.%.$", "")   -- the sync line shortens titles
-    for i = #CompanionPins.pins, 1, -1 do
-        local quest = string.lower(CompanionPins.pins[i].quest or "")
-        local short = string.gsub(quest, "%.%.$", "")
-        if quest == target or short == stem then
-            table.remove(CompanionPins.pins, i)
-        end
-    end
-    SaveDB(); CompanionPins:Redraw()
 end
 
 local function RemovePin(pin)
@@ -267,19 +179,10 @@ function CompanionPins:Redraw()
     if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
 
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
-    local now = time()
     local shown = 0
     local placed = {}
     local mapName = select(1, GetMapInfo())
 
-    -- Drop pins that have outlived their use instead of recolouring them: the old
-    -- "stale" tint was a dark plate that read as a black square nothing ever removed.
-    for i = #self.pins, 1, -1 do
-        local life = (self.pins[i].style and self.pins[i].style.key == "handin") and HANDIN_LIFETIME or PIN_LIFETIME
-        if (now - (self.pins[i].at or 0)) > life then
-            table.remove(self.pins, i)
-        end
-    end
 
     for i, pin in ipairs(self.pins) do
         -- "/cpins only <name>" narrows the map to one companion; the others are hidden
@@ -378,10 +281,7 @@ end
 -- glyphs, so a legend that is a box with a border fights the map the same way a plated
 -- pin did. Small, dim, and it only appears while there is something to explain.
 local LEGEND = {
-    { style = STYLE.handin, text = "hand in" },
-    { style = STYLE.gather, text = "work left" },
-    { style = STYLE.finish, text = "to finish" },
-    { style = STYLE.other,  text = "own errand" },
+    { style = STYLE.handin, text = "ready to hand in" },
 }
 
 local legend
@@ -507,31 +407,9 @@ CompanionPins:SetScript("OnEvent", function(self, event, arg1, arg2)
             return
         end
 
-        local done = string.match(text, "Finished '([^']+)'")
-        if done then
-            RemoveByQuest(done)
-            if self.debug then
-                DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r pin cleared: " .. done)
-            end
-            return
-        end
-
-        -- Coordinate whispers create trusted pins, so the sender must be one: any
-        -- player could whisper "meet me at map 99, 42" and plant a marker that
-        -- survives reload and leads you away from a real turn-in. Only a companion
-        -- the server has named in a sync line may speak coordinates.
-        local sender = tostring(arg2 or "")
-        local trusted = false
-        for name in pairs(CompanionPins.companions or {}) do
-            if string.lower(sender) == string.lower(name) then trusted = true break end
-        end
-
-        local x, y = ParseCoords(text)
-        if x and y and trusted then
-            local title, companion = SplitCompanion(ParseQuestName(text) or "companion quest")
-            AddPin(x, y, Classify(text), title, companion)
-        end
-
+        -- "Finished 'X'" is narrative now: the next payload already knows the quest is
+        -- gone, and a pin system with one source of truth does not need a second way
+        -- to remove things.
     elseif event == "WORLD_MAP_UPDATE" then
         self:Redraw()
     end
@@ -602,21 +480,8 @@ SlashCmdList["WLPINS"] = function(msg)
         CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing every companion.")
 
-    elseif string.find(msg, "^life") then
-        local minutes = tonumber(string.match(msg, "^life%s+(%d+)"))
-        if minutes and minutes > 0 then
-            PIN_LIFETIME = minutes * 60
-            SaveDB()
-            DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffCompanion Pins|r pins now expire after %d minute(s).", minutes))
-        else
-            DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffCompanion Pins|r pins live %d minute(s) - change it with /wlpins life 60",
-                math.floor(PIN_LIFETIME / 60)))
-        end
-
     elseif msg == "test" then
-        AddPin(48, 52, STYLE.handin, "TEST PIN")
+        SyncPins("48,52,h=TEST PIN,z=" .. (CurrentZoneName and CurrentZoneName() or ""))
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r test badge at 48, 52 - press M.")
 
     elseif msg == "debug" then
@@ -635,15 +500,12 @@ SlashCmdList["WLPINS"] = function(msg)
         end
 
     else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r - signposts from the companion's whispers")
-        DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  hand in a copy the companion owes")
-        DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
-        DEFAULT_CHAT_FRAME:AddMessage("  |cff66b3ffsquare blue ?|r  a turn-in only it can do")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r - a renderer for what the server says")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  ready to hand in, at the giver")
+        DEFAULT_CHAT_FRAME:AddMessage("  the game's own yellow circles mark the companion's work - those are the server's doing")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff9a9a9a/cpins legend|r  show or hide the key on the map")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge every pin if they sit off the road")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins life [minutes] - how long a pin lives (default 30)")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins only <name> | all - one companion's pins or everyone's")
-        DEFAULT_CHAT_FRAME:AddMessage("  right-click a pin to remove it")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge the glyph if it sits off the road")
+        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins only <name> | all - one companion's glyphs or everyone's")
     end
 end

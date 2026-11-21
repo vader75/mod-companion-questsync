@@ -2373,8 +2373,8 @@ namespace
 
                 poiAt = now;
                 SayToOwner(bot, owner, "I still have '" + quest->GetTitle() +
-                                      "' to finish for us - the area is on the map at " + where +
-                                      ". Want to head that way?", 45, questId);
+                                      "' to finish for us - the circle is on your map. Want to head that way?",
+                                      45, questId);
                 return;
             }
 
@@ -4395,6 +4395,9 @@ namespace
             std::string numbers;
             char style;
             std::string title;
+            std::string zone;   // the giver's zone, named by the SERVER: the client's own
+                                // location is not the pin's location, and guessing it was
+                                // how pins ended up stamped with the wrong map
             uint32 extra = 0;   // companions folded into this marker beyond the second
         };
 
@@ -4420,8 +4423,13 @@ namespace
                 if (!quest)
                     continue;
 
+                // The native POI circles the module pushes are the map's own language
+                // for "work left": true coordinates, true zone, self-cleaning. Drawing
+                // glyphs for the same errands was the second cartographer the player
+                // caught disagreeing with the first. Only the state POIs cannot express
+                // is a glyph: ready to hand in, at the giver.
                 std::string coords;
-                char style = 'g';
+                std::string zoneName;
 
                 if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
                 {
@@ -4431,13 +4439,11 @@ namespace
                     // share map 0, so a map check alone let Morgan Pestle be pinned on
                     // the Elwynn map at a plausible-looking but wrong spot.
                     if (spot.found && spot.map == bot->GetMapId() && spot.zone == bot->GetZoneId())
+                    {
                         coords = MapCoords(spot.x, spot.y, spot.zone);
-
-                    style = 'h';
+                        zoneName = ZoneName(spot.zone);
+                    }
                 }
-
-                if (coords.empty())
-                    coords = PoiCoords(bot, quest);
 
                 if (coords.empty())
                     continue;
@@ -4464,7 +4470,7 @@ namespace
                 bool merged = false;
                 for (Entry& existing : entries)
                 {
-                    if (existing.numbers != numbers || existing.style != style)
+                    if (existing.numbers != numbers || existing.zone != zoneName)
                         continue;
 
                     // Two names read fine; four do not fit on a map marker. Past the
@@ -4480,7 +4486,7 @@ namespace
                 }
 
                 if (!merged)
-                    entries.push_back({ numbers, style, title, 0 });
+                    entries.push_back({ numbers, 'h', title, zoneName, 0 });
             }
         }
 
@@ -4492,6 +4498,9 @@ namespace
                 line += "|";
 
             line += entry.numbers + "," + entry.style + "=" + entry.title;
+
+            if (!entry.zone.empty())
+                line += ",z=" + entry.zone;
 
             if (entry.extra)
                 line += " +" + std::to_string(entry.extra);
