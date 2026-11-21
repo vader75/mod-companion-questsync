@@ -38,6 +38,8 @@
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
+
+extern DBCStorage<WorldMapAreaEntry> sWorldMapAreaStore;   // defined in DBCStores.cpp - the pin path needs WorldMapArea bounds
 #include "GossipDef.h"   // PlayerTalkClass::SendQuestGiverStatus
 #include "Group.h"
 #include "Item.h"
@@ -1417,8 +1419,51 @@ namespace
     /// meant a quest's pin changed identity (and visibility on other maps) with every
     /// walk. The quest's area is the authority: the same quest, the same pin, the same
     /// zone name, wherever the body is.
+    /// The zone that owns a world position, from WorldMapArea bounds - data, not terrain.
+    ///
+    /// ZoneAt walks terrain, and on this repack it has been quietly wrong: Elwynn POI
+    /// points reported as Tkashi Ruins, a Dun Morogh dam turning up where neither is.
+    /// Every pin that trusted the probe inherited the lie. The DBC's own bounds cannot
+    /// lie about which map rectangle a point sits in; the smallest-area match wins, so
+    /// a sub-zone beats its parent when both contain the point.
+    uint32 WorldMapZoneAt(uint32 mapId, float x, float y)
+    {
+        uint32 best = 0;
+        float bestSize = 0.0f;
+
+        for (uint32 i = 1; i < sWorldMapAreaStore.GetNumRows(); ++i)
+        {
+            WorldMapAreaEntry const* entry = sWorldMapAreaStore.LookupEntry(i);
+            if (!entry || entry->map_id != mapId)
+                continue;
+
+            if (x < entry->x1 || x > entry->x2 || y < entry->y1 || y > entry->y2)
+                continue;
+
+            float const size = (entry->x2 - entry->x1) * (entry->y2 - entry->y1);
+            if (!best || size < bestSize)
+            {
+                best = entry->area_id;
+                bestSize = size;
+            }
+        }
+
+        return best;
+    }
+
+    /// content-keyed, bounded by the quests that exist (same policy as g_poiCache)
+    std::map<uint32, std::pair<std::string, std::string>> g_poiPinCache;
+
     bool PoiPin(Player* bot, Quest const* quest, std::string& numbersOut, std::string& zoneOut)
     {
+        auto const cached = g_poiPinCache.find(quest->GetQuestId());
+        if (cached != g_poiPinCache.end())
+        {
+            numbersOut = cached->second.first;
+            zoneOut = cached->second.second;
+            return !numbersOut.empty();
+        }
+
         QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(quest->GetQuestId());
         if (!poi)
             return false;
@@ -1434,13 +1479,11 @@ namespace
             float x = float(entry.points[0].x);
             float y = float(entry.points[0].y);
 
-            // Probe the point's own zone for the conversion - the POI record's
-            // WorldMapAreaId is a world-map reference (here id 30, a custom area with no
-            // coordinate table), not the zone the point lives in. ZoneAt walks terrain
-            // at the point and returns the enclosing zone; that is the zone the numbers
-            // convert against and the zone the pin is named for.
-            uint32 const poiZone = ZoneAt(entry.MapId, bot->GetPhaseMask(), x, y, 0.0f);
-            Map2ZoneCoordinates(x, y, poiZone ? poiZone : bot->GetZoneId());
+            uint32 const zone = WorldMapZoneAt(entry.MapId, x, y);
+            if (!zone)
+                continue;
+
+            Map2ZoneCoordinates(x, y, zone);
 
             if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
                 continue;
@@ -1454,7 +1497,8 @@ namespace
                 continue;
 
             numbersOut = numbers;
-            zoneOut = ZoneName(poiZone ? poiZone : bot->GetZoneId());
+            zoneOut = ZoneName(zone);
+            g_poiPinCache[quest->GetQuestId()] = { numbers, zoneOut };
             return true;
         }
 
@@ -4420,8 +4464,11 @@ namespace
                     // which is exactly when the player needs pointing.
                     if (spot.found && spot.map == bot->GetMapId())
                     {
-                        coords = MapCoords(spot.x, spot.y, spot.zone);
-                        zoneName = ZoneName(spot.zone);
+                        uint32 const zone = WorldMapZoneAt(spot.map, spot.x, spot.y);
+                        uint32 const useZone = zone ? zone : spot.zone;
+
+                        coords = MapCoords(spot.x, spot.y, useZone);
+                        zoneName = ZoneName(useZone);
                         style = 'h';
                     }
                 }
