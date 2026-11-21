@@ -88,25 +88,30 @@ local function SyncPins(payload)
         local x, y, style, name, zone = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+),z=([^+|]+)")
         if x and y then
             name = string.match(name, "^[^,]+") or name
-            -- a merged entry reads "Title@Drodan + Title@Ilyrin": every segment is the
-            -- same quest with a different companion, so collect the names whole instead
-            -- of letting the last @ win and calling the rest of the string a title
-            local title, ownerList = nil, {}
+            -- A merged entry reads "TitleA@Drodan + TitleB@Drodan + TitleA@Ilyrin + ...":
+            -- one tile can carry two quests for two companions, so a companion appears in
+            -- several segments and a name appears twice. Collect DISTINCT titles and
+            -- DISTINCT owners, in order - "The Collector + Wanted: Hogger" over
+            -- "Drodan + Ilyrin", not four names with two of them doubled.
+            local titles, ownerList, seenTitle, seenOwner = {}, {}, {}, {}
             for segment in string.gmatch(name, "[^+]+") do
                 local q, c = SplitCompanion((segment:gsub("^%s+", ""):gsub("%s+$", "")))
-                if q and q ~= "" then
-                    title = q
-                    if c and c ~= "" then
-                        ownerList[#ownerList + 1] = c
-                        CompanionPins.companions = CompanionPins.companions or {}
-                        CompanionPins.companions[c] = true
-                    end
+                if q and q ~= "" and not seenTitle[q] then
+                    seenTitle[q] = true
+                    titles[#titles + 1] = q
+                end
+                if c and c ~= "" and not seenOwner[c] then
+                    seenOwner[c] = true
+                    ownerList[#ownerList + 1] = c
+                    CompanionPins.companions = CompanionPins.companions or {}
+                    CompanionPins.companions[c] = true
                 end
             end
+            local title = table.concat(titles, " + ")
             table.insert(fresh, {
                 x = tonumber(x), y = tonumber(y),
                 style = (style == "h") and STYLE.handin or STYLE.gather,
-                quest = title or "companion quest",
+                quest = (title ~= "" and title) or "companion quest",
                 companion = ownerList[1],
                 owners = table.concat(ownerList, " + "),
                 at = time(),
