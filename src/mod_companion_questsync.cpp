@@ -92,6 +92,7 @@ namespace
         bool announceLogin      = true;
         bool catchUpGroundItems = true;    // finish a ground-object quest the world will not yield
         bool followThroughTeleport = true; // a hearthstone, portal or summon takes the companion too
+        uint8 handInMode         = 1;      // 1 = server-side, 0 = through the bot's own AI
         uint32 catchUpIdleSeconds = 120;   // how long the count must sit still first
         uint32 intervalSeconds  = 20;
         uint32 heartbeatSeconds = 300;  // Debug >= 2 heartbeat window (0 = off)
@@ -463,6 +464,7 @@ namespace
         g_cfg.announceLogin      = sConfigMgr->GetOption<bool>("CompanionQuestSync.AnnounceOnLogin", true);
         g_cfg.catchUpGroundItems = sConfigMgr->GetOption<bool>("CompanionQuestSync.CatchUpGroundItems", true);
         g_cfg.followThroughTeleport = sConfigMgr->GetOption<bool>("CompanionQuestSync.FollowThroughTeleport", true);
+        g_cfg.handInMode         = sConfigMgr->GetOption<uint8>("CompanionQuestSync.HandInMode", 1);
         g_cfg.catchUpIdleSeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.CatchUpIdleSeconds", 120);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
         g_cfg.heartbeatSeconds   = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HeartbeatSeconds", 300);
@@ -2783,6 +2785,33 @@ namespace
     /// finished quest and a player across the square got a complaint and nothing else.
     /// Here the giver is found from the quest itself, the companion is stepped beside it
     /// and its own reward action is asked to run - no leading, no standing nearby.
+    /// The companion picks its own reward when a quest offers a choice.
+    ///
+    /// playerbots asks the master to choose; a companion's master is often not there, and a
+    /// quest that waits on a choice is a quest that never hands in. The pick is the highest
+    /// item level of the options - a defensible "best", and the companion says what it kept.
+    uint32 ChooseRewardIndex(Player* bot, Quest const* quest)
+    {
+        uint32 best = 0;
+        uint32 bestLevel = 0;
+
+        for (uint8 i = 0; i < quest->GetRewChoiceItemsCount(); ++i)
+        {
+            ItemTemplate const* item = sObjectMgr->GetItemTemplate(quest->RewardChoiceItemId[i]);
+            if (!item)
+                continue;
+
+            if (item->ItemLevel > bestLevel)
+            {
+                bestLevel = item->ItemLevel;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+
     void DeliverHandIns(Player* owner, Player* bot)
     {
         if (!bot->IsAlive() || bot->IsInCombat() || (owner && owner->IsInCombat()))
@@ -2809,6 +2838,76 @@ namespace
                 continue;                          // giver is in another zone
 
             float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
+
+            if (g_cfg.handInMode == 1)
+            {
+                uint32& prodAt = g_rewardProdAt[{ botGuid, questId }];
+                if (prodAt && nowTs - prodAt < Timing::RewardProd)
+                    continue;
+
+                prodAt = nowTs;
+
+                // The step to the giver is the visual, not the requirement: the companion is
+                // seen walking up and handing in. Reasonable distances only - yanking it
+                // across the zone reads as a bug, and the reward does not wait on this.
+                if (dist > 6.0f && dist <= 120.0f)
+                {
+                    uint32& stepAt = g_walkAt[botGuid];
+                    if (!stepAt || nowTs - stepAt >= Timing::WalkStep)
+                    {
+                        stepAt = nowTs;
+                        StepBesidePoint(bot, spot.x, spot.y, spot.z);
+
+                        if (owner && owner->GetDistance(spot.x, spot.y, spot.z) > 10.0f)
+                            SayToOwner(bot, owner, "I have gone ahead to " + spot.name +
+                                       " to hand in '" + quest->GetTitle() +
+                                       "' myself - catch up when you can.", 90);
+                    }
+                }
+
+                Creature* giver = bot->FindNearestCreature(spot.entry, 30.0f);
+
+                // A mailed reward wants the giver as its sender; without the creature in
+                // reach this one goes back to the bot's own path rather than risking a
+                // senderless mail.
+                if (!giver && quest->GetRewMailTemplateId())
+                {
+#ifdef MOD_PLAYERBOTS
+                    if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                        ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
+#endif
+                    continue;
+                }
+
+                uint32 const reward = ChooseRewardIndex(bot, quest);
+
+                if (!bot->CanRewardQuest(quest, reward, false))
+                    continue;                      // the core refuses: say nothing twice
+
+                bot->RewardQuest(quest, reward, giver, true);
+
+                if (g_cfg.debug >= 1)
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] {} handed in '{}' ({}) server-side (giver {}, {:.0f} yd)",
+                             bot->GetName(), quest->GetTitle(), questId,
+                             giver ? giver->GetName() : std::string("none"), dist);
+
+                // The player should never wonder who chose the reward: when the quest offers
+                // one, the companion says what it kept.
+                if (quest->GetRewChoiceItemsCount() > 1)
+                {
+                    if (ItemTemplate const* kept = sObjectMgr->GetItemTemplate(quest->RewardChoiceItemId[reward]))
+                        SayToOwner(bot, owner, "For '" + quest->GetTitle() + "' I kept the " +
+                                   std::string(kept->Name1) + " - the choice was mine to make.", 90);
+                }
+                else if (dist > 120.0f)
+                {
+                    SayToOwner(bot, owner, "I took care of '" + quest->GetTitle() + "' at " +
+                               spot.name + " myself - it was a long way for a conversation.", 90);
+                }
+
+                continue;
+            }
 
             if (dist <= 6.0f)
             {
@@ -2892,6 +2991,15 @@ namespace
         }
     }
 
+
+    /// Hand the quest in the way the game itself does: `RewardQuest` needs no giver, no
+    /// gossip window and no distance - `questGiver` is only the mail sender for mailed
+    /// rewards. The giver-vision step in playerbots was the whole reason a companion could
+    /// stand in front of an NPC and still report that it could not talk to it.
+    ///
+    /// The step to the giver stays, as the visual: the companion is seen walking up and
+    /// handing in. But a failed step can no longer block the reward - the world may not
+    /// agree where the NPC is, and the quest still completes.
     void TrySellJunk(Player* owner, Player* bot)
     {
         if (!g_cfg.sellJunk)

@@ -79,11 +79,21 @@ Per pass, for each owner with bindings:
    goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
    walking away never teleports anything, and a companion is never dragged into a
    battleground or arena. `FollowThroughTeleport = 0` turns it off.
+7. **Hand-ins are distance-free** (`HandInMode = 1`) — a finished quest is rewarded the way
+   the gossip window would reward it: the same core call, no giver object required. The
+   companion still walks up to the NPC so the turn-in is seen, but the world cannot block the
+   reward; on a choice of rewards it picks the highest item level and says which it kept.
+   `0` returns to the bot-AI path, which needs the giver in the companion's sight - the shape
+   that produced "I cannot talk to the quest giver".
+8. **Hand-in steps — a hearthstone, a portal or a summon moves the player, so the companion
+   goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
+   walking away never teleports anything, and a companion is never dragged into a
+   battleground or arena. `FollowThroughTeleport = 0` turns it off.
 7. **Hand-ins** — a completed quest is handed in through the companion's own reward
    command. If the owner is standing at the giver the companion steps to their side;
    if they are anywhere else it goes to the giver itself and says where it went, so
    "cannot talk to the quest giver" is a distance the module never creates.
-8. **Pins and whispers** — the open quests of companions the owner cannot see are
+9. **Pins and whispers** — the open quests of companions the owner cannot see are
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
    is said once, in words, naming the next action. The roster line is only re-sent when
    something that matters changes: free bag slots drift on their own and wait for a

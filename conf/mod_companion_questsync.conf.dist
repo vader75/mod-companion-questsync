@@ -205,6 +205,17 @@ CompanionQuestSync.CatchUpIdleSeconds = 120
 #                     only a real teleport does, and never into a battleground or arena.
 #        Default:     1 (on)
 CompanionQuestSync.FollowThroughTeleport = 1
+#    CompanionQuestSync.HandInMode
+#        Description: How a finished quest is handed in.
+#                     1 = server-side: the module calls the same core reward the NPC gossip
+#                         would, so distance to the giver cannot block it, and the companion
+#                         walks up to the giver for show. It picks the reward itself when the
+#                         quest offers a choice, and says which it kept.
+#                     0 = through the companion's own AI (mod-playerbots), which needs the
+#                         giver inside the bot's vision - the shape that produced
+#                         "I cannot talk to the quest giver".
+#        Default:     1
+CompanionQuestSync.HandInMode = 1
 
 #    CompanionQuestSync.DropFailedBotQuests
 #        Description: Drop a companion quest its own AI failed (a dead escort, a timed
