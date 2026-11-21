@@ -1906,14 +1906,21 @@ namespace
                 // Actually ask the bot's AI to hand it in ("r" is playerbots' reward
                 // trigger). Previously the module announced a hand-in that nobody was
                 // performing - the quest sat COMPLETE with all eight candles in its bags.
-                uint32& prodAt = g_rewardProdAt[{ bot->GetGUID().GetCounter(), questId }];
-                if (!prodAt || nowTs - prodAt >= 60)
+                // The narration no longer pulls the bot's own reward trigger: with
+                // HandInMode = 1 the reward happens in DeliverHandIns, and every "r" the
+                // module fires is a chance for playerbots' own giver search to fail and
+                // tell the player "Cannot talk to quest giver".
+                if (g_cfg.handInMode == 0)
                 {
-                    prodAt = nowTs;
+                    uint32& prodAt = g_rewardProdAt[{ bot->GetGUID().GetCounter(), questId }];
+                    if (!prodAt || nowTs - prodAt >= 60)
+                    {
+                        prodAt = nowTs;
 #ifdef MOD_PLAYERBOTS
-                    if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-                        ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
+                        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                            ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
 #endif
+                    }
                 }
 
                 std::string const here = MapCoords(spot.x, spot.y, bot->GetZoneId());
@@ -2867,16 +2874,33 @@ namespace
 
                 Creature* giver = bot->FindNearestCreature(spot.entry, 30.0f);
 
-                // A mailed reward wants the giver as its sender; without the creature in
-                // reach this one goes back to the bot's own path rather than risking a
-                // senderless mail.
+                // A mailed reward wants the giver as its sender. Without the creature in
+                // reach the companion goes to the giver's own coordinates whatever the
+                // distance and looks again - and if the world still has nothing there, it
+                // says so rather than asking the bot's AI to reward (which is the path that
+                // reports it cannot talk to the giver).
                 if (!giver && quest->GetRewMailTemplateId())
                 {
-#ifdef MOD_PLAYERBOTS
-                    if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-                        ai->HandleCommand(CHAT_MSG_WHISPER, "r", owner);
-#endif
-                    continue;
+                    if (dist > 6.0f)
+                    {
+                        uint32& stepAt = g_walkAt[botGuid];
+                        if (!stepAt || nowTs - stepAt >= Timing::WalkStep)
+                        {
+                            stepAt = nowTs;
+                            StepBesidePoint(bot, spot.x, spot.y, spot.z);
+                        }
+
+                        giver = bot->FindNearestCreature(spot.entry, 30.0f);
+                    }
+
+                    if (!giver)
+                    {
+                        SayToOwner(bot, owner, "I could not find " + spot.name + " to hand in '" +
+                                   quest->GetTitle() + "' - the records put it about " +
+                                   std::to_string(uint32(spot.x)) + ", " +
+                                   std::to_string(uint32(spot.y)) + ". Have a look?", 90);
+                        continue;
+                    }
                 }
 
                 uint32 const reward = ChooseRewardIndex(bot, quest);
