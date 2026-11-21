@@ -40,6 +40,9 @@
 #include "DBCStores.h"
 #include <fstream>
 
+// defined in DBCStores.cpp, id-indexed by the AreaTable's own first column
+extern DBCStorage<AreaTableEntry> sAreaTableStore;
+
 #include "GossipDef.h"   // PlayerTalkClass::SendQuestGiverStatus
 #include "Group.h"
 #include "Item.h"
@@ -1406,7 +1409,11 @@ namespace
 
     std::string ZoneName(uint32 zoneId)
     {
-        if (AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId))
+        // Direct ID lookup. GetAreaEntryByAreaID on this build round-trips through the
+        // area's exploration bit and looks THAT up as an entry id - an arbitrary row -
+        // which is how a pin standing in Elwynn introduced itself as Tkashi Ruins. The
+        // store is id-indexed, so the honest path is one LookupEntry.
+        if (AreaTableEntry const* zone = sAreaTableStore.LookupEntry(zoneId))
             if (zone->area_name[0])
                 return zone->area_name[0];
 
