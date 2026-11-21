@@ -3278,6 +3278,12 @@ namespace
         uint32 const nowTs = static_cast<uint32>(time(nullptr));
         uint32 const botGuid = bot->GetGUID().GetCounter();
 
+        // Newly-ready invitations, staged and flushed at the end of the pass: the
+        // closest quest on the companion's own map speaks first, not whichever quest
+        // happened to sit in the first log slot.
+        struct Invite { uint32 dist; bool sameZone; EnderSpot spot; Quest const* quest; };
+        std::vector<Invite> invites;
+
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
         {
             uint32 const questId = bot->GetQuestSlotQuestId(slot);
@@ -3356,11 +3362,8 @@ namespace
 
                         // The pin is the state, the whisper is the invitation: the delay
                         // would otherwise show the player a gold pin they never notice.
-                        SayToOwner(bot, owner,
-                                   "I am ready to hand in '" + quest->GetTitle() + "' at " +
-                                   spot.name + " - about " +
-                                   std::to_string(uint32(dist)) + " yards from me. Want to come?", 45,
-                                   quest->GetQuestId(), true);
+                        // Staged - the flush after the loop sorts by proximity and map.
+                        invites.push_back({ uint32(dist), spot.zone == bot->GetZoneId(), spot, quest });
 
                         continue;
                     }
@@ -3538,6 +3541,26 @@ namespace
                          bot->GetName(), quest->GetTitle(), questId, afterStep);
 
             return;
+        }
+
+        // Several quests can turn ready in one pass; the invitation the player hears
+        // first should be the one nearest the companion - on the map it stands on
+        // first, then plain distance. The rate limit queues the rest in the same
+        // order, so every invitation still arrives, closest first.
+        std::sort(invites.begin(), invites.end(), [](Invite const& a, Invite const& b)
+        {
+            if (a.sameZone != b.sameZone)
+                return a.sameZone;
+            return a.dist < b.dist;
+        });
+
+        for (Invite const& invite : invites)
+        {
+            SayToOwner(bot, owner,
+                       "I am ready to hand in '" + invite.quest->GetTitle() + "' at " +
+                       invite.spot.name + " - about " +
+                       std::to_string(invite.dist) + " yards from me. Want to come?", 45,
+                       invite.quest->GetQuestId(), true);
         }
     }
 
