@@ -1586,6 +1586,105 @@ namespace
     // (`.companionsync quests`) still names every area.
     std::map<uint32, std::vector<std::pair<std::string, std::string>>> g_poiPinCache;
 
+    /// Where the work actually is: the creatures that drop the item the quest requires.
+    ///
+    /// A wanted poster's POI points at the poster, and an outline's first corner is
+    /// wherever the cartographer started the path - neither is the mob. The loot table
+    /// is: for every required item, the creatures whose loot holds it, spawned where
+    /// they spawn. Nearest to the companion first, capped like every other pin; a quest
+    /// with no resolvable source (or a failed query, retried on a slow clock) falls
+    /// through to the POI vector.
+    std::map<uint32, std::vector<std::tuple<uint32, float, float>>> g_lootSpawns;  // quest -> (map, x, y)
+    std::map<uint32, uint32> g_lootSpawnsQueried;                                 // quest -> last attempt
+
+    bool LootSpots(Player* bot, Quest const* quest, std::vector<std::pair<std::string, std::string>>& out)
+    {
+        uint32 const questId = quest->GetQuestId();
+        uint32 const nowTs = static_cast<uint32>(time(nullptr));
+
+        auto spawns = g_lootSpawns.find(questId);
+        if (spawns == g_lootSpawns.end() || spawns->second.empty())
+        {
+            uint32& lastTry = g_lootSpawnsQueried[questId];
+            if (lastTry && nowTs - lastTry < 600)
+                return false;
+            lastTry = nowTs;
+
+            std::vector<std::tuple<uint32, float, float>> found;
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+            {
+                uint32 const item = quest->RequiredItemId[i];
+                if (!item || !quest->RequiredItemCount[i])
+                    continue;
+
+                // lootid (template) is what the loot templates key on, not the entry
+                QueryResult rows = WorldDatabase.Query(
+                    "SELECT c.position_x, c.position_y, c.map FROM creature c "
+                    "JOIN creature_template ct ON ct.entry = c.id1 "
+                    "JOIN creature_loot_template clt ON clt.entry = ct.lootid AND clt.item = {} "
+                    "GROUP BY c.guid", item);
+
+                if (rows)
+                    do
+                    {
+                        Field* f = rows->Fetch();
+                        found.push_back({ f[2].Get<uint32>(), f[0].Get<float>(), f[1].Get<float>() });
+                    } while (rows->NextRow());
+            }
+
+            g_lootSpawns[questId] = found;
+            spawns = g_lootSpawns.find(questId);
+        }
+
+        if (spawns->second.empty())
+            return false;
+
+        // On the companion's map, nearest first, then the usual conversion each pin.
+        std::vector<std::tuple<uint32, float, float>> here;
+        for (auto const& s : spawns->second)
+            if (std::get<0>(s) == bot->GetMapId())
+                here.push_back(s);
+
+        std::sort(here.begin(), here.end(), [bot](auto const& a, auto const& b)
+        {
+            float const ax = std::get<1>(a) - bot->GetPositionX();
+            float const ay = std::get<2>(a) - bot->GetPositionY();
+            float const bx = std::get<1>(b) - bot->GetPositionX();
+            float const by = std::get<2>(b) - bot->GetPositionY();
+            return (ax * ax + ay * ay) < (bx * bx + by * by);
+        });
+
+        for (auto const& s : here)
+        {
+            if (out.size() >= 4)
+                break;
+
+            float x = std::get<1>(s);
+            float y = std::get<2>(s);
+            uint32 const zone = ZoneAtHeight(bot->GetMapId(), bot->GetPhaseMask(), x, y);
+            if (!zone)
+                continue;
+
+            if (!WmaConvert(x, y, int32(zone)) && zone != 12)
+                continue;
+
+            if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
+                continue;
+
+            std::string const numbers = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+            if (numbers.size() <= 5)
+                continue;
+
+            if (std::find_if(out.begin(), out.end(),
+                             [&numbers](std::pair<std::string, std::string> const& s) { return s.first == numbers; }) != out.end())
+                continue;
+
+            out.push_back({ numbers, ZoneName(zone) });
+        }
+
+        return !out.empty();
+    }
+
     bool PoiPins(Player* bot, Quest const* quest, std::vector<std::pair<std::string, std::string>>& out)
     {
         auto const cached = g_poiPinCache.find(quest->GetQuestId());
@@ -4723,9 +4822,11 @@ namespace
                     // Same rule the POI push used: the area is worth drawing while the
                     // owner has not been credited for the quest themselves. The zone is
                     // the QUEST's area, named from the POI data - never the bot's
-                    // transient position. A quest owing work in several areas draws one
-                    // pin per area, each on its own map.
-                    PoiPins(bot, quest, workLeftSpots);
+                    // transient position. The loot table leads (the work is where the
+                    // required item drops); the POI vector is the fallback. A quest owing
+                    // work in several areas draws one pin per area, each on its own map.
+                    if (!LootSpots(bot, quest, workLeftSpots))
+                        PoiPins(bot, quest, workLeftSpots);
                 }
 
                 // The pin list for this quest: one entry for a ready hand-in (the
