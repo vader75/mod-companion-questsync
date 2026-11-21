@@ -3,3 +3,4 @@ build/
 *.obj
 *.pdb
 .vs/
+__pycache__/
