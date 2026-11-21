@@ -58,6 +58,9 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
+#ifdef MOD_PLAYERBOTS
+#include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
+#endif
 #include "QuestDef.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
@@ -3104,6 +3107,38 @@ namespace
     /// item level of the options - a defensible "best", and the companion says what it kept.
     uint32 ChooseRewardIndex(Player* bot, Quest const* quest)
     {
+#ifdef MOD_PLAYERBOTS
+        // Score the choice the way the companion's own AI would (a per-class stat
+        // weight, not a raw item level): the module winning the hand-in race must not
+        // hand the companion a worse pick than its own turn-in would have taken.
+        if (GET_PLAYERBOT_AI(bot))
+        {
+            StatsWeightCalculator calc(bot);
+            uint32 best = 0;
+            float bestScore = 0.0f;
+            bool any = false;
+
+            for (uint8 i = 0; i < quest->GetRewChoiceItemsCount(); ++i)
+            {
+                ItemTemplate const* item = sObjectMgr->GetItemTemplate(quest->RewardChoiceItemId[i]);
+                if (!item)
+                    continue;
+
+                float const score = calc.CalculateItem(quest->RewardChoiceItemId[i]);
+                if (!any || score > bestScore)
+                {
+                    any = true;
+                    bestScore = score;
+                    best = i;
+                }
+            }
+
+            if (any)
+                return best;
+        }
+#endif
+
+        // No AI to ask (or playerbots absent): the plain item level remains.
         uint32 best = 0;
         uint32 bestLevel = 0;
 
