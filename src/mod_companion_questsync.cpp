@@ -137,6 +137,38 @@ namespace
 
     std::unordered_map<uint32, BindingSet> g_bindingCache;
     bool g_multiCompanion = false;   // owner has more than one companion
+    /// Every settling window in the module, in one place.
+    ///
+    /// These numbers are throttles, not features, and they are where past bugs lived: a
+    /// removal inside a teardown, a whisper that repeated every pass, a gear slot refilled
+    /// every sweep. When something misbehaves, this table is the first place to look.
+    namespace Timing
+    {
+        // removal and summons
+        constexpr uint32 BotRemoveSettle   = 20;  // never remove within ~20 s of a summon
+        constexpr uint32 SummonJudge       = 20;  // before declaring a summon failed
+
+        // movement
+        constexpr uint32 WalkStep          = 20;  // one giver or gather hop per 20 s
+        constexpr uint32 FollowDelay       = 3;   // the destination is still loading
+        constexpr float  FollowDistance    = 120.0f;  // yards; closer is not "lost"
+
+        // whispers
+        constexpr uint32 WhisperGap        = 45;  // per-owner default gap
+        constexpr uint32 PositionNotice    = 180; // "I am in <zone>" repeats after this
+        constexpr uint32 POIRetry          = 300; // a pinned POI is retried after this
+        constexpr uint32 NudgeRepeat       = 300; // standing asks repeat every five minutes
+
+        // upkeep
+        constexpr uint32 SlotOnlyGrace     = 180; // bag space alone does not re-send the roster
+        constexpr uint32 GearCheck         = 180; // how often upgrades are looked for
+        constexpr uint32 GearRetry         = 300; // an unfilled slot is not retried sooner
+        constexpr uint32 SellJunk          = 120; // vendor trash is sold at most this often
+        constexpr uint32 JunkNotice        = 120; // "your bags were full" repeats after this
+        constexpr uint32 RewardProd        = 60;  // how often a hand-in attempt is repeated
+        constexpr uint32 AcceptWindow      = 60;  // a quest accepted this recently is still settling
+    }
+
     uint32 constexpr kBindingCacheSeconds = 60;
 
     /// Four companions is the whole point of this branch - a party of five with the
@@ -847,8 +879,8 @@ namespace
         if (g_pendingFollow.empty())
             return;
 
-        constexpr uint32 kFollowDelaySeconds = 3;     // the owner's client is still loading
-        constexpr float kFollowDistanceYards = 120.0f;
+        constexpr uint32 kFollowDelaySeconds = Timing::FollowDelay;
+        constexpr float kFollowDistanceYards = Timing::FollowDistance;
 
         uint32 const now = uint32(time(nullptr));
 
@@ -1221,6 +1253,8 @@ namespace
         }
 
         // Cache the negative too, or a quest with no usable area is re-scanned every pass.
+                // keyed by game content (zone x quest), not by body: no purge, and bounded
+                // by the quests that exist rather than by the pool
         g_poiCache[{ bot->GetZoneId(), quest->GetQuestId() }] = std::string();
         return std::string();
     }
@@ -1808,7 +1842,7 @@ namespace
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_positionNoticeAt[botGuid];
-        if (last && now - last < 180)
+        if (last && now - last < Timing::PositionNotice)
             return;
 
         if (bot->GetZoneId() && owner->GetZoneId() && bot->GetZoneId() != owner->GetZoneId())
@@ -2031,7 +2065,7 @@ namespace
 
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
-        if (last && now - last < 45)
+        if (last && now - last < Timing::WhisperGap)
             return;
 
         // Drop what no longer applies before speaking. The queue exists to survive
@@ -2185,7 +2219,7 @@ namespace
 
                 std::pair<uint32, uint32> const poiKey{ botGuid, questId };
                 uint32& poiAt = g_nudgeAt[poiKey];
-                if (poiAt && now - poiAt < 300)
+                if (poiAt && now - poiAt < Timing::POIRetry)
                     continue;
 
                 poiAt = now;
@@ -2197,7 +2231,7 @@ namespace
 
             std::pair<uint32, uint32> const key{ botGuid, questId };
             uint32& last = g_nudgeAt[key];
-            if (last && now - last < 300)
+            if (last && now - last < Timing::NudgeRepeat)
                 continue;
 
             last = now;
@@ -2559,7 +2593,7 @@ namespace
                     break;
 
                 auto const created = g_gearCreatedAt.find(key);
-                if (created != g_gearCreatedAt.end() && now - created->second < 300)
+                if (created != g_gearCreatedAt.end() && now - created->second < Timing::GearRetry)
                     break;                                  // tried recently, leave this slot alone
 
                 uint16 dest = 0;
@@ -2729,7 +2763,7 @@ namespace
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_walkAt[botGuid];
-        if (last && now - last < 20)
+        if (last && now - last < Timing::WalkStep)
             return;                                  // one hop per twenty seconds
 
         last = now;
@@ -2779,7 +2813,7 @@ namespace
             if (dist <= 6.0f)
             {
                 uint32& prodAt = g_rewardProdAt[{ botGuid, questId }];
-                if (prodAt && nowTs - prodAt < 60)
+                if (prodAt && nowTs - prodAt < Timing::RewardProd)
                     continue;
 
                 prodAt = nowTs;
@@ -2807,7 +2841,7 @@ namespace
                 continue;
 
             uint32& stepAt = g_walkAt[botGuid];
-            if (stepAt && nowTs - stepAt < 20)
+            if (stepAt && nowTs - stepAt < Timing::WalkStep)
                 continue;
 
             stepAt = nowTs;
@@ -2869,7 +2903,7 @@ namespace
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_sellAt[botGuid];
-        if (last && now - last < 120)
+        if (last && now - last < Timing::SellJunk)
             return;
 
         last = now;
@@ -2906,7 +2940,7 @@ namespace
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_equipAt[botGuid];
 
-        if (last && now - last < 180)
+        if (last && now - last < Timing::GearCheck)
             return;
 
         last = now;
@@ -2929,7 +2963,7 @@ namespace
 
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_junkNoticeAt[bot->GetGUID().GetCounter()];
-        if (last && now - last < 120)
+        if (last && now - last < Timing::JunkNotice)
             return;
 
         last = now;
@@ -3091,7 +3125,7 @@ namespace
             if (added != g_addedAt.end())
             {
                 uint32 const now = static_cast<uint32>(time(nullptr));
-                if (added->second && now > added->second && now - added->second < 60)
+                if (added->second && now > added->second && now - added->second < Timing::AcceptWindow)
                 {
                     if (report)
                         AddSkipped(*report, quest, "recently added - waiting for it to stick");
@@ -3522,7 +3556,7 @@ namespace
 
             ~PassTimer()
             {
-                if (g_cfg.debug < 2)
+                if (g_cfg.debug < 3)
                     return;
 
                 auto const us = static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -4792,7 +4826,7 @@ namespace
 
         // A change that is only the free-slot column waits for the slower clock, so the
         // client is still told (the number is in the payload) but not every 30 seconds.
-        constexpr uint32 kSlotOnlyGraceSeconds = 180;
+        constexpr uint32 kSlotOnlyGraceSeconds = Timing::SlotOnlyGrace;
 
         if (!force && !last.empty())
         {
@@ -5219,7 +5253,7 @@ namespace
         uint32 const upAt = g_botUpAt.count(botGuid) ? g_botUpAt[botGuid] : 0;
         uint32 const now = static_cast<uint32>(time(nullptr));
 
-        if (online && owner && upAt && now - upAt < 20)
+        if (online && owner && upAt && now - upAt < Timing::SummonJudge)
         {
             error = "that companion has only just come out - give it a few seconds and release again";
             return false;
@@ -5691,7 +5725,7 @@ public:
                     // objective at all.
                     auto& gate = g_gatherPending[botGuid];
 
-                    if (!gate.first && gate.second && nowTs - gate.second < 20)
+                    if (!gate.first && gate.second && nowTs - gate.second < Timing::WalkStep)
                         continue;
 
                     gate.second = nowTs;
@@ -6816,7 +6850,7 @@ public:
             // Give playerbots time to finish the login before pulling the body back out. A
             // removal issued seconds after a summon has killed this process three times today.
             uint32 const upAt = g_botUpAt.count(botGuid) ? g_botUpAt[botGuid] : 0;
-            if (upAt && now - upAt < 20)
+            if (upAt && now - upAt < Timing::BotRemoveSettle)
             {
                 uint32 const wait = 20 - (now - upAt);
                 handler->PSendSysMessage("|cffffd200Companion quest sync|r: |cffffff00{}|r is still "
