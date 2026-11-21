@@ -102,7 +102,11 @@ Per pass, for each owner with bindings:
    something that matters changes: free bag slots drift on their own and wait for a
    slower clock rather than being broadcast every pass. A quest owing work in several
    areas draws one pin per area (deduped by converted point, capped at four per quest),
-   each on its own zone's map; a ready hand-in is one pin at the giver. The module
+   each on its own zone's map; a ready hand-in is one pin at the giver. For a collection
+   quest the work pin leads with the creatures that drop the required item (from the loot
+   tables, nearest to the companion) - a wanted poster's POI points at the poster and an
+   outline's corner is wherever the cartographer started - and falls back to the POI
+   vector when no loot source resolves. The module
    publishes the full payload once a minute alongside its `Hello` heartbeat, so a client
    that just `/reloaded` is repopulated without waiting for a change or the 10-minute
    cycle (`SendHeartbeat`).
