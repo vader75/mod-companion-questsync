@@ -1411,6 +1411,50 @@ namespace
         return "an unknown zone";
     }
 
+    /// Map numbers and a zone name for a quest's objective area, anchored to the POI's
+    /// OWN area id - not to wherever the bot happens to be standing. A freshly summoned
+    /// bot reports its previous zone until it has moved, and naming the zone from the bot
+    /// meant a quest's pin changed identity (and visibility on other maps) with every
+    /// walk. The quest's area is the authority: the same quest, the same pin, the same
+    /// zone name, wherever the body is.
+    bool PoiPin(Player* bot, Quest const* quest, std::string& numbersOut, std::string& zoneOut)
+    {
+        QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(quest->GetQuestId());
+        if (!poi)
+            return false;
+
+        for (QuestPOI const& entry : *poi)
+        {
+            if (entry.points.empty())
+                continue;
+
+            if (entry.MapId != bot->GetMapId())
+                continue;
+
+            float x = float(entry.points[0].x);
+            float y = float(entry.points[0].y);
+            Map2ZoneCoordinates(x, y, entry.AreaId);
+
+            if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
+                continue;
+
+            // "map 43, 65" -> "43,65"
+            std::string numbers = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
+            numbers = numbers.substr(4);
+            numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
+                                         [](char c) { return c == ' '; }), numbers.end());
+            if (numbers.empty())
+                continue;
+
+            numbersOut = numbers;
+            zoneOut = ZoneName(entry.AreaId);
+            return true;
+        }
+
+        return false;
+    }
+
+
     void SendPinSync(Player* owner, bool force);  // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
@@ -4375,15 +4419,10 @@ namespace
                 else if (!owner->IsQuestRewarded(questId))
                 {
                     // Same rule the POI push used: the area is worth drawing while the
-                    // owner has not been credited for the quest themselves.
-                    std::string const poi = PoiCoords(bot, quest);
-                    if (!poi.empty())
-                    {
-                        // "map X, Y" -> numbers; the zone named alongside them is the one
-                        // the conversion was computed against
-                        coords = poi;
-                        zoneName = ZoneName(bot->GetZoneId());
-                    }
+                    // owner has not been credited for the quest themselves. The zone is
+                    // the QUEST's area, named from the POI data - never the bot's
+                    // transient position.
+                    PoiPin(bot, quest, coords, zoneName);
                 }
 
                 if (coords.empty())
