@@ -565,6 +565,13 @@ namespace
             CharacterDatabase.Query("SHOW COLUMNS FROM {} LIKE 'created_at'", g_cfg.bindingTable));
         g_bindingReleasedKnown = static_cast<bool>(
             CharacterDatabase.Query("SHOW TABLES LIKE 'wowlegends_companion_released'"));
+
+        // The "since we last parted" digest outlives restarts: it is written at the
+        // owner's logout and read at the companion's next arrival, so a world restart
+        // between the two must not lose it.
+        CharacterDatabase.Execute(
+            "CREATE TABLE IF NOT EXISTS cq_digest ("
+            "owner_guid INT UNSIGNED NOT NULL PRIMARY KEY, summary TEXT NOT NULL, stamp INT UNSIGNED NOT NULL)");
     }
 
     /// Everything this module remembers about one companion, forgotten with it.
@@ -5296,13 +5303,29 @@ namespace
                         {
                             // The companion answers "what have you been up to?" before it
                             // is asked: the last session's digest, once, then it is gone.
-                            auto last = g_lastSessionSummary.find(pending.ownerGuid);
-                            if (last != g_lastSessionSummary.end())
+                            // The row is the truth - it survives a world restart between the
+                            // logout that wrote it and this arrival.
+                            std::string summary;
+                            if (QueryResult digest = CharacterDatabase.Query(
+                                    "SELECT summary FROM cq_digest WHERE owner_guid = {}",
+                                    pending.ownerGuid))
                             {
-                                SayToOwner(fresh, master,
-                                           "Welcome back! Since we last parted: " + last->second + ".", 0);
-                                g_lastSessionSummary.erase(last);
+                                summary = (*digest)[0].Get<std::string>();
+                                CharacterDatabase.Execute("DELETE FROM cq_digest WHERE owner_guid = {}",
+                                                          pending.ownerGuid);
                             }
+                            else
+                            {
+                                auto last = g_lastSessionSummary.find(pending.ownerGuid);
+                                if (last != g_lastSessionSummary.end())
+                                    summary = last->second;
+                                if (!summary.empty())
+                                    g_lastSessionSummary.erase(last);
+                            }
+
+                            if (!summary.empty())
+                                SayToOwner(fresh, master,
+                                           "Welcome back! Since we last parted: " + summary + ".", 0);
                         }
 
                         EnsureBags(master, fresh);
@@ -7715,6 +7738,9 @@ public:
             summary += level;
 
         g_lastSessionSummary[ownerGuid] = summary;
+        CharacterDatabase.Execute(
+            "REPLACE INTO cq_digest (owner_guid, summary, stamp) VALUES ({}, '{}', {})",
+            ownerGuid, summary, static_cast<uint32>(time(nullptr)));
 
         LOG_INFO("server.loading",
                  "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground, {} handed in, {} mailed ({} letter(s)), {} destroyed{}",
