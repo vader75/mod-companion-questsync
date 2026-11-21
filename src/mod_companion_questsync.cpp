@@ -1562,16 +1562,19 @@ namespace
 
 
     /// content-keyed, bounded by the quests that exist (same policy as g_poiCache)
-    std::map<uint32, std::pair<std::string, std::string>> g_poiPinCache;
+    // One quest can owe work in several areas: quest_poi holds a row per objective,
+    // each with its own points, so the map should show one pin per area, not just the
+    // first. Capped at four so a sprawling quest cannot carpet the map; the whisper
+    // (`.companionsync quests`) still names every area.
+    std::map<uint32, std::vector<std::pair<std::string, std::string>>> g_poiPinCache;
 
-    bool PoiPin(Player* bot, Quest const* quest, std::string& numbersOut, std::string& zoneOut)
+    bool PoiPins(Player* bot, Quest const* quest, std::vector<std::pair<std::string, std::string>>& out)
     {
         auto const cached = g_poiPinCache.find(quest->GetQuestId());
         if (cached != g_poiPinCache.end())
         {
-            numbersOut = cached->second.first;
-            zoneOut = cached->second.second;
-            return !numbersOut.empty();
+            out = cached->second;
+            return !out.empty();
         }
 
         QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(quest->GetQuestId());
@@ -1606,13 +1609,19 @@ namespace
             if (numbers.size() <= 5)
                 continue;
 
-            numbersOut = numbers;
-            zoneOut = ZoneName(zone);
-            g_poiPinCache[quest->GetQuestId()] = { numbers, zoneOut };
-            return true;
+            // Distinct areas only: several POI rows of one quest often share a point,
+            // and the client already merges same-spot pins per companion.
+            if (std::find_if(out.begin(), out.end(),
+                             [&numbers](std::pair<std::string, std::string> const& s) { return s.first == numbers; }) != out.end())
+                continue;
+
+            out.push_back({ numbers, ZoneName(zone) });
+            if (out.size() >= 4)
+                break;
         }
 
-        return false;
+        g_poiPinCache[quest->GetQuestId()] = out;
+        return !out.empty();
     }
 
 
@@ -4566,6 +4575,7 @@ namespace
                 //       which the first session without g glyphs proved in the field.
                 std::string coords;
                 std::string zoneName;
+                std::vector<std::pair<std::string, std::string>> workLeftSpots;
                 char style = 'g';
 
                 if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
@@ -4596,52 +4606,62 @@ namespace
                     // Same rule the POI push used: the area is worth drawing while the
                     // owner has not been credited for the quest themselves. The zone is
                     // the QUEST's area, named from the POI data - never the bot's
-                    // transient position.
-                    PoiPin(bot, quest, coords, zoneName);
+                    // transient position. A quest owing work in several areas draws one
+                    // pin per area, each on its own map.
+                    PoiPins(bot, quest, workLeftSpots);
                 }
 
-                if (coords.empty())
-                    continue;
+                // The pin list for this quest: one entry for a ready hand-in (the
+                // giver), or one per objective area for work still owed.
+                std::vector<std::tuple<std::string, char, std::string, std::string>> spots;
+                if (!coords.empty())
+                    spots.push_back({ coords, style, "", zoneName });
+                else
+                    for (auto const& spot : workLeftSpots)
+                        spots.push_back({ spot.first, 'g', "", spot.second });
 
-                // "map 43, 65" -> "43,65"
-                std::string numbers = coords.substr(4);
-                numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
-                                             [](char c) { return c == ' '; }), numbers.end());
-
-                if (numbers.empty())
-                    continue;
-
-                std::string title = quest->GetTitle();
-                if (title.size() > 22)
-                    title = title.substr(0, 20) + "..";
-
-                // a title cannot carry the separators, or the addon would split it
-                std::replace(title.begin(), title.end(), '|', '/');
-                std::replace(title.begin(), title.end(), '=', ':');
-
-                if (MultiCompanionSpeech(bot))
-                    title += "@" + SafePinName(bot->GetName());
-
-                bool merged = false;
-                for (Entry& existing : entries)
+                for (auto const& [coords, style, _unused, zoneName] : spots)
                 {
-                    if (existing.numbers != numbers || existing.zone != zoneName)
+                    // "map 43, 65" -> "43,65"
+                    std::string numbers = coords.substr(4);
+                    numbers.erase(std::remove_if(numbers.begin(), numbers.end(),
+                                                 [](char c) { return c == ' '; }), numbers.end());
+
+                    if (numbers.empty())
                         continue;
 
-                    // Two names read fine; four do not fit on a map marker. Past the
-                    // second, count them instead - the full list is a click away in
-                    // `.companionsync quests`.
-                    if (existing.extra || existing.title.find(" + ") != std::string::npos)
-                        ++existing.extra;
-                    else
-                        existing.title += " + " + title;
+                    std::string title = quest->GetTitle();
+                    if (title.size() > 22)
+                        title = title.substr(0, 20) + "..";
 
-                    merged = true;
-                    break;
+                    // a title cannot carry the separators, or the addon would split it
+                    std::replace(title.begin(), title.end(), '|', '/');
+                    std::replace(title.begin(), title.end(), '=', ':');
+
+                    if (MultiCompanionSpeech(bot))
+                        title += "@" + SafePinName(bot->GetName());
+
+                    bool merged = false;
+                    for (Entry& existing : entries)
+                    {
+                        if (existing.numbers != numbers || existing.zone != zoneName)
+                            continue;
+
+                        // Two names read fine; four do not fit on a map marker. Past the
+                        // second, count them instead - the full list is a click away in
+                        // `.companionsync quests`.
+                        if (existing.extra || existing.title.find(" + ") != std::string::npos)
+                            ++existing.extra;
+                        else
+                            existing.title += " + " + title;
+
+                        merged = true;
+                        break;
+                    }
+
+                    if (!merged)
+                        entries.push_back({ numbers, style, title, zoneName, 0 });
                 }
-
-                if (!merged)
-                    entries.push_back({ numbers, style, title, zoneName, 0 });
             }
         }
 
