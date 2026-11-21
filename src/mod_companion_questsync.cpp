@@ -5688,6 +5688,17 @@ namespace
                                            "Welcome back! Since we last parted: " + summary + ".", 0);
                         }
 
+                        // A pool bot that died in a previous session can arrive with the
+                        // death still written on it: the character's stand state survives a
+                        // dismiss/re-summon, and a living body standing in UNIT_STAND_STATE_DEAD
+                        // renders as the death animation frozen mid-fall - the folded corpse in
+                        // the grass the owner then reports as broken. Spawn means alive and
+                        // standing, and the module says so outright instead of trusting the
+                        // stale state the character brought with it.
+                        if (!fresh->IsAlive())
+                            fresh->ResurrectPlayer(1.0f, false);
+                        fresh->SetStandState(UNIT_STAND_STATE_STAND);
+
                         EnsureBags(master, fresh);
                         EnsureStartingGear(master, fresh);
 
