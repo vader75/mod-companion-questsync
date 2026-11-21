@@ -204,134 +204,6 @@ local function NewPin(index)
     return f
 end
 
--- Forward declarations: Redraw (below) draws the legend, and BuildLegend is defined
--- after it. Without the forward declaration Redraw resolved the name to the global -
--- nil at call time - and every redraw since the redesign died on it, which is why
--- pins stopped appearing no matter how correct their data was.
-local BuildLegend
-
-function CompanionPins:Redraw()
-    if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
-
-    local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
-    local shown = 0
-    local placed = {}
-    -- The zone filter must fail OPEN: if the client API is missing or misbehaves,
-    -- every pin draws (the pre-filter behaviour) rather than none.
-    local mapName = nil
-    if GetMapInfo then
-        local ok, value = pcall(GetMapInfo)
-        if ok and value then mapName = tostring(value) end
-    end
-
-
-    for i, pin in ipairs(self.pins) do
-        -- "/cpins only <name>" narrows the map to one companion; the others are hidden
-        -- but kept, so clearing the filter brings them straight back.
-        -- A pin belongs to the zone it was made in; drawing it on every map and every
-        -- continent read as "a pin over the wrong town", and the tooltip's zone line was
-        -- the only hint. The zone stamp now decides where the pin shows. While a pin is
-        -- drawn it keeps its data, so opening the right zone's map brings it back.
-        local hidden = CompanionPins.only and pin.companion
-                       and CompanionPins.only ~= string.lower(pin.companion)
-        if not hidden and CompanionPins.only and not pin.companion then
-            hidden = true    -- the filter narrows to companions; untagged pins are not a match
-        end
-        -- Zone names disagree between the DBC ("Elwynn") and the client's map title
-        -- ("Elwynn Forest"); an exact compare hid every pin on every map. A name that
-        -- CONTAINS the other is the same place.
-        if not hidden and pin.zone and mapName then
-            local pz, mz = string.lower(pin.zone), string.lower(mapName)
-            if not string.find(mz, pz, 1, true) and not string.find(pz, mz, 1, true) then
-                hidden = true
-            end
-        end
-
-        if self.debug then
-            DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffCompanionPins|r pin '%s' zone '%s' vs map '%s' -> %s",
-                pin.quest or "?", pin.zone or "-", mapName or "-",
-                hidden and "hidden" or "drawn"))
-        end
-
-        if hidden then
-            if CompanionPins.frames[i] then CompanionPins.frames[i]:Hide() end
-            shown = shown + 0
-        else
-        -- Reuse the frame at this index: creating a new one per redraw orphaned the old
-        -- one, still parented to the map and still visible, so every zoom left another
-        -- marker behind that nothing could hide.
-        local f = CompanionPins.frames[i] or NewPin(i)
-        f.pin = pin
-
-        local px = ((pin.x + CompanionPins.offsetX) / 100) * w
-        local py = (FLIP_Y and (1 - (pin.y + CompanionPins.offsetY) / 100)
-                           or ((pin.y + CompanionPins.offsetY) / 100)) * h
-        f:ClearAllPoints()
-        f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
-        f:Show()
-
-        local style = pin.style or STYLE.other
-        local r, g, b = style.ring[1], style.ring[2], style.ring[3]
-
-        f.glyph:SetText(style.glyph)
-        f.glyph:SetTextColor(r, g, b)
-        f.shadow:SetText(style.glyph)
-
-        local text = pin.quest or "companion quest"
-        if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
-        f.label:SetText(text)
-        f.label:SetTextColor(r, g, b)
-
-        -- the companions that owe it, on their own muted line - every name whole
-        if pin.owners and pin.owners ~= "" then
-            f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
-        else
-            f.owner:SetText("")
-        end
-
-        -- Nudge the label down a row when it would land on one already placed: two
-        -- Goldshire hand-ins are four percent apart, invisible at map scale.
-        local width = f.label:GetStringWidth()
-        local row = 0
-        for attempt = 0, 3 do
-            row = attempt
-            local clash = false
-            local myCentreX = px + 16 + width / 2
-            for _, other in ipairs(placed) do
-                if math.abs(myCentreX - other.x) * 2 < (width + other.w)
-                   and math.abs(py - (other.y)) < 13 then
-                    clash = true
-                    break
-                end
-            end
-            if not clash then break end
-        end
-
-        f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
-        -- the clash test compares this pin's GLYPH centre against the other's LABEL
-        -- centre; both sides now use the label centre, so a near-miss cannot pass
-        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
-
-        end   -- /cpins only
-        shown = shown + 1
-    end
-
-    for i = #self.pins + 1, #self.frames do
-        self.frames[i]:Hide()
-        self.frames[i].pin = nil
-    end
-
-    local lg = BuildLegend()
-
-    if CompanionPins.showLegend == false or #self.pins == 0 then
-        lg:Hide()
-    else
-        lg:Show()
-    end
-end
-
---------------------------------------------------------------------------
 -- legend: what a marker means, bottom right of the map
 --------------------------------------------------------------------------
 
@@ -481,6 +353,130 @@ zoneWatch:SetScript("OnEvent", function()
     if WorldMapFrame and WorldMapFrame:IsShown() then CompanionPins:Redraw() end
 end)
 
+
+
+function CompanionPins:Redraw()
+    if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
+
+    local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
+    local shown = 0
+    local placed = {}
+    -- The zone filter must fail OPEN: if the client API is missing or misbehaves,
+    -- every pin draws (the pre-filter behaviour) rather than none.
+    local mapName = nil
+    if GetMapInfo then
+        local ok, value = pcall(GetMapInfo)
+        if ok and value then mapName = tostring(value) end
+    end
+
+
+    for i, pin in ipairs(self.pins) do
+        -- "/cpins only <name>" narrows the map to one companion; the others are hidden
+        -- but kept, so clearing the filter brings them straight back.
+        -- A pin belongs to the zone it was made in; drawing it on every map and every
+        -- continent read as "a pin over the wrong town", and the tooltip's zone line was
+        -- the only hint. The zone stamp now decides where the pin shows. While a pin is
+        -- drawn it keeps its data, so opening the right zone's map brings it back.
+        local hidden = CompanionPins.only and pin.companion
+                       and CompanionPins.only ~= string.lower(pin.companion)
+        if not hidden and CompanionPins.only and not pin.companion then
+            hidden = true    -- the filter narrows to companions; untagged pins are not a match
+        end
+        -- Zone names disagree between the DBC ("Elwynn") and the client's map title
+        -- ("Elwynn Forest"); an exact compare hid every pin on every map. A name that
+        -- CONTAINS the other is the same place.
+        if not hidden and pin.zone and mapName then
+            local pz, mz = string.lower(pin.zone), string.lower(mapName)
+            if not string.find(mz, pz, 1, true) and not string.find(pz, mz, 1, true) then
+                hidden = true
+            end
+        end
+
+        if self.debug then
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffCompanionPins|r pin '%s' zone '%s' vs map '%s' -> %s",
+                pin.quest or "?", pin.zone or "-", mapName or "-",
+                hidden and "hidden" or "drawn"))
+        end
+
+        if hidden then
+            if CompanionPins.frames[i] then CompanionPins.frames[i]:Hide() end
+            shown = shown + 0
+        else
+        -- Reuse the frame at this index: creating a new one per redraw orphaned the old
+        -- one, still parented to the map and still visible, so every zoom left another
+        -- marker behind that nothing could hide.
+        local f = CompanionPins.frames[i] or NewPin(i)
+        f.pin = pin
+
+        local px = ((pin.x + CompanionPins.offsetX) / 100) * w
+        local py = (FLIP_Y and (1 - (pin.y + CompanionPins.offsetY) / 100)
+                           or ((pin.y + CompanionPins.offsetY) / 100)) * h
+        f:ClearAllPoints()
+        f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
+        f:Show()
+
+        local style = pin.style or STYLE.other
+        local r, g, b = style.ring[1], style.ring[2], style.ring[3]
+
+        f.glyph:SetText(style.glyph)
+        f.glyph:SetTextColor(r, g, b)
+        f.shadow:SetText(style.glyph)
+
+        local text = pin.quest or "companion quest"
+        if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
+        f.label:SetText(text)
+        f.label:SetTextColor(r, g, b)
+
+        -- the companions that owe it, on their own muted line - every name whole
+        if pin.owners and pin.owners ~= "" then
+            f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
+        else
+            f.owner:SetText("")
+        end
+
+        -- Nudge the label down a row when it would land on one already placed: two
+        -- Goldshire hand-ins are four percent apart, invisible at map scale.
+        local width = f.label:GetStringWidth()
+        local row = 0
+        for attempt = 0, 3 do
+            row = attempt
+            local clash = false
+            local myCentreX = px + 16 + width / 2
+            for _, other in ipairs(placed) do
+                if math.abs(myCentreX - other.x) * 2 < (width + other.w)
+                   and math.abs(py - (other.y)) < 13 then
+                    clash = true
+                    break
+                end
+            end
+            if not clash then break end
+        end
+
+        f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
+        -- the clash test compares this pin's GLYPH centre against the other's LABEL
+        -- centre; both sides now use the label centre, so a near-miss cannot pass
+        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
+
+        end   -- /cpins only
+        shown = shown + 1
+    end
+
+    for i = #self.pins + 1, #self.frames do
+        self.frames[i]:Hide()
+        self.frames[i].pin = nil
+    end
+
+    local lg = BuildLegend()
+
+    if CompanionPins.showLegend == false or #self.pins == 0 then
+        lg:Hide()
+    else
+        lg:Show()
+    end
+end
+
+--------------------------------------------------------------------------
 --------------------------------------------------------------------------
 -- commands
 --------------------------------------------------------------------------
