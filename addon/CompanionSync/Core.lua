@@ -134,10 +134,27 @@ function G.ParseCompPayload(payload)
         end
     end
 
+    -- Sticky ordering: cards re-sorted every poll could move under the mouse, so the
+    -- Release button belonged to a different companion fifteen seconds later. A name
+    -- keeps the slot it first held; only a NEW member takes a fresh slot.
+    G.cardOrder = G.cardOrder or {}
+    for _, row in ipairs(rows) do
+        if not G.cardOrder[row.name] then
+            local highest = 0
+            for _, slot in pairs(G.cardOrder) do highest = math.max(highest, slot) end
+            G.cardOrder[row.name] = highest + 1
+        end
+    end
+    for name in pairs(G.cardOrder) do
+        local still = false
+        for _, row in ipairs(rows) do
+            if row.name == name then still = true break end
+        end
+        if not still then G.cardOrder[name] = nil end
+    end
+
     table.sort(rows, function(a, b)
-        local ao, bo = G.HasFlag(a, "o"), G.HasFlag(b, "o")
-        if ao ~= bo then return ao end
-        return a.name < b.name
+        return (G.cardOrder[a.name] or 99) < (G.cardOrder[b.name] or 99)
     end)
 
     return rows
@@ -166,7 +183,9 @@ function G.SetCompanions(rows)
             if row.name == name then still = true break end
         end
 
-        if not still or now - asked > 120 then G.releasing[name] = nil end
+        -- a refusal leaves the card saying "releasing..." while nothing happens; the
+        -- fallback expiry is the release sequence's honest length, not two minutes
+        if not still or now - asked > 25 then G.releasing[name] = nil end
     end
 
     if G.OnCompanionsChanged then G.OnCompanionsChanged() end

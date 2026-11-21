@@ -12,7 +12,9 @@
 
 local ADDON = "CompanionPins"
 -- Pins are deleted, never recoloured, once they are this old. /cpins life changes it.
-local PIN_LIFETIME = 30 * 60
+local PIN_LIFETIME = 30 * 60          -- work-left pins: a standing errand
+local HANDIN_LIFETIME = 5 * 60        -- hand-in pins: a ready state, and the 'Finished'
+                                      -- whisper or the next sync is the real cleanup
 local FLIP_Y = false
 
 local CompanionPins = CreateFrame("Frame")
@@ -88,6 +90,7 @@ local function SaveDB()
     CompanionPinsDB = CompanionPinsDB or {}
     CompanionPinsDB.offsetX, CompanionPinsDB.offsetY = CompanionPins.offsetX, CompanionPins.offsetY
     CompanionPinsDB.showLegend = CompanionPins.showLegend
+    CompanionPinsDB.lifetime = PIN_LIFETIME
     CompanionPinsDB.pins = {}
     for i, pin in ipairs(CompanionPins.pins) do
         CompanionPinsDB.pins[i] = { x = pin.x, y = pin.y, at = pin.at, quest = pin.quest,
@@ -99,6 +102,21 @@ local function LoadDB()
     CompanionPinsDB = CompanionPinsDB or { pins = {} }
     CompanionPins.showLegend = CompanionPinsDB.showLegend
     if CompanionPins.showLegend == nil then CompanionPins.showLegend = true end
+
+    -- A pin restored from the DB was drawn last session; anything past its life is a
+    -- ghost for a quest that may have been abandoned server-side. Prune here and save,
+    -- so closing the client straight after does not resurrect them next login.
+    if CompanionPinsDB.pins then
+        local now = time()
+        local kept = {}
+        for i, pin in ipairs(CompanionPinsDB.pins) do
+            local life = (pin.style == "handin") and HANDIN_LIFETIME or PIN_LIFETIME
+            if not pin.at or (now - pin.at) <= life then
+                kept[#kept + 1] = pin
+            end
+        end
+        CompanionPinsDB.pins = kept
+    end
     CompanionPins.offsetX = CompanionPinsDB.offsetX or 0
     CompanionPins.offsetY = CompanionPinsDB.offsetY or 0
     PIN_LIFETIME = CompanionPinsDB.lifetime or PIN_LIFETIME
@@ -112,7 +130,10 @@ end
 
 local function AddPin(x, y, style, quest, companion)
     for _, pin in ipairs(CompanionPins.pins) do
-        if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5 then
+        -- coordinates alone collapsed two different quests whose turn-ins were blocks
+        -- apart; the quest name joins the key, and the label-nudge rows handle overlap
+        if math.abs(pin.x - x) < 1.5 and math.abs(pin.y - y) < 1.5
+           and string.lower(pin.quest or "") == string.lower(quest or "") then
             pin.at, pin.style, pin.quest, pin.zone = time(), style, quest, CurrentZoneName()
             pin.companion = companion
             SaveDB(); CompanionPins:Redraw()
@@ -134,9 +155,16 @@ local function SyncPins(payload)
         if x and y then
             local key = string.lower(name)
             local kept = nil
+            local oldStyle = nil
             for _, pin in ipairs(CompanionPins.pins) do
-                if string.lower(pin.quest or "") == key then kept = pin.at end
+                if string.lower(pin.quest or "") == key then
+                    kept = pin.at
+                    oldStyle = pin.style and pin.style.key or nil
+                end
             end
+            -- g -> h means "it is ready NOW": the old timestamp would carry the errand's
+            -- whole history, and a pin could expire minutes after it became useful
+            if oldStyle ~= style then kept = nil end
             local title, companion = SplitCompanion(name)
             if companion then
                 CompanionPins.companions = CompanionPins.companions or {}
@@ -242,11 +270,13 @@ function CompanionPins:Redraw()
     local now = time()
     local shown = 0
     local placed = {}
+    local mapName = select(1, GetMapInfo())
 
     -- Drop pins that have outlived their use instead of recolouring them: the old
     -- "stale" tint was a dark plate that read as a black square nothing ever removed.
     for i = #self.pins, 1, -1 do
-        if (now - (self.pins[i].at or 0)) > PIN_LIFETIME then
+        local life = (self.pins[i].style and self.pins[i].style.key == "handin") and HANDIN_LIFETIME or PIN_LIFETIME
+        if (now - (self.pins[i].at or 0)) > life then
             table.remove(self.pins, i)
         end
     end
@@ -254,7 +284,21 @@ function CompanionPins:Redraw()
     for i, pin in ipairs(self.pins) do
         -- "/cpins only <name>" narrows the map to one companion; the others are hidden
         -- but kept, so clearing the filter brings them straight back.
-        if CompanionPins.only and pin.companion and CompanionPins.only ~= string.lower(pin.companion) then
+        -- A pin belongs to the zone it was made in; drawing it on every map and every
+        -- continent read as "a pin over the wrong town", and the tooltip's zone line was
+        -- the only hint. The zone stamp now decides where the pin shows. While a pin is
+        -- drawn it keeps its data, so opening the right zone's map brings it back.
+        local hidden = CompanionPins.only and pin.companion
+                       and CompanionPins.only ~= string.lower(pin.companion)
+        if not hidden and CompanionPins.only and not pin.companion then
+            hidden = true    -- the filter narrows to companions; untagged pins are not a match
+        end
+        if not hidden and pin.zone and mapName
+           and string.lower(pin.zone) ~= string.lower(mapName) then
+            hidden = true
+        end
+
+        if hidden then
             if CompanionPins.frames[i] then CompanionPins.frames[i]:Hide() end
             shown = shown + 0
         else
@@ -292,8 +336,9 @@ function CompanionPins:Redraw()
         for attempt = 0, 3 do
             row = attempt
             local clash = false
+            local myCentreX = px + 16 + width / 2
             for _, other in ipairs(placed) do
-                if math.abs(px - other.x) * 2 < (width + other.w)
+                if math.abs(myCentreX - other.x) * 2 < (width + other.w)
                    and math.abs(py - (other.y)) < 13 then
                     clash = true
                     break
@@ -303,7 +348,9 @@ function CompanionPins:Redraw()
         end
 
         f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
-        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width })
+        -- the clash test compares this pin's GLYPH centre against the other's LABEL
+        -- centre; both sides now use the label centre, so a near-miss cannot pass
+        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
 
         end   -- /cpins only
         shown = shown + 1
@@ -333,6 +380,7 @@ end
 local LEGEND = {
     { style = STYLE.handin, text = "hand in" },
     { style = STYLE.gather, text = "work left" },
+    { style = STYLE.finish, text = "to finish" },
     { style = STYLE.other,  text = "own errand" },
 }
 
@@ -542,7 +590,8 @@ SlashCmdList["WLPINS"] = function(msg)
         if name then
             CompanionPins.only = string.lower(name)
             CompanionPins:Redraw()
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " .. name .. ".")
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " .. name ..
+                " - pins from other zones are hidden until you open their map.")
         else
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r showing only " ..
                 (CompanionPins.only or "everyone") .. " - /wlpins only <name>, /wlpins all")

@@ -140,7 +140,24 @@ namespace
     };
 
     std::unordered_map<uint32, BindingSet> g_bindingCache;
-    bool g_multiCompanion = false;   // owner has more than one companion
+    std::unordered_map<uint32, bool> g_multiCompanion;   // owner guid -> more than one companion
+    std::unordered_map<uint32, bool> g_multiCompanionBySpeaker;   // bot guid -> its owner has several
+
+    /// Who is speaking: one global bool answered for the whole world and changed per
+    /// pass, so an accept-hook whisper between owners read the previous owner's answer.
+    /// The prefix decision is per owner, mirrored onto the speaking bot.
+    bool MultiCompanionSpeech(Player* bot)
+    {
+        if (!bot)
+            return false;
+
+        if (bot->GetSession() && !bot->GetSession()->IsBot())
+            return false;   // the owner asking: never a companion voice
+
+        auto itr = g_multiCompanionBySpeaker.find(bot->GetGUID().GetCounter());
+        return itr != g_multiCompanionBySpeaker.end() && itr->second;
+    }
+
     /// Every settling window in the module, in one place.
     ///
     /// These numbers are throttles, not features, and they are where past bugs lived: a
@@ -1110,7 +1127,7 @@ namespace
         // With several companions the player cannot tell who is speaking, so the name
         // goes in front. With one it would be noise, and the module is careful not to be
         // noisy.
-        std::string const spoken = (g_multiCompanion && bot)
+        std::string const spoken = (MultiCompanionSpeech(bot) && bot)
             ? bot->GetName() + ": " + text
             : text;
 
@@ -1516,7 +1533,10 @@ namespace
                         {
                             // no bag room, or the object had nothing: leave it standing rather
                             // than deactivating it, and stop rather than hop in place.
-                            if (g_cfg.debug >= 2)
+                            if (bot->GetFreeInventorySpace() == 0)
+                                SayToOwner(bot, owner, "I reached '" + go->GetName() +
+                                                       "' but my bags are full - I will tidy and come back for it.", 90);
+                            else if (g_cfg.debug >= 2)
                                 LOG_INFO("server.loading", "[CompanionQuestSync] gathering: {} reached '{}' but took nothing",
                                          bot->GetName(), go->GetName());
                             break;
@@ -2254,7 +2274,7 @@ namespace
             return;
         }
 
-        std::string const spoken = g_multiCompanion ? speaker->GetName() + ": " + chosen->text
+        std::string const spoken = MultiCompanionSpeech(speaker) ? speaker->GetName() + ": " + chosen->text
                                                     : chosen->text;
 
         last = now;
@@ -4438,7 +4458,7 @@ namespace
                 std::replace(title.begin(), title.end(), '|', '/');
                 std::replace(title.begin(), title.end(), '=', ':');
 
-                if (g_multiCompanion)
+                if (MultiCompanionSpeech(bot))
                     title += "@" + SafePinName(bot->GetName());
 
                 bool merged = false;
@@ -4628,7 +4648,8 @@ namespace
         if (g_cfg.requireGrouped && !report.grouped)
         {
             if (manual)
-                handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not in your group - nothing was synced.");
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: your companion is not in your group - quest copying "
+                                         "is skipped (hand-ins and bag upkeep still run).");
             return;
         }
 
@@ -5800,7 +5821,10 @@ namespace
         }
 
         aggregate.hasCompanion = true;
-        g_multiCompanion = bots.size() > 1;
+        g_multiCompanion[owner->GetGUID().GetCounter()] = bots.size() > 1;
+
+        for (uint32 const botGuid : bots)
+            g_multiCompanionBySpeaker[botGuid] = bots.size() > 1;
 
         // One union of turn-in markers for the owner, applied after every companion has
         // contributed: applying them per companion let the second pass clear the first
@@ -7565,7 +7589,7 @@ public:
             Player* bot = FindCompanionPlayer(botGuid);
             if (!bot || !bot->IsInWorld())
             {
-                handler->PSendSysMessage("|cffff8000{}|r is not online.", botGuid);
+                handler->PSendSysMessage("|cffff8000{}|r is not online.", CompanionNameFor(botGuid));
                 continue;
             }
 
@@ -7768,6 +7792,16 @@ public:
                 continue;
             }
 
+            if (bot->GetLevel() > player->GetLevel())
+            {
+                // AlignLevel refuses to demote on purpose: GiveLevel downwards strips
+                // spell ranks while talents may still point at them. The command must
+                // not do quietly what the sync refuses to do at all.
+                handler->PSendSysMessage("|cffff8000{}|r is level {} and stays there - the sync never demotes.",
+                                         bot->GetName(), uint32(bot->GetLevel()));
+                continue;
+            }
+
             uint8 const from = bot->GetLevel();
             bot->GiveLevel(player->GetLevel());
             ++aligned;
@@ -7917,6 +7951,9 @@ public:
         g_sessionRefused.erase(ownerGuid);
         g_whisperQueue.erase(ownerGuid);
         g_lastWhisperAt.erase(ownerGuid);
+
+        for (uint32 const botGuid : companions)
+            g_multiCompanionBySpeaker.erase(botGuid);
         g_pinnedQuests.erase(ownerGuid);
 
         // owner+bot keyed: a stale 10-minute window would suppress the "summon it"

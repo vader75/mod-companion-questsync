@@ -490,6 +490,7 @@ function G.OnServerMessage(text)
     if frame and frame.notice then
         frame.notice:SetText(COL_WARN .. text .. COL_RESET)
         frame.notice:Show()
+        frame.noticeExpires = time() + 8   -- stale refusals must not read as current state
     end
 
     if addPanel and addPanel:IsShown() and serverLine then
@@ -505,6 +506,17 @@ function G.Refresh()
     if not frame then return end
 
     local count = #G.companions
+
+    if frame.count then
+        -- The header subtitle was created and never written - dead space that looked like
+        -- missing state. It now answers the first question a returning player has.
+        local state = G.sawServerLine and "|cff20ff20server answering|r" or "|cffff6060server not answering|r"
+        if G.releasing and next(G.releasing) then
+            state = "|cffffc94dworking - releasing...|r"
+        end
+        frame.count:SetText(count == 0 and state
+            or (COL_MUTED .. count .. (count == 1 and " companion · " or " companions · ") .. COL_RESET) .. state)
+    end
 
     for i = 1, MAX_CARDS do
         local card = cards[i]
@@ -620,6 +632,12 @@ local function CreateWindow()
     frame.count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.count:SetPoint("TOPLEFT", PAD, -34)
 
+    -- The notice used to be a ratchet: the last refusal stayed current-looking forever,
+    -- and a click answered nothing until a chat line happened to arrive. A notice now
+    -- fades after a few seconds unless a newer one replaced it, and a click writes its
+    -- own "asking the server..." first.
+    frame.noticeExpires = 0
+
     frame.divider = frame:CreateTexture(nil, "BORDER")
     frame.divider:SetPoint("TOPLEFT", PAD, -HEADER_HEIGHT + 1)
     frame.divider:SetPoint("TOPRIGHT", -PAD, -HEADER_HEIGHT + 1)
@@ -636,6 +654,12 @@ local function CreateWindow()
     frame.elapsed = 0
     frame:SetScript("OnUpdate", function(self, delta)
         self.elapsed = self.elapsed + delta
+
+        if frame.notice and frame.notice:IsShown() and frame.noticeExpires > 0 and time() > frame.noticeExpires then
+            frame.notice:Hide()
+            frame.noticeExpires = 0
+        end
+
         if self.elapsed >= POLL_SECONDS then
             self.elapsed = 0
 
@@ -695,21 +719,30 @@ local function CreateWindow()
     footer:SetPoint("BOTTOMRIGHT", -PAD, 10)
     footer:SetHeight(22)
 
-    local summonAll = Button(footer, "Summon missing", 108, function() G.Action("summon") end,
+    local Ack = function()
+        if frame.notice then
+            frame.notice:SetText(COL_MUTED .. "asking the server..." .. COL_RESET)
+            frame.notice:Show()
+            frame.noticeExpires = time() + 4
+        end
+    end
+
+    local summonAll = Button(footer, "Summon missing", 108, function() Ack() G.Action("summon") end,
         "Bring out every companion that is not with you.")
     summonAll:SetPoint("LEFT", 0, 0)
 
-    local dismissAll = Button(footer, "Dismiss all", 84, function() G.Action("dismiss") end,
+    local dismissAll = Button(footer, "Dismiss all", 84, function() Ack() G.Action("dismiss") end,
         "Send every companion away. They stay bound.")
     dismissAll:SetPoint("LEFT", summonAll, "RIGHT", 6, 0)
 
     local refresh = Button(footer, "Refresh", 66, function()
+        Ack()
         G.Run(".companionsync pins")
         G.Run(".companionsync pool")
     end, "Ask the server for the current state.")
     refresh:SetPoint("LEFT", dismissAll, "RIGHT", 6, 0)
 
-    local quests = Button(footer, "Quest log", 76, function() G.Run(".companionsync quests") end,
+    local quests = Button(footer, "Quest log", 76, function() Ack() G.Run(".companionsync quests") end,
         "Print what each companion is carrying to chat.")
     quests:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 
