@@ -1433,7 +1433,14 @@ namespace
 
             float x = float(entry.points[0].x);
             float y = float(entry.points[0].y);
-            Map2ZoneCoordinates(x, y, entry.AreaId);
+
+            // Probe the point's own zone for the conversion - the POI record's
+            // WorldMapAreaId is a world-map reference (here id 30, a custom area with no
+            // coordinate table), not the zone the point lives in. ZoneAt walks terrain
+            // at the point and returns the enclosing zone; that is the zone the numbers
+            // convert against and the zone the pin is named for.
+            uint32 const poiZone = ZoneAt(entry.MapId, bot->GetPhaseMask(), x, y, 0.0f);
+            Map2ZoneCoordinates(x, y, poiZone ? poiZone : bot->GetZoneId());
 
             if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
                 continue;
@@ -1447,7 +1454,7 @@ namespace
                 continue;
 
             numbersOut = numbers;
-            zoneOut = ZoneName(entry.AreaId);
+            zoneOut = ZoneName(poiZone ? poiZone : bot->GetZoneId());
             return true;
         }
 
@@ -4406,10 +4413,12 @@ namespace
                 {
                     EnderSpot const& spot = FindQuestEnder(questId);
 
-                    // Only pin a giver standing in the same zone. Stormwind and Elwynn
-                    // share map 0, so a map check alone let Morgan Pestle be pinned on
-                    // the Elwynn map at a plausible-looking but wrong spot.
-                    if (spot.found && spot.map == bot->GetMapId() && spot.zone == bot->GetZoneId())
+                    // The giver pin exists wherever the quest is: the coordinates are the
+                    // giver's own, the zone is the giver's own, and the client shows the
+                    // pin on that zone's map. The old same-zone guard - against the
+                    // BOT's zone - refused the pin whenever the party was one zone away,
+                    // which is exactly when the player needs pointing.
+                    if (spot.found && spot.map == bot->GetMapId())
                     {
                         coords = MapCoords(spot.x, spot.y, spot.zone);
                         zoneName = ZoneName(spot.zone);
