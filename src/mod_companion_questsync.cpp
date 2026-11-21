@@ -7443,6 +7443,22 @@ public:
                                  uint32(player->GetLevel()), ownerQuests,
                                  g_cfg.autoSync ? "on" : "off", g_cfg.levelMode);
 
+        // What the companion actually did this session - the same numbers the logout
+        // digest reports, answerable at any moment instead of only at the end.
+        auto last = g_session.find(player->GetGUID().GetCounter());
+        if (last != g_session.end())
+        {
+            SessionTally const& tally = last->second;
+            if (tally.added + tally.onAccept + tally.completed + tally.handedIn +
+                tally.gathered + tally.mailed + tally.destroyed > 0)
+            {
+                handler->PSendSysMessage("|cff20ff20Session|r: {} quest(s) accepted, {} completed ({} handed in), {} item(s) gathered, {} posted home in {} letter(s), {} grey item(s) binned.",
+                                         tally.added + tally.onAccept,
+                                         tally.completed + tally.handedIn, tally.handedIn,
+                                         tally.gathered, tally.mailed, tally.letters, tally.destroyed);
+            }
+        }
+
         // Counts alone cannot answer "why has it not taken my quest?". Walk the
         // difference and name the reason for each, capped so the answer stays
         // readable in the chat frame.

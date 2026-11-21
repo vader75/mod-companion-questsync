@@ -123,7 +123,13 @@ local function StatusText(companion)
     parts[#parts + 1] = ("%d quest%s"):format(companion.quests, companion.quests == 1 and "" or "s")
 
     if companion.free > 0 then
-        parts[#parts + 1] = ("%d free slots"):format(companion.free)
+        if companion.free <= 4 then
+            parts[#parts + 1] = COL_WARN .. companion.free .. " free slots - bags tight, a letter may be coming" .. COL_RESET
+        else
+            parts[#parts + 1] = ("%d free slots"):format(companion.free)
+        end
+    else
+        parts[#parts + 1] = COL_WARN .. "bags full - loot is being posted home" .. COL_RESET
     end
 
     if not G.HasFlag(companion, "g") then
