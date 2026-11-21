@@ -8466,6 +8466,32 @@ public:
                 LOG_INFO("server.loading", "[CompanionQuestSync] accept hook: {} picked up '{}' ({}) immediately",
                          bot->GetName(), quest->GetTitle(), questId);
         }
+
+        // The companions' own AI can only take quests within interaction distance of the
+        // giver, and it says "Cannot talk to quest giver" on every attempt while it stands
+        // a body-length too far away - the accept itself is never lost (the mirror above
+        // lands it, and a later in-range cycle reads back "Already on"), but the spam reads
+        // as a failure. The owner accepting is the moment a giver matters: pull each bound
+        // body that is within a short walk but not beside the owner to the owner's side, so
+        // the AI's next attempt is in range and the party stays tight at the giver.
+        uint32 const nowTs = static_cast<uint32>(time(nullptr));
+        for (uint32 const botGuid : bound)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+                continue;
+
+            float const toOwner = bot->GetDistance(player);
+            if (toOwner <= 4.0f || toOwner > 40.0f)
+                continue;
+
+            uint32& stepAt = g_walkAt[bot->GetGUID().GetCounter()];
+            if (stepAt && nowTs - stepAt < Timing::WalkStep)
+                continue;
+
+            stepAt = nowTs;
+            StepBesideOwner(player, bot, player->GetPositionX(), player->GetPositionY());
+        }
     }
 };
 
