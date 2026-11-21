@@ -4647,13 +4647,10 @@ namespace
                         if (existing.numbers != numbers || existing.zone != zoneName)
                             continue;
 
-                        // Two names read fine; four do not fit on a map marker. Past the
-                        // second, count them instead - the full list is a click away in
-                        // `.companionsync quests`.
-                        if (existing.extra || existing.title.find(" + ") != std::string::npos)
-                            ++existing.extra;
-                        else
-                            existing.title += " + " + title;
+                        // Every owner reads on the pin: the client gives the names their
+                        // own line under the quest, so a full party of four fits where the
+                        // old one-line marker forced counting past the second name.
+                        existing.title += " + " + title;
 
                         merged = true;
                         break;
