@@ -1273,22 +1273,33 @@ namespace
         return map->GetZoneId(phaseMask, x, y, z);
     }
 
-    std::unordered_map<uint32, EnderSpot> g_enderCache;   // quest id -> ender spot
+    std::unordered_map<uint64, EnderSpot> g_enderCache;   // (bot, quest) -> its nearest ender spot
 
-    EnderSpot const& FindQuestEnder(uint32 questId)
+    EnderSpot const& FindQuestEnder(Player* bot, uint32 questId)
     {
-        auto itr = g_enderCache.find(questId);
+        uint32 const botGuid = bot ? bot->GetGUID().GetCounter() : 0;
+        auto itr = g_enderCache.find((uint64(botGuid) << 32) | questId);
         if (itr != g_enderCache.end())
             return itr->second;
 
         EnderSpot spot;
 
+        float const bx = bot ? bot->GetPositionX() : 0.0f;
+        float const by = bot ? bot->GetPositionY() : 0.0f;
+        uint32 const bmap = bot ? bot->GetMapId() : 0;
+
+        // Event NPCs have one spawn per city - the Pilgrim's Bounty table turned in at
+        // whichever row LIMIT 1 happened to return, a table the companions never sat at.
+        // Spawns on the companion's own map lead, then the nearest to where it stands.
         QueryResult result = WorldDatabase.Query(
             "SELECT ct.name, c.position_x, c.position_y, c.position_z, c.map, ce.id, c.zoneId "
             "FROM creature_questender ce "
             "JOIN creature_template ct ON ct.entry = ce.id "
             "JOIN creature c ON c.id1 = ce.id "
-            "WHERE ce.quest = {} LIMIT 1", questId);
+            "WHERE ce.quest = {} "
+            "ORDER BY (c.map <> {}) ASC, "
+            "POWER(c.position_x - {}, 2) + POWER(c.position_y - {}, 2) ASC LIMIT 1",
+            questId, bmap, bx, by);
 
         if (result)
         {
@@ -1308,7 +1319,7 @@ namespace
                 spot.zone = ZoneAt(spot.map, 1, spot.x, spot.y, spot.z);
         }
 
-        return g_enderCache[questId] = spot;
+        return g_enderCache[(uint64(botGuid) << 32) | questId] = spot;
     }
 
     /// "map 52, 34" for a world position, in the client's own 0-100 scale, so the
@@ -2103,7 +2114,7 @@ namespace
             if (!DescribeMissingItems(bot, quest).empty())
                 continue;
 
-            EnderSpot const& spot = FindQuestEnder(questId);
+            EnderSpot const& spot = FindQuestEnder(bot, questId);
             if (!spot.found || !spot.entry)
                 continue;
 
@@ -2237,7 +2248,7 @@ namespace
             if (!DescribeMissingItems(bot, quest).empty())
                 continue;
 
-            EnderSpot const& spot = FindQuestEnder(questId);
+            EnderSpot const& spot = FindQuestEnder(bot, questId);
             if (!spot.found)
                 continue;
 
@@ -3282,7 +3293,7 @@ namespace
                 continue;                          // still owes items: cannot reward
             }
 
-            EnderSpot const& spot = FindQuestEnder(questId);
+            EnderSpot const& spot = FindQuestEnder(bot, questId);
             if (!spot.found || spot.map != bot->GetMapId())
                 continue;
 
@@ -4796,7 +4807,7 @@ namespace
 
                 if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
                 {
-                    EnderSpot const& spot = FindQuestEnder(questId);
+                    EnderSpot const& spot = FindQuestEnder(bot, questId);
 
                     // The giver pin exists wherever the quest is: the coordinates are the
                     // giver's own, the zone is the giver's own, and the client shows the
@@ -8073,7 +8084,7 @@ public:
                 else if (status != QUEST_STATUS_COMPLETE)
                     line += " - everything gathered";
 
-                EnderSpot const& spot = FindQuestEnder(questId);
+                EnderSpot const& spot = FindQuestEnder(bot, questId);
                 if (spot.found)
                 {
                     if (spot.zone && spot.zone != bot->GetZoneId())
