@@ -207,9 +207,21 @@ function CompanionPins:Redraw()
         if not hidden and CompanionPins.only and not pin.companion then
             hidden = true    -- the filter narrows to companions; untagged pins are not a match
         end
-        if not hidden and pin.zone and mapName
-           and string.lower(pin.zone) ~= string.lower(mapName) then
-            hidden = true
+        -- Zone names disagree between the DBC ("Elwynn") and the client's map title
+        -- ("Elwynn Forest"); an exact compare hid every pin on every map. A name that
+        -- CONTAINS the other is the same place.
+        if not hidden and pin.zone and mapName then
+            local pz, mz = string.lower(pin.zone), string.lower(mapName)
+            if not string.find(mz, pz, 1, true) and not string.find(pz, mz, 1, true) then
+                hidden = true
+            end
+        end
+
+        if self.debug then
+            DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                "|cff00ccffCompanionPins|r pin '%s' zone '%s' vs map '%s' -> %s",
+                pin.quest or "?", pin.zone or "-", mapName or "-",
+                hidden and "hidden" or "drawn"))
         end
 
         if hidden then
