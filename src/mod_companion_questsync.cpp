@@ -1618,6 +1618,7 @@ namespace
 
     void SendPinSync(Player* owner, bool force);  // defined below
     void SendHeartbeat(Player* owner);            // defined below
+    void SendCompSync(Player* owner, bool force);  // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
     ///
@@ -4725,9 +4726,18 @@ namespace
         last = now;
         SendProtocolLine(owner, "Hello " + std::to_string(g_cfg.intervalSeconds));
 
+        // The heartbeat is a state publish, not just presence: a client that just
+        // /reloaded is an empty renderer, and coalescing would never re-send an
+        // unchanged roster to it. Once a minute the module republishes the full
+        // truth - companions and pins - so the window is never waiting on a change
+        // that never comes.
+
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat -> {}: Hello {}",
                      owner->GetName(), g_cfg.intervalSeconds);
+
+        SendCompSync(owner, true);
+        SendPinSync(owner, true);
     }
 
     void SendPinSync(Player* owner, bool force = false)
