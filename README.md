@@ -220,6 +220,31 @@ each one. The defaults that matter most:
 | `AnnounceAtStartup` / `AnnounceOnLogin` | 1 / 1 | one line, so players know the module is running |
 | `Debug` / `HeartbeatSeconds` | 0 / 300 | log detail, and the heartbeat window for `Debug = 2` |
 
+## Other modules' settings this module depends on
+
+The companions are `mod-playerbots` bots: several of playerbots' own settings change what a
+companion does, and two of them override this module's logic from outside it. These are
+realm-level settings (set in the live `configs/modules/playerbots.conf`, not in this
+module's own `.conf`), and each row says what a companion does **differently** when the
+value is not the one this module expects. Verified on this realm; the flipped-away values
+are what shipped by default.
+
+| Setting | File | Expected | What a companion does differently when it differs |
+|---|---|---|---|
+| `AiPlayerbot.SyncQuestWithPlayer` | playerbots.conf | **0** | At `1` (the shipped default) playerbots force-completes a bot's copy of any quest the player has complete the moment the bot's AI talks to the giver — **owed quest items ignored** — and a second path force-completes any incomplete quest it discusses. It rewards companions for quests they never finished, overriding this module's owed-items guard, and it silences the companions' own "Cannot talk to quest giver" accept attempts by letting the AI accept remotely. At `0` this module owns completion truth, and the accept hook keeps the party within interaction distance of the giver instead |
+| `AiPlayerbot.LootNeedRollLevel` | playerbots.conf | **2** | `1` (shipped default) downgrades every equip-upgrade vote NEED→GREED; the companions then never roll need on their own upgrades |
+| `AiPlayerbot.LootGreedRollLevel` | playerbots.conf | **1** | `0` (shipped default) converts every GREED→PASS — so no BoE item ever reaches a companion's bags, gear progression stalls forever beyond the starter kit, and the equip-upgrade dispatcher has nothing to equip. At `1` companions roll NEED on real upgrades and GREED on vendorables, which this module's bag ladder sells |
+| `AiPlayerbot.AutoPickReward` | playerbots.conf | **yes** | `no` makes the bot AI list reward choices and ask for help on its own turn-ins — chat noise the module's scored pick already handles; `yes` lets its turn-in pick silently, and the module's own choice (the same stat-weight scoring) covers the hand-ins the module performs |
+| `DataDir` | worldserver.conf | the server's own `data` directory | This module parses `DataDir/dbc/WorldMapArea.dbc` at boot for pin zones (the core's own WorldMapArea store is broken twice on this repack). A wrong `DataDir` costs the boot line "cannot open … - pin zones fall back to the terrain probe", and the terrain probe is the quietly wrong layer the module was built to avoid |
+| AddClass bodies marked `playerbots_account_type = 2` | `wl_playerbots` database | **2** | `PoolAccountType` reads this to identify pool bodies; unmarked bodies fail the pool checks and are refused as companions |
+
+Two behaviours are **by design on the boundary** between the modules, not config: the
+companions' own AI may still accept quests and turn in its own completed copies when it is
+in range of a giver (its narration, its choice of reward — both scored the same way this
+module scores), and this module's accept hook mirrors the owner's accepts instantly either
+way. Whoever reaches a turn-in first performs it; the other sees the copy rewarded and
+stays quiet.
+
 ## What a new companion arrives wearing
 
 Dressed the moment it spawns, not on the next pass: a class weapon, a chest, legs and
