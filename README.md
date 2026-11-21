@@ -79,12 +79,15 @@ Per pass, for each owner with bindings:
    goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
    walking away never teleports anything, and a companion is never dragged into a
    battleground or arena. `FollowThroughTeleport = 0` turns it off.
-7. **Hand-ins are distance-free** (`HandInMode = 1`) — a finished quest is rewarded the way
-   the gossip window would reward it: the same core call, no giver object required. The
-   companion still walks up to the NPC so the turn-in is seen, but the world cannot block the
-   reward; on a choice of rewards it picks the highest item level and says which it kept.
-   `0` returns to the bot-AI path, which needs the giver in the companion's sight - the shape
-   that produced "I cannot talk to the quest giver".
+7. **Hand-ins happen in reach of the giver** (`HandInMode = 2`, the default) — a finished
+   quest rewards itself when the companion is within `HandInNearDistance` (40 yards) of the
+   giver: the same core call the gossip window would make, no giver object required, the
+   companion still stepping up to the NPC so the turn-in is seen. On a choice of rewards it
+   picks the highest item level and says which it kept. Beyond that range nothing is
+   rewarded and nothing blinks - the companion whispers to be led closer, and the gold pin
+   on the giver's map points the way. `1` rewards from any distance; `0` returns to the
+   bot-AI path, which needs the giver in the companion's sight - the shape that produced
+   "I cannot talk to the quest giver".
 8. **Hand-in steps — a hearthstone, a portal or a summon moves the player, so the companion
    goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
    walking away never teleports anything, and a companion is never dragged into a
@@ -209,7 +212,7 @@ each one. The defaults that matter most:
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
-| `HandInMode` / `HandInDelaySeconds` | 1 / 20 | server-side hand-in; a finished quest stays visible (gold pin, companion at the giver) this long before it rewards |
+| `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |
 | `AnnounceAtStartup` / `AnnounceOnLogin` | 1 / 1 | one line, so players know the module is running |
 | `Debug` / `HeartbeatSeconds` | 0 / 300 | log detail, and the heartbeat window for `Debug = 2` |
 
