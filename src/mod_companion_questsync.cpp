@@ -355,6 +355,7 @@ namespace
         uint32 botGuid = 0;      // who said it: the flush speaks as this companion
         uint32 questId = 0;      // 0 = no revalidation possible, only age applies
         uint32 queuedAt = 0;
+        bool vital = false;      // pin-clear notices: never dropped as stale, always first
     };
 
     struct PendingNotice
@@ -1092,8 +1093,18 @@ namespace
                 if (entry.botGuid == botGuid && entry.text == text)
                     dup = true;
 
+            // "Finished 'X' - that pin can go." is the message that removes a map pin:
+            // dropping it as stale was how a handed-in quest left a blue pin behind
+            // until the next full pin sync. It is spoken first and never aged out.
+            bool const vital = text.rfind("Finished '", 0) == 0;
+
             if (queue.size() < 4 && !dup)
-                queue.push_back({ text, botGuid, validWhileMissing, now });
+            {
+                if (vital)
+                    queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true });
+                else
+                    queue.push_back({ text, botGuid, validWhileMissing, now, false });
+            }
 
             if (g_cfg.debug >= 2)
                 LOG_INFO("server.loading", "[CompanionQuestSync] whisper queued (rate limit): {}", spoken);
@@ -2124,12 +2135,20 @@ namespace
         {
             Player* speaker = entry->botGuid ? FindCompanionPlayer(entry->botGuid) : nullptr;
 
+            bool const vital = entry->vital || entry->text.rfind("Finished '", 0) == 0;
+
             bool stale = !speaker || !speaker->IsInWorld();
-            if (!stale && entry->queuedAt && now > entry->queuedAt)
-                stale = now - entry->queuedAt > 120;
-            if (!stale && entry->questId)
-                stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_NONE ||
-                        speaker->IsQuestRewarded(entry->questId);
+            if (!stale && !vital)
+            {
+                // A held-back line about work that finished inside the window reads
+                // like a broken module. But the pin-clear notice IS the work finishing -
+                // it must survive its own completion.
+                if (entry->queuedAt && now > entry->queuedAt)
+                    stale = now - entry->queuedAt > 120;
+                else if (entry->questId)
+                    stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_NONE ||
+                            speaker->IsQuestRewarded(entry->questId);
+            }
 
             if (!stale)
             {
