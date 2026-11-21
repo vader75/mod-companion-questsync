@@ -98,7 +98,9 @@ namespace
         bool announceLogin      = true;
         bool catchUpGroundItems = true;    // finish a ground-object quest the world will not yield
         bool followThroughTeleport = true; // a hearthstone, portal or summon takes the companion too
-        uint8 handInMode         = 1;      // 1 = server-side, 0 = through the bot's own AI
+        uint8 handInMode         = 1;      // 1 = server-side anywhere, 2 = server-side near the giver,
+                                           // 0 = through the bot's own AI
+        float handInNear         = 40.0f;  // HandInMode 2: the auto hand-in range, yards
         uint32 handInDelaySeconds = 20;    // a finished quest is visible this long before it rewards
         uint32 catchUpIdleSeconds = 120;   // how long the count must sit still first
         uint32 intervalSeconds  = 20;
@@ -304,6 +306,7 @@ namespace
     /// The middle ground between instant and manual: the finished quest is visible as a gold
     /// pin for HandInDelaySeconds, then rewards itself.
     std::map<uint64, uint32> g_readyAt;
+    std::map<uint64, uint32> g_leadNudgeAt;  // (bot, quest) -> last lead-me whisper
 
     /// Owners whose teleport has just been seen: the companion is brought along a moment
     /// later, once the client has finished loading the destination.
@@ -509,6 +512,7 @@ namespace
         g_cfg.catchUpGroundItems = sConfigMgr->GetOption<bool>("CompanionQuestSync.CatchUpGroundItems", true);
         g_cfg.followThroughTeleport = sConfigMgr->GetOption<bool>("CompanionQuestSync.FollowThroughTeleport", true);
         g_cfg.handInMode         = sConfigMgr->GetOption<uint8>("CompanionQuestSync.HandInMode", 1);
+        g_cfg.handInNear         = sConfigMgr->GetOption<float>("CompanionQuestSync.HandInNearDistance", 40.0f);
         g_cfg.handInDelaySeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.HandInDelaySeconds", 20);
         g_cfg.catchUpIdleSeconds = sConfigMgr->GetOption<uint32>("CompanionQuestSync.CatchUpIdleSeconds", 120);
         g_cfg.intervalSeconds    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.IntervalSeconds", 30);
@@ -3132,7 +3136,25 @@ namespace
 
             float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
 
-            if (g_cfg.handInMode == 1)
+            if (g_cfg.handInMode == 2 && dist > g_cfg.handInNear)
+            {
+                // The companion can finish the hand-in itself, but only where a player
+                // could too: in reach of the giver, not across half the map. Beyond the
+                // range it asks to be led - the gold pin on the giver's map is already
+                // pointing there - and nothing is rewarded and nothing blinks.
+                uint64 const leadKey = (uint64(botGuid) << 32) | questId;
+                uint32& nudgedAt = g_leadNudgeAt[leadKey];
+                if (!nudgedAt || nowTs - nudgedAt >= 180)
+                {
+                    nudgedAt = nowTs;
+                    SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' at " +
+                               spot.name + " myself, but only up close - lead me within about " +
+                               std::to_string(uint32(g_cfg.handInNear)) + " yards of it and I will do the rest.", 90);
+                }
+                continue;
+            }
+
+            if (g_cfg.handInMode >= 1)
             {
                 uint64 const readyKey = (uint64(botGuid) << 32) | questId;
 
