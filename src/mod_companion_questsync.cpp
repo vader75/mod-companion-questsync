@@ -2967,14 +2967,8 @@ namespace
         // companion that never leaves a fight (a Westfall grind is exactly that) would
         // otherwise wait for a quiet pass that never comes
         if (g_cfg.debug >= 2)
-            LOG_INFO("server.loading", "[CompanionQuestSync] catch-up gate: cfg={} world={} alive={} ownerZone={} ownerMap={} botMap={}",
-                     g_cfg.gatherCatchUp, bot->IsInWorld(), bot->IsAlive(),
-                     owner->GetZoneId(), owner->GetMapId(), bot->GetMapId());
         if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive())
             return;
-
-        // and past the map check, so a silent return here cannot hide
-        LOG_INFO("server.loading", "[CompanionQuestSync] catch-up past the map check");
 
         if (owner->GetMapId() != bot->GetMapId() || !owner->GetZoneId())
             return;
