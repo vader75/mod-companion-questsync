@@ -3,24 +3,20 @@
 -- The window. Two regions: a roster of cards (one per companion) and an overlay panel for
 -- minting a new one. Every action is a button; nothing here expects typing except the name.
 --
--- Layout rules that keep it from turning into soup:
---   * a card has exactly three text baselines (name, race/class/level, status) and one
---     column of buttons pinned to the right, so text never runs under a button;
---   * the status line is width-limited rather than allowed to wrap into the buttons;
---   * the panel uses a labelled grid: label above control, controls on a 24 px rhythm.
+-- Cards keep role, status and skill rows on the left; actions stay on the right.
 
 local addonName, G = ...
 
 local WIDTH = 680
-local PAD = 16                      -- one inset for every edge; nothing is eyeballed
-local CARD_HEIGHT = 88
+local PAD = 16
+local CARD_HEIGHT = 100
 local CARD_GAP = 8
 local HEADER_HEIGHT = 62
 local FOOTER_HEIGHT = 68          -- buttons, roster hint and the server's answer
-local EMPTY_HEIGHT = 108            -- the "no companions yet" copy needs room of its own
-local ADD_PANEL_HEIGHT = 278        -- race/class, name, pool stock, answer, Create/Cancel
+local EMPTY_HEIGHT = 108         -- the "no companions yet" copy needs room of its own
+local ADD_PANEL_HEIGHT = 278      -- race/class, name, pool stock, answer, Create/Cancel
 local MAX_CARDS = 4
-local TEXT_RIGHT_INSET = 208        -- leaves room for the button column
+local SKILL_WIDTH = 182
 
 local COL_MUTED = "|cff9d9d9d"
 local COL_GOOD  = "|cff20ff20"
@@ -108,81 +104,60 @@ end
 -- cards
 -- ---------------------------------------------------------------------------
 
--- A chip is a small outlined pill with one or two words, in the colour of its meaning:
--- gold for work in progress, green for something ready, muted for quiet fact. It says
--- what something is; it is never the thing you click. The row under a companion reads
--- as three of them, and the hover carries the detail.
-local function Chip(parent, anchor, order)
-    local chip = CreateFrame("Frame", nil, parent)
-    chip:SetHeight(15)
-    chip:SetPoint("TOPLEFT", anchor, "TOPLEFT", 16 + (order - 1) * 108, -50)
+function G.CardState(companion)
+    local online = G.HasFlag(companion, "o")
+    local dead = G.HasFlag(companion, "d")
+    local releasing = G.releasing and G.releasing[companion.name]
+    local state = {
+        online = online, dead = dead, releasing = releasing,
+        status = releasing and "Releasing…" or dead and "Dead" or not online and "Dismissed"
+            or G.HasFlag(companion, "g") and "In party" or "Summoned",
+    }
+    if not online or releasing then return state end
 
-    chip.bg = chip:CreateTexture(nil, "BACKGROUND")
-    chip.bg:SetAllPoints()
-    chip.bg:SetTexture(1, 1, 1, 0.05)
-
-    chip.edge = CreateFrame("Frame", nil, chip)
-    chip.edge:SetAllPoints()
-    chip.edge:SetBackdrop({
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
-    })
-    chip.edge:SetBackdropBorderColor(1, 1, 1, 0.14)
-
-    chip.text = chip:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    chip.text:SetPoint("CENTER", 0, 0)
-
-    return chip
+    local skills = G.professionSkills[companion.name]
+    if skills then
+        state.gather, state.craft = skills.gather, skills.craft
+    elseif companion.gather then
+        local name, current, cap = string.match(companion.gather, "^(.*%S)%s+(%d+)/(%d+)$")
+        if name then state.gather = { name = name, current = tonumber(current), cap = tonumber(cap) } end
+    end
+    state.quests, state.free = companion.quests, companion.free
+    return state
 end
 
-local function StatusText(companion)
-    -- a release is a server-side sequence (dismiss, wipe, rename, unbind, ledger); until the
-    -- roster drops the name, say so rather than looking like a button that did nothing
-    if G.releasing and G.releasing[companion.name] then
-        return COL_WARN .. "releasing - wiping and returning it to the pool..." .. COL_RESET
+local function SkillTrack(parent, x)
+    local track = CreateFrame("Frame", nil, parent)
+    track:SetSize(SKILL_WIDTH, 22)
+    track:SetPoint("TOPLEFT", x, -51)
+    track.text = track:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    track.text:SetPoint("TOPLEFT", 0, 0)
+    track.background = track:CreateTexture(nil, "BACKGROUND")
+    track.background:SetPoint("BOTTOMLEFT", 0, 1)
+    track.background:SetSize(SKILL_WIDTH, 3)
+    track.background:SetTexture(1, 1, 1, 0.12)
+    track.fill = track:CreateTexture(nil, "ARTWORK")
+    track.fill:SetPoint("BOTTOMLEFT", 0, 1)
+    track.fill:SetHeight(3)
+    return track
+end
+
+local function UpdateSkill(track, skill, fallback, r, g, b)
+    if not skill or skill.cap == 0 then
+        track.text:SetText(COL_MUTED .. (skill and (skill.name .. " · Not learned") or fallback) .. COL_RESET)
+        track.background:Hide()
+        track.fill:Hide()
+        return
     end
-
-    -- a dead companion used to read like a healthy one: same card, same buttons, the
-    -- truth discoverable only from a refusal line. The flag dominates everything else.
-    if G.HasFlag(companion, "d") then
-        return COL_BAD .. "dead - Revive raises it beside you, or its spirit walks back from the graveyard" .. COL_RESET
-    end
-
-    if not G.HasFlag(companion, "o") then
-        return COL_WARN .. "not in the world - Summon brings it back" .. COL_RESET
-    end
-
-    local parts = {}
-    parts[#parts + 1] = ("%d quest%s"):format(companion.quests, companion.quests == 1 and "" or "s")
-
-    if companion.gather then
-        parts[#parts + 1] = COL_MUTED .. companion.gather .. COL_RESET
-    end
-
-    if companion.free > 0 then
-        if companion.free <= 4 then
-            parts[#parts + 1] = COL_WARN .. companion.free .. " free slots - bags tight, a letter may be coming" .. COL_RESET
-        else
-            parts[#parts + 1] = ("%d free slots"):format(companion.free)
-        end
+    track.text:SetText(("%s  %s%d / %d%s"):format(skill.name, COL_MUTED, skill.current, skill.cap, COL_RESET))
+    track.background:Show()
+    if skill.current == 0 then
+        track.fill:Hide()
     else
-        parts[#parts + 1] = COL_WARN .. "bags full - loot is being posted home" .. COL_RESET
+        track.fill:SetTexture(r, g, b, 0.8)
+        track.fill:SetWidth(math.max(1, SKILL_WIDTH * math.min(1, skill.current / skill.cap)))
+        track.fill:Show()
     end
-
-    if not G.HasFlag(companion, "g") then
-        parts[#parts + 1] = COL_WARN .. "not in your party" .. COL_RESET
-    end
-
-    if not G.HasFlag(companion, "s") then
-        parts[#parts + 1] = COL_WARN .. "level differs" .. COL_RESET
-    end
-
-    if G.HasFlag(companion, "b") then
-        parts[#parts + 1] = COL_GOOD .. "waiting on you" .. COL_RESET
-    end
-
-    return COL_MUTED .. table.concat(parts, "  ·  ") .. COL_RESET
 end
 
 local function CreateCard(index)
@@ -215,26 +190,9 @@ local function CreateCard(index)
     card.subtitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     card.subtitle:SetPoint("TOPLEFT", 16, -29)
 
-    card.status = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    card.status:SetPoint("TOPLEFT", 16, -50)
-    Wrap(card.status, WIDTH - 2 * PAD - TEXT_RIGHT_INSET - 12)
-    card.status:SetJustifyH("LEFT")
-
-    -- the chips that carry the row's facts: quests, gathering, bag room
-    card.questChip = Chip(card, card, 1)
-    card.gatherChip = Chip(card, card, 2)
-    card.slotsChip = Chip(card, card, 3)
-
-    -- and one thin meter under them: the gathering skill against its ceiling
-    card.meter = card:CreateTexture(nil, "ARTWORK")
-    card.meter:SetHeight(3)
-    card.meter:SetPoint("TOPLEFT", 16, -70)
-    card.meter:SetWidth(180)
-    card.meterBg = card:CreateTexture(nil, "BORDER")
-    card.meterBg:SetHeight(3)
-    card.meterBg:SetPoint("TOPLEFT", 16, -70)
-    card.meterBg:SetWidth(180)
-    card.meterBg:SetTexture(1, 1, 1, 0.08)
+    card.gatherTrack = SkillTrack(card, 16)
+    card.craftTrack = SkillTrack(card, 218)
+    card.facts = Label(card, "", 16, -78, 405)
 
     -- the whole card responds to the cursor, so the row under it is obviously the one the
     -- buttons belong to
@@ -243,10 +201,11 @@ local function CreateCard(index)
         self.bg:SetTexture(1, 1, 1, 0.075)
         if not self.companion then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(self.companion.name .. " - level " .. (self.companion.level or 0), 1, 0.85, 0.4)
-        GameTooltip:AddLine(StatusText(self.companion), 1, 1, 1, true)
-        GameTooltip:AddLine(" ", 0, 0, 0)
-        GameTooltip:AddLine("Crafting and trading are its own habits now - produce and hand-over happen as you play.", 0.7, 0.7, 0.7, true)
+        GameTooltip:AddLine(self.companion.name, 1, 0.85, 0.4)
+        if G.HasFlag(self.companion, "b") then
+            GameTooltip:AddLine("You carry a quest this companion has not picked up yet.", 0.75, 0.75, 0.75, true)
+        end
+        GameTooltip:AddLine("Companions craft and offer surplus automatically. Accept the trade when it opens.", 0.75, 0.75, 0.75, true)
         GameTooltip:Show()
     end)
     card:SetScript("OnLeave", function(self)
@@ -260,6 +219,7 @@ local function CreateCard(index)
     card.reviveButton = Button(card, "Revive", 62, function()
         if card.companion then G.Action("revive", card.companion.name) end
     end, "Raise it beside you - or, if you are too far away, release it to the graveyard and let it walk home.")
+    card.reviveButton:SetPoint("RIGHT", -12, 18)
     card.reviveButton:GetFontString():SetTextColor(0.5, 1, 0.6)
     card.reviveButton:Hide()
 
@@ -604,68 +564,50 @@ function G.Refresh()
             card.dot:SetTexture(r, g, b, online and 1 or 0.3)
             card.stripe:SetTexture(r, g, b, online and 0.85 or 0.25)
 
-            -- An offline companion is reported with zeros, because there is nothing live to
-            -- report. Printing "Unknown · Unknown · level 0" made a bound companion look
-            -- corrupt; it is simply not in the world, which is what the row should say.
-            if companion.level and companion.level > 0 then
-                card.subtitle:SetText(("%s%s · %s · level %d%s"):format(
-                    COL_MUTED, G.RaceName(companion.raceId), G.ClassName(companion.classId),
-                    companion.level, COL_RESET))
-            else
-                card.subtitle:SetText(COL_MUTED .. "not in the world" .. COL_RESET)
+            local state = G.CardState(companion)
+            local statusColor = state.dead and COL_BAD or state.releasing and COL_WARN
+                or state.online and COL_GOOD or COL_MUTED
+            local subtitle = statusColor .. state.status .. COL_RESET
+            if state.online and companion.level > 0 then
+                subtitle = ("%sLevel %d %s%s  ·  %s"):format(
+                    COL_MUTED, companion.level, G.ClassName(companion.classId), COL_RESET, subtitle)
             end
+            card.subtitle:SetText(subtitle)
 
-            -- the chips carry the row's facts; the words-only status line moves to the
-            -- hover, which is where the map's markers already keep their detail
-            local quests = companion.quests or 0
-            card.questChip.text:SetText(("%d quest%s"):format(quests, quests == 1 and "" or "s"))
-            card.questChip.text:SetTextColor(0.85, 0.85, 0.85)
-            card.questChip:SetWidth(math.max(56, 14 + #card.questChip.text:GetText() * 5))
-
-            local skill = companion.gather
-            card.gatherChip.text:SetText(skill or "-")
-            card.gatherChip.text:SetTextColor(0.85, 0.85, 0.85)
-            card.gatherChip:SetWidth(math.max(56, 14 + #(skill or "-") * 5))
-
-            local free = companion.free or 0
-            if free <= 4 then
-                card.slotsChip.text:SetText(("%d slots - tight"):format(free))
-                card.slotsChip.text:SetTextColor(1, 0.75, 0.35)
+            if state.free ~= nil then
+                UpdateSkill(card.gatherTrack, state.gather, "Gathering · Unavailable", 0.46, 0.73, 0.52)
+                UpdateSkill(card.craftTrack, state.craft, "Crafting · Unavailable", 0.72, 0.62, 0.37)
+                card.gatherTrack:Show()
+                card.craftTrack:Show()
+                local free = state.free
+                local bags = free == 0 and "Bags full" or ("%d bag slots free"):format(free)
+                local questText = ("%d quest%s"):format(state.quests, state.quests == 1 and "" or "s")
+                card.facts:SetText(COL_MUTED .. questText .. "  ·  " .. COL_RESET ..
+                    (free <= 4 and COL_WARN or COL_MUTED) .. bags .. COL_RESET)
+                card.facts:Show()
             else
-                card.slotsChip.text:SetText(("%d slots free"):format(free))
-                card.slotsChip.text:SetTextColor(0.85, 0.85, 0.85)
-            end
-            card.slotsChip:SetWidth(math.max(56, 14 + #card.slotsChip.text:GetText() * 5))
-
-            -- the meter: the gathering skill against its ceiling, class-coloured
-            local cur, cap = string.match(skill or "", "(%d+)/(%d+)$")
-            if cur then
-                local pct = math.min(100, (tonumber(cur) / math.max(1, tonumber(cap))) * 100)
-                card.meter:SetWidth(math.max(2, 180 * pct / 100))
-                card.meter:SetTexture(r, g, b, 0.8)
-                card.meter:Show()
-            else
-                card.meter:Hide()
+                card.gatherTrack:Hide()
+                card.craftTrack:Hide()
+                card.facts:Hide()
             end
 
             card.primary:SetText(online and "Dismiss" or "Summon")
-
-            -- Summon and Dismiss were both green, which reads as "both are the good thing to
-            -- press". Sending a companion away is neutral: gold text, not a positive green.
-            if online then
-                card.primary:GetFontString():SetTextColor(1, 0.82, 0.35)
-            else
-                card.primary:GetFontString():SetTextColor(0.35, 1, 0.35)
-            end
-
-            if companion.level > 0 and not G.HasFlag(companion, "s") then card.levelButton:Show()
+            card.primary:GetFontString():SetTextColor(online and 1 or 0.35, online and 0.82 or 1, 0.35)
+            card.primary:ClearAllPoints()
+            card.primary:SetPoint("RIGHT", state.dead and -104 or -12, 18)
+            if state.releasing then card.primary:Hide() else card.primary:Show() end
+            if online and not state.dead and not state.releasing and companion.level > 0 and not G.HasFlag(companion, "s") then
+                card.levelButton:Show()
             else card.levelButton:Hide() end
-
-            -- the revive button exists only while the body is down; it sits where the
-            -- level button would, which a dead companion has no use for
-            if G.HasFlag(companion, "d") then card.reviveButton:Show() else card.reviveButton:Hide() end
-
-            if online then card.mapButton:Show() else card.mapButton:Hide() end
+            if state.dead and not state.releasing then card.reviveButton:Show() else card.reviveButton:Hide() end
+            if online and not state.releasing then card.mapButton:Show() else card.mapButton:Hide() end
+            if state.releasing then
+                card.releaseButton:Hide()
+                card.untrackButton:Hide()
+            else
+                card.releaseButton:Show()
+                card.untrackButton:Show()
+            end
 
             card:Show()
         else

@@ -72,8 +72,7 @@ Everything else is a button, so there are only a few:
 /csstate          print where the launcher is and what it is anchored to
 ```
 
-Version 2.0.0. The version the client reports now comes from this folder's `.toc` - there
-were three hand-written copies and they had drifted apart.
+The version the client reports comes from this folder's `.toc`.
 
 `/csync test` is the in-game sanity check. If the window looks empty or stale, run it
 first: it separates "the addon cannot parse" from "the server is not sending".
@@ -81,8 +80,10 @@ first: it separates "the addon cannot parse" from "the server is not sending".
 ## How the data arrives
 
 ```
-Comp sync 2: Healy,5,32,4,ogs,110|Soak,1,32,2,o,105
-             name,class,level,quests,flags,free slots
+Comp sync 2: Healy,5,1,32,4,ogs,110,y=Herbalism 83/150|Soak,9,1,32,2,o,105
+             name,class,race,level,quests,flags,free slots[,y=gathering]
+Skill sync: Healy,182,83,150,171,76,150
+            name,gathering ID,current,cap,crafting ID,current,cap
 ```
 
 Flags: `o` in world, `g` in your party, `s` same level, `b` behind (you carry a quest it
@@ -90,8 +91,13 @@ has not got), `-` offline. Long payloads arrive as `Comp sync i/n:` and are join
 every part is in. The payload is authoritative — anything not mentioned is not bound, so
 the window empties itself when companions are released.
 
-Two more payloads share the same channel: `Stock N: race-class=count|…` for the create
-panel, and `Pin sync N: x,y,h|g=Name|…` for the quest pins that go on your world map.
+A `Skill sync:` line is a complete snapshot of summoned companions' actual skills
+and trained caps. It is sent when that snapshot changes and on a forced refresh.
+An older server still supplies the legacy gathering row; crafting shows as unavailable.
+Dismissed companions do not show live quest, bag, or profession data.
+
+Two other payloads share the channel: `Pool stock N: race-class=count|…` for the
+create panel, and `Pin sync N: x,y,h|g=Name|…` for the world map.
 
 ## Why a separate addon
 

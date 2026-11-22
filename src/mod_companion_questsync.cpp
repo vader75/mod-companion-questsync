@@ -307,6 +307,7 @@ namespace
 
     std::map<uint32, std::string> g_lastCompSync;         // owner guid -> last companions line
     std::map<uint32, uint32> g_lastCompSyncAt;            // owner guid -> when that line was sent
+    std::map<uint32, std::string> g_lastSkillSync;        // owner guid -> last profession snapshot
     /// bot guid -> { has an unfinished ground objective, when that was last checked }
     std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
 
@@ -6669,7 +6670,7 @@ namespace
     /// carry a quest it has not got). Compact on purpose: this rides a whisper, and the
     /// addon splits on `,` and `|` exactly like the pin payload, so names go through
     /// SafePinName.
-    std::string BuildCompLine(Player* owner)
+    std::string BuildCompLine(Player* owner, std::string& skillPayload)
     {
         std::vector<uint32> bots;
         if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
@@ -6732,14 +6733,22 @@ namespace
                     (flags.empty() ? "-" : flags) + "," + std::to_string(freeSlots);
 
 #ifdef MOD_PLAYERBOTS
-            // the gathering half of the pair, so the card shows where the skill stands -
-            // a catch-up is visible the moment the number jumps
+            // Keep the legacy gathering field unchanged for older clients. The
+            // optional snapshot adds both actual skills/caps without altering it.
             if (online)
             {
                 auto const pair = ClassProfessionPair(bot->getClass());
                 uint16 const skill = pair.first;
                 line += ",y=" + std::string(ProfessionOf(skill).name) + " " +
                         std::to_string(bot->GetSkillValue(skill)) + "/" + std::to_string(ProfessionCap(bot->GetLevel()));
+                if (!skillPayload.empty())
+                    skillPayload += "|";
+                skillPayload += SafePinName(name);
+                for (uint16 const id : { pair.first, pair.second })
+                {
+                    skillPayload += "," + std::to_string(id) + "," + std::to_string(bot->GetPureSkillValue(id)) +
+                                    "," + std::to_string(bot->GetPureMaxSkillValue(id));
+                }
             }
 #endif
         }
@@ -6769,9 +6778,17 @@ namespace
             size_t const bar = payload.find('|', start);
             std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
 
-            size_t const comma = entry.find_last_of(',');
-            if (comma != std::string::npos)
-                entry.erase(comma);
+            // Free slots are field seven, followed by the optional legacy skill.
+            size_t slots = 0;
+            for (uint8 field = 0; field < 6; ++field)
+            {
+                size_t const comma = entry.find(',', slots);
+                if (comma == std::string::npos)
+                    break;
+                slots = comma + 1;
+                if (field == 5)
+                    entry.erase(slots, entry.find(',', slots) - slots);
+            }
 
             if (!out.empty())
                 out += "|";
@@ -6793,7 +6810,19 @@ namespace
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::string const payload = BuildCompLine(owner);
+        std::string skillPayload;
+        std::string const payload = BuildCompLine(owner, skillPayload);
+        auto sendSkills = [&]()
+        {
+            // The roster is capped at four, so even maximum-width skill values
+            // fit in one system message. A changed empty snapshot clears the old one.
+            std::string& sent = g_lastSkillSync[ownerGuid];
+            if ((force && !skillPayload.empty()) || skillPayload != sent)
+            {
+                SendProtocolLine(owner, "Skill sync: " + skillPayload);
+                sent = skillPayload;
+            }
+        };
 
         std::string& last = g_lastCompSync[ownerGuid];
         uint32& lastAt = g_lastCompSyncAt[ownerGuid];
@@ -6803,14 +6832,11 @@ namespace
         // client is still told (the number is in the payload) but not every 30 seconds.
         constexpr uint32 kSlotOnlyGraceSeconds = Timing::SlotOnlyGrace;
 
-        if (!force && !last.empty())
+        if (!force && lastAt && (payload == last || (CompSyncSignature(payload) == CompSyncSignature(last)
+            && now - lastAt < kSlotOnlyGraceSeconds)))
         {
-            if (payload == last)
-                return;
-
-            if (CompSyncSignature(payload) == CompSyncSignature(last)
-                && now - lastAt < kSlotOnlyGraceSeconds)
-                return;
+            sendSkills();
+            return;
         }
 
         std::vector<std::string> chunks;
@@ -6818,7 +6844,7 @@ namespace
         size_t start = 0;
         uint32 entries = 0;
 
-        while (start <= payload.size())
+        while (start < payload.size())
         {
             size_t const bar = payload.find('|', start);
             std::string entry = payload.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
@@ -6847,7 +6873,6 @@ namespace
         if (chunks.empty())
             chunks.push_back(std::string());
 
-        SyncReport compReport;   // only used to resolve a speaker
 
         for (size_t i = 0; i < chunks.size(); ++i)
         {
@@ -6865,6 +6890,7 @@ namespace
 
         last = payload;
         lastAt = now;
+        sendSkills();
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] comp sync -> {}: {} part(s), {} entries: {}",
@@ -10030,6 +10056,7 @@ public:
         g_heartbeatAt.erase(ownerGuid);
         g_lastCompSync.erase(ownerGuid);
         g_lastCompSyncAt.erase(ownerGuid);
+        g_lastSkillSync.erase(ownerGuid);
         g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);

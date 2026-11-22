@@ -182,8 +182,40 @@ function G.ParseStockPayload(payload)
     return stock
 end
 
+local skillNames = {
+    [164] = "Blacksmithing", [165] = "Leatherworking", [171] = "Alchemy",
+    [182] = "Herbalism", [186] = "Mining", [393] = "Skinning",
+}
+
+G.professionSkills = {}
+
+local function ParseSkillSnapshot(payload)
+    local skills = {}
+    for entry in string.gmatch(payload, "[^|]+") do
+        local name, gather, gCur, gMax, craft, cCur, cMax =
+            string.match(entry, "^([^,]+),(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)$")
+        if name and skillNames[tonumber(gather)] and skillNames[tonumber(craft)] then
+            skills[name] = {
+                gather = { name = skillNames[tonumber(gather)], current = tonumber(gCur), cap = tonumber(gMax) },
+                craft = { name = skillNames[tonumber(craft)], current = tonumber(cCur), cap = tonumber(cMax) },
+            }
+        end
+    end
+    return skills
+end
+
 function G.SetCompanions(rows)
     G.companions = rows or {}
+    local active = {}
+    for _, row in ipairs(G.companions) do
+        if G.HasFlag(row, "o") then active[row.name] = true end
+    end
+    for name in pairs(G.professionSkills) do
+        if not active[name] then
+            G.professionSkills[name] = nil
+            G.lastSkillPayload = nil
+        end
+    end
 
     -- a release is finished when the roster stops listing the name (or after two minutes, if
     -- the server refused and said so in chat)
@@ -234,16 +266,10 @@ listener:RegisterEvent("CHAT_MSG_SYSTEM")
 -- companion to speak it, and the roster matters most when nobody is out. They are hidden
 -- from the chat frame here so the player only ever sees the window.
 local function IsProtocolLine(text)
-    return type(text) == "string" and string.sub(text, 1, 5) == "CSYNC"
+    return type(text) == "string" and string.sub(text, 1, 6) == "CSYNC|"
 end
 
 if ChatFrame_AddMessageEventFilter then
-    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
-        if IsProtocolLine(message) then return true end
-        if IsAboutCompanion(message) then return true end
-        return false
-    end)
-
     -- The companions' AI narrates its quest menu at every giver the owner opens -
     -- "Quest Rewarded: ...", "Quest Available: ...", "Cannot talk to quest giver" at an
     -- innkeeper with no quests at all. Every fact in those lines already reaches the
@@ -279,6 +305,11 @@ if ChatFrame_AddMessageEventFilter then
         end
         return false
     end
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
+        if IsProtocolLine(message) then return true end
+        if IsAboutCompanion(message) then return true end
+        return false
+    end)
     ChatFrame_AddMessageEventFilter("CHAT_MSG_WHISPER", function(_, _, message)
         for _, echo in ipairs(narrationEchoes) do
             if string.sub(message or "", 1, #echo) == echo then return true end
@@ -344,6 +375,16 @@ listener:SetScript("OnEvent", function(_, event, message)
             G.serverInterval = tonumber(hello)
             return
         end
+    end
+
+    local skills = event == "CHAT_MSG_SYSTEM" and string.match(text, "^Skill sync:%s*(.*)$")
+    if skills then
+        if skills ~= G.lastSkillPayload then
+            G.lastSkillPayload = skills
+            G.professionSkills = ParseSkillSnapshot(skills)
+            if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+        end
+        return
     end
 
     -- companions
