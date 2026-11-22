@@ -76,6 +76,17 @@ class CompanionCards(unittest.TestCase):
         self.g.Toggle()
         self.g.Refresh()
 
+    def test_opening_fresh_roster_sends_no_map_pool_or_roster_request(self):
+        self.send('Hello 30')
+        self.send('Comp sync 1: Mirdan,7,11,14,8,ogs,10')
+        self.lua.execute('requests = {}; RecordRequest = function(s) requests[#requests + 1] = s end')
+        self.g.Run = self.lua.globals().RecordRequest
+        self.g.Toggle()
+        self.g.PollState()
+        self.assertEqual(len(self.lua.globals().requests), 0)
+        self.g.PollState(True)
+        self.assertEqual(self.lua.globals().requests[1], '.companionsync refresh roster')
+
     def test_malformed_row_does_not_poison_other_companions(self):
         self.send('Comp sync 2: Mirdan,7,11,14,8,ogs,10|Drodan,5,1,14,8,ogs,10')
         self.send('Skill sync: Mirdan,393,garbage,75,165,48,150|Drodan,182,150,150,171,70,150')

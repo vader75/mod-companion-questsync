@@ -206,6 +206,7 @@ end
 
 function G.SetCompanions(rows)
     G.companions = rows or {}
+    G.lastRosterAt = time()
     local active = {}
     for _, row in ipairs(G.companions) do
         if G.HasFlag(row, "o") then active[row.name] = true end

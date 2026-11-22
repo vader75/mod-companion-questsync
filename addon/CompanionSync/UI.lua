@@ -237,9 +237,9 @@ local function CreateCard(index)
     -- Crafting and trading are the companion's own habits now, so their buttons are
     -- gone: a card reads state and carries the actions only a player can decide.
     card.mapButton = Button(card, "Map", 44, function()
-        G.Run(".companionsync pins")
         ToggleWorldMap()
-    end, "Show this companion's quest markers on the world map.")
+        if CompanionPins_Request then CompanionPins_Request() end
+    end, "Show companion quest markers on the world map.")
 
     -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
     -- discover is a control that does not get used: the release never reached the server at all.
@@ -504,13 +504,16 @@ end
 
 function G.OnStockChanged() RefreshAddPanel() end
 
--- While the window is open, ask the server for the current state every few seconds. Without
--- this the panel only knew what the server chose to push, so a companion dismissed a moment
--- ago still showed as with you until the window was closed and reopened.
+-- Poll local freshness, not the realm. Normally the roster is pushed on change.
 local POLL_SECONDS = 15
+local lastRosterRequest
 
-function G.PollState()
-    G.Run(".companionsync refresh")
+function G.PollState(force)
+    local now = time()
+    if not force and (not G.ServerAlive() or (G.lastRosterAt and now - G.lastRosterAt < 90)) then return end
+    if lastRosterRequest and now - lastRosterRequest < 15 then return end
+    lastRosterRequest = now
+    G.Run(".companionsync refresh roster")
 end
 
 function G.OnServerMessage(text)
@@ -785,10 +788,8 @@ local function CreateWindow()
     dismissAll:SetPoint("LEFT", summonAll, "RIGHT", 6, 0)
 
     local refresh = Button(footer, "Refresh", 66, function()
-        Ack()
-        G.Run(".companionsync pins")
-        G.Run(".companionsync pool")
-    end, "Ask the server for the current state.")
+        G.PollState(true)
+    end, "Refresh companion cards without reloading the map or pool.")
     refresh:SetPoint("LEFT", dismissAll, "RIGHT", 6, 0)
 
     local quests = Button(footer, "Quest log", 76, function() Ack() G.Run(".companionsync quests") end,
@@ -834,8 +835,7 @@ function G.Toggle()
         frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
         frame:Show()
         G.Refresh()
-        G.Run(".companionsync pins")
-        G.Run(".companionsync pool")
+        G.PollState()
     end
 end
 
