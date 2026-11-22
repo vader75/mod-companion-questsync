@@ -378,6 +378,20 @@ namespace
     std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
     std::map<uint32, uint32> g_lastAutoProduce;           // bot guid -> unix time of the last quiet craft
     std::map<uint32, uint32> g_lastAutoTrade;             // bot guid -> unix time of the last self-trade
+    /// A trade whose items wait for the window to open: the begin round-trip runs on
+    /// the bot's own AI tick, and items SetItem'd before it are lost to the client -
+    /// the owner saw an empty trade window while the companion insisted it had put
+    /// four stacks in. The offer is applied two seconds later, once the window is up.
+    struct PendingTrade
+    {
+        uint32 ownerGuid = 0;
+        std::vector<Item*> items;
+        uint32 at = 0;
+        bool announce = true;
+    };
+    std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
+    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
+                    uint32 validWhileMissing = 0, bool handIn = false);
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -972,6 +986,47 @@ namespace
         return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid));
     }
 
+    /// Apply the stashed trade offers: the bot's own tick has now answered the begin
+    /// (CMSG_BEGIN_TRADE went out, the owner's window is up), so SetItem lands where
+    /// the client can see it - and the announcement waits for that moment too.
+    void ApplyPendingTrades()
+    {
+        for (auto itr = g_pendingTrade.begin(); itr != g_pendingTrade.end();)
+        {
+            PendingTrade& pending = itr->second;
+            Player* bot = FindCompanionPlayer(itr->first);
+            Player* owner = pending.ownerGuid
+                ? ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid))
+                : nullptr;
+
+            if (!bot || !owner || !bot->GetTradeData() || bot->GetTradeData()->GetTrader() != owner)
+            {
+                itr = g_pendingTrade.erase(itr);   // the window never opened, or was closed
+                continue;
+            }
+
+            if (uint32(time(nullptr)) - pending.at < 2)
+            {
+                ++itr;                             // give the bot's tick its round trip
+                continue;
+            }
+
+            uint32 offered = 0;
+            for (uint8 slot = 0; slot < pending.items.size() && slot < 6; ++slot)
+                if (pending.items[slot] && pending.items[slot]->IsInWorld())
+                {
+                    bot->GetTradeData()->SetItem(TradeSlots(slot), pending.items[slot]);
+                    ++offered;
+                }
+
+            if (offered && pending.announce)
+                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                           " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
+
+            itr = g_pendingTrade.erase(itr);
+        }
+    }
+
     /// Bring companions along when the owner teleports.
     ///
     /// A hearthstone, a portal or a summon moves the player and leaves the companion where it
@@ -1159,8 +1214,8 @@ namespace
     /// wall of them when several quests fail at once, and always something the
     /// player can act on. Unthrottled per-quest whispering is what makes a rough
     /// levelling session feel like an error console.
-    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
-                    uint32 validWhileMissing = 0, bool handIn = false)
+    bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap,
+                    uint32 validWhileMissing, bool handIn)
     {
         if (!owner || !owner->GetSession())
             return false;
@@ -3188,24 +3243,17 @@ namespace
             return 0;
         }
 
-        uint32 offered = 0;
-        for (uint8 slot = 0; slot < offers.size(); ++slot)
-        {
-            td->SetItem(TradeSlots(slot), offers[slot].first);
-            ++offered;
-        }
+        // the items wait: SetItem before the owner's client has opened the window sends
+        // the contents into the void, which is how an opened trade looked empty
+        PendingTrade& pending = g_pendingTrade[bot->GetGUID().GetCounter()];
+        pending.ownerGuid = owner->GetGUID().GetCounter();
+        pending.at = uint32(time(nullptr));
+        pending.announce = announce;
+        pending.items.clear();
+        for (auto const& [item, spare] : offers)
+            pending.items.push_back(item);
 
-        if (!offered)
-        {
-            if (announce)
-                SayToOwner(bot, owner, "Nothing would go in the trade - try again in a moment.", 30);
-            return 0;
-        }
-
-        if (announce)
-            SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                       " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
-        return offered;
+        return uint32(offers.size());
     }
 
 
@@ -7552,6 +7600,7 @@ public:
             _gatherAccumulator = 0;
 
             FollowOwnerThroughTeleport();
+            ApplyPendingTrades();
 
             for (auto const& pair : sWorldSessionMgr->GetAllSessions())
             {
