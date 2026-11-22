@@ -280,6 +280,11 @@ CompanionQuestSync.VendorRestock = 1
 #    use in play, overflow to your mailbox. The Produce button still gives the
 #    report on demand. 0 = craft only when asked.
 CompanionQuestSync.AutoProduce = 1
+
+#    Beside you with something spare, the companion opens the trade itself every
+#    three minutes - the keep-five reserve is respected, and mail remains the
+#    fallback for what cannot wait. 0 = trade only when asked.
+CompanionQuestSync.AutoTrade = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
 CompanionQuestSync.ItemKeepQuality = 2

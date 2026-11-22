@@ -192,6 +192,10 @@ Everything in this section is autonomous or one click; nothing needs a command t
   shopping trip; gathered reagents are waited for, never conjured
   (*"I am waiting on Bruiseweed 1/1 - I will keep gathering"*). Products land in bags,
   the AI uses them in play, and the overflow rides MailHome.
+- **Trade is a habit too** (`AutoTrade`, default on) - beside you with something spare,
+  the companion opens the trade itself every three minutes, the keep-five reserve
+  respected; you accept. Mail stays the fallback for what cannot wait for a moment
+  together.
 - **Trade** (card button, `.companionsync trade <name>`) - standing next to a companion,
   it opens a trade with you and offers its surplus: every gathered mat and produced item
   above the five it keeps for itself, biggest stacks first, six slots (the trade window's
@@ -310,6 +314,7 @@ each one. The defaults that matter most:
 | `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
 | `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
 | `AutoProduce` | 1 | craft what its gathering paid for every three minutes per companion, outside combat, silently; the Produce button gives the report on demand |
+| `AutoTrade` | 1 | beside you with something spare: the trade opens itself every three minutes, outside combat; you accept, mail stays the fallback |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |
