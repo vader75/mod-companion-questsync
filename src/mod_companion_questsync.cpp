@@ -392,10 +392,13 @@ namespace
         std::vector<std::pair<uint32, uint32>> offer;   // {item entry, count} - values, not pointers
         bool applied = false;                           // the window is filled; now guard it
         uint8 filled = 0;                               // trade slots the apply actually filled
+        uint64 noticeId = 0;                            // identifies this offer, not a later window
+        std::vector<std::pair<TradeSlots, ObjectGuid>> offeredItems;
     };
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
+    uint64 g_nextTradeNoticeId = 0;
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
-                    uint32 validWhileMissing = 0, bool handIn = false);
+                    uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0);
     static uint16 FindFreeBagPos(Player* bot);
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
@@ -425,6 +428,7 @@ namespace
                                  // is MISSING. Without this, an invitation held
                                  // through the rate limit could outlive its hand-in
                                  // and arrive claiming what already happened.
+        uint64 tradeNoticeId = 0;
     };
 
     struct PendingNotice
@@ -1087,6 +1091,7 @@ namespace
                 }
 
                 bot->GetTradeData()->SetItem(TradeSlots(slot), tradeItem);
+                pending.offeredItems.emplace_back(TradeSlots(slot), tradeItem->GetGUID());
                 pending.offer[slot] = { entry, want };   // which slot carries what, for the guard
                 ++pending.filled;
                 ++offered;
@@ -1097,9 +1102,9 @@ namespace
             if (offered)
             {
                 bot->GetTradeData()->SetAccepted(true);
-                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                           " stack(s) in the trade - take them, they are yours.", 30);
                 pending.applied = true;
+                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                           " stack(s) in the trade - take them, they are yours.", 30, 0, false, pending.noticeId);
                 ++itr;                            // the record stays: the guard is live now
             }
             else
@@ -1294,7 +1299,7 @@ namespace
     /// player can act on. Unthrottled per-quest whispering is what makes a rough
     /// levelling session feel like an error console.
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap,
-                    uint32 validWhileMissing, bool handIn)
+                    uint32 validWhileMissing, bool handIn, uint64 tradeNoticeId)
     {
         if (!owner || !owner->GetSession())
             return false;
@@ -1332,7 +1337,7 @@ namespace
             auto& queue = g_whisperQueue[ownerGuid];
             bool dup = false;
             for (auto const& entry : queue)
-                if (entry.botGuid == botGuid && entry.text == text)
+                if (entry.botGuid == botGuid && entry.text == text && entry.tradeNoticeId == tradeNoticeId)
                     dup = true;
 
             // "Finished 'X' - that pin can go." is the message that removes a map pin:
@@ -1345,12 +1350,12 @@ namespace
                                text.rfind("I caught my ", 0) == 0 ||
                                text.rfind("I took up ", 0) == 0;
 
-            if (!dup && (vital || queue.size() < 4))
+            if (!dup && (vital || tradeNoticeId || queue.size() < 4))
             {
                 if (vital)
                     queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true, handIn });
                 else
-                    queue.push_back({ text, botGuid, validWhileMissing, now, false, handIn });
+                    queue.push_back({ text, botGuid, validWhileMissing, now, false, handIn, tradeNoticeId });
             }
 
             if (g_cfg.debug >= 2)
@@ -2640,8 +2645,29 @@ namespace
             ++itr;
         }
     }
-    /// One whisper for everything refused since the last flush - at most three
-    /// named, then a count - ending with what the player can actually do about it.
+    bool IsLiveTradeNotice(Player* bot, Player* owner, uint64 noticeId)
+    {
+        auto const pending = g_pendingTrade.find(bot->GetGUID().GetCounter());
+        if (pending == g_pendingTrade.end() || pending->second.noticeId != noticeId ||
+            pending->second.ownerGuid != owner->GetGUID().GetCounter() || !pending->second.applied)
+            return false;
+
+        TradeData const* trade = bot->GetTradeData();
+        TradeData const* other = owner->GetTradeData();
+        if (!trade || !other || trade->GetTrader() != owner || other->GetTrader() != bot || !trade->IsAccepted())
+            return false;
+
+        // Same traders can reopen before the pending-trade sweep runs. Require the
+        // module's actual offered items, not just an open window with those traders.
+        for (auto const& [slot, guid] : pending->second.offeredItems)
+        {
+            Item const* item = trade->GetItem(slot);
+            if (!item || item->GetGUID() != guid)
+                return false;
+        }
+        return !pending->second.offeredItems.empty();
+    }
+
     /// Send whatever was held back by the rate limit, one per pass.
     void FlushWhisperQueue(Player* owner, Player* /*fallback*/)
     {
@@ -2678,7 +2704,9 @@ namespace
                 // A held-back line about work that finished inside the window reads
                 // like a broken module. But the pin-clear notice IS the work finishing -
                 // it must survive its own completion.
-                if (entry->questId && entry->handIn)
+                if (entry->tradeNoticeId)
+                    stale = !IsLiveTradeNotice(speaker, owner, entry->tradeNoticeId);
+                else if (entry->questId && entry->handIn)
                 {
                     // An invitation to hand in is only true while the quest is still
                     // complete: the moment it is rewarded (or gone), a held-back
@@ -2714,6 +2742,10 @@ namespace
         // companions the last one is never heard at all.
         auto chosen = queue.begin();
 
+        auto const liveTrade = std::find_if(queue.begin(), queue.end(), [](QueuedWhisper const& entry)
+        {
+            return entry.tradeNoticeId != 0;
+        });
         bool const hasVital = [&queue]()
         {
             for (auto const& entry : queue)
@@ -2735,6 +2767,8 @@ namespace
                 }
             }
         }
+        else if (liveTrade != queue.end())
+            chosen = liveTrade;
         else
         {
             for (auto entry = queue.begin(); entry != queue.end(); ++entry)
@@ -3438,9 +3472,10 @@ namespace
         // speaks - no pointers cross the tick, and nothing is split until a window
         // exists to put the split in.
         PendingTrade& pending = g_pendingTrade[bot->GetGUID().GetCounter()];
+        pending = PendingTrade{};
         pending.ownerGuid = owner->GetGUID().GetCounter();
         pending.at = uint32(time(nullptr));
-        pending.offer.clear();
+        pending.noticeId = ++g_nextTradeNoticeId;
         for (auto const& [item, spare] : offers)
             pending.offer.push_back({ item->GetTemplate()->ItemId, spare });
 
