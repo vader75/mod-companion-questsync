@@ -12,9 +12,9 @@ read of that module's binding table, so two modules never level the same body â€
 that is switchable off (`RespectLegacyBindings = 0`).
 
 > [!NOTE]
-> **WOW Legends patches the AzerothCore server core for companion trading.** The
-> [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) is required
-> for companion surplus offers, both automatic and manual. It checks exact stacks
+> **Companion surplus trading requires an AzerothCore patch.** The
+> [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) applies to
+> both automatic and manual surplus offers. It checks exact stacks
 > and the companion's reserve at acceptance, rejects duplicate items before transfer,
 > and prevents bot trades from being accepted during combat.
 >
@@ -415,7 +415,7 @@ released while nobody was looking â€” and repairs the ones that are safe to repa
 
 ## Build
 
-On an unpatched WOW Legends source tree, apply the core patch once before
+On a compatible, unpatched AzerothCore source tree, apply the core patch once before
 building. Run this from the module repository root:
 
 ```sh
