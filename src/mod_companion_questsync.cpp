@@ -1755,6 +1755,9 @@ namespace
 
     void SendPinSync(Player* owner, bool force);  // defined below
     void SendHeartbeat(Player* owner);            // defined below
+#ifdef MOD_PLAYERBOTS
+    std::pair<uint32, uint32> TeachTrainerContent(Player* bot, Player* owner);  // defined below
+#endif
     void SendCompSync(Player* owner, bool force);  // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
     /// Put the companion at its owner's side, offset away from `toward`.
@@ -2706,25 +2709,57 @@ namespace
         // grants talent points nobody spends, because playerbots' auto-learn and
         // auto-pick-talents are gated to random bots and this realm runs none - a
         // level-raised companion fought on with rank-1 spells and empty talent trees.
-        // So teach it what a trainer would at the new level, and spend the fresh points
-        // along the spec it already has (increment: never reset, never re-roll).
-        {
-            PlayerbotFactory factory(bot, ownerLevel);
-            factory.InitSkills();
-            factory.InitClassSpells();
-            factory.InitAvailableSpells();
-            factory.InitTalentsTree(/*increment=*/true);
-
-            SayToOwner(bot, owner, "Now level " + std::to_string(ownerLevel) +
-                                   " - I know everything a trainer could teach, and I put my new talents to work.",
-                       30);
-        }
+        // So teach it what a trainer would at the new level; the Train button shares
+        // this path for companions raised before the fix.
+        TeachTrainerContent(bot, owner);
 #endif
 
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} -> level {} (owner {} level {})",
                      bot->GetName(), uint32(bot->GetLevel()), owner->GetName(), uint32(ownerLevel));
     }
+
+#ifdef MOD_PLAYERBOTS
+    /// Teach a bot what a trainer would at its current level, and spend its unspent
+    /// talent points along the spec it already has (increment: never reset, never
+    /// re-roll). Shared by the level-up path - a raise must bring its own spells - and
+    /// the Train button, which parses each companion for anything still missing.
+    /// Returns {new spells, talent points spent} for an honest report.
+    std::pair<uint32, uint32> TeachTrainerContent(Player* bot, Player* owner)
+    {
+        uint32 const spellsBefore = bot->GetSpellMap().size();
+        uint32 const talentsBefore = bot->GetFreeTalentPoints();
+
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        factory.InitSkills();
+        factory.InitClassSpells();
+        factory.InitAvailableSpells();
+        factory.InitTalentsTree(/*increment=*/true);
+
+        uint32 const learned = bot->GetSpellMap().size() > spellsBefore
+            ? uint32(bot->GetSpellMap().size() - spellsBefore) : 0;
+        uint32 const spent = talentsBefore > bot->GetFreeTalentPoints()
+            ? talentsBefore - bot->GetFreeTalentPoints() : 0;
+
+        if (learned || spent)
+        {
+            SayToOwner(bot, owner,
+                       (learned && spent
+                           ? "I caught up: learned " + std::to_string(learned) + " spell(s) and spent "
+                             + std::to_string(spent) + " talent point(s)."
+                           : learned
+                               ? "I caught up: learned " + std::to_string(learned) + " spell(s)."
+                               : "I caught up: spent " + std::to_string(spent) + " talent point(s)."),
+                       30);
+        }
+        else
+        {
+            SayToOwner(bot, owner, "I already know everything a trainer could teach me.", 30);
+        }
+
+        return { learned, spent };
+    }
+#endif
 
     /// How many slots of a quest log are in use, for the heartbeat line.
     uint32 CountQuestLog(Player* player)
@@ -7368,6 +7403,7 @@ public:
             { "pool",   HandlePoolCommand,   SEC_PLAYER, Console::No },
             { "release", HandleReleaseCommand, SEC_PLAYER, Console::No },
             { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
+            { "learn", HandleLearnCommand, SEC_PLAYER, Console::No },
             { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -7907,6 +7943,90 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
+    /// .companionsync learn [name] - the window's Train button.
+    ///
+    /// One click parses every companion: teach what a trainer would at the level the
+    /// companion already has, and spend its unspent talent points along its spec.
+    /// Companions raised before the teaching fix are the reason this exists - a raise
+    /// now brings its own spells, but what was missed while it did not stays missing
+    /// until something parses for it.
+    static bool HandleLearnCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the module is disabled.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        std::vector<uint32> targets;
+        if (want.empty())
+        {
+            for (uint32 const botGuid : bound)
+                if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                    targets.push_back(botGuid);
+        }
+        else
+        {
+            uint32 const botGuid = ResolveCompanion(player, want, bound);
+            if (!botGuid)
+            {
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.", want);
+                return true;
+            }
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                targets.push_back(botGuid);
+        }
+
+        if (targets.empty())
+        {
+            handler->PSendSysMessage("|cffffc94dCompanion quest sync|r: nobody in the world to teach.");
+            return true;
+        }
+
+        uint32 totalLearned = 0;
+        uint32 totalSpent = 0;
+        uint32 taught = 0;
+
+        for (uint32 const botGuid : targets)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+                continue;
+
+#ifdef MOD_PLAYERBOTS
+            auto const [learned, spent] = TeachTrainerContent(bot, player);
+            totalLearned += learned;
+            totalSpent += spent;
+            if (learned || spent)
+                ++taught;
+            handler->PSendSysMessage("|cffffc94d{}|r: {}.", bot->GetName(),
+                (learned || spent)
+                    ? ("learned " + std::to_string(learned) + " spell(s), spent " + std::to_string(spent) + " talent point(s)")
+                    : std::string("already fully trained"));
+#endif
+        }
+
+        if (totalLearned || totalSpent)
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} companion(s) caught up - {} spell(s), {} talent point(s).",
+                                     taught, totalLearned, totalSpent);
+        else
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: everybody already knows what a trainer can teach.");
+
+        return true;
+    }
+
     static bool HandleReviveCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
