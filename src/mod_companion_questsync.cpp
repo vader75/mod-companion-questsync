@@ -7549,6 +7549,17 @@ public:
     // .companionadmin - the same behaviour, for a named player, from the console
     // -----------------------------------------------------------------------
 
+    /// Every .companionsync verb opens a short conversation window: its answers
+    /// speak at once instead of joining the ambient rate limit's queue, and the
+    /// flush drains several lines with a 2-second gap. Called at the top of each
+    /// handler - a press should feel like a press, not like a letter in the post.
+    static void MarkCommandBurst(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (player)
+            g_commandBurst[player->GetGUID().GetCounter()] = uint32(time(nullptr));
+    }
+
     static std::vector<std::string> SplitArgs(char const* args, size_t want)
     {
         std::string text = args ? args : "";
@@ -7872,6 +7883,7 @@ public:
 
     static bool HandleCatchUpCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -7983,6 +7995,7 @@ public:
     /// companion.
     static bool HandleBindCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8083,6 +8096,7 @@ public:
     /// keeps being yours; it just stops being reconciled.
     static bool HandleUnbindCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8189,6 +8203,7 @@ public:
     /// .companionsync create <race> <class> <name> - mint a companion from the pool.
     static bool HandleCreateCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8262,6 +8277,7 @@ public:
     /// .companionsync pool - what the pool can still hand out, per race and class.
     static bool HandlePoolCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8278,6 +8294,7 @@ public:
     /// .companionsync release <name> - hand a companion back to the pool for good.
     static bool HandleReleaseCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8322,6 +8339,7 @@ public:
     /// out. No argument means "the whole group", which is what a player wants after a wipe.
     static bool HandleSummonCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8595,6 +8613,7 @@ public:
     /// items, food - is ever offered.
     static bool HandleTradeCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8769,6 +8788,7 @@ public:
     /// waited for. Products are used in play and the overflow rides MailHome.
     static bool HandleProduceCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8836,6 +8856,7 @@ public:
     /// each gathered skill against its ceiling.
     static bool HandleProfessionsCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8905,6 +8926,7 @@ public:
 
     static bool HandleLearnCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8982,6 +9004,7 @@ public:
 
     static bool HandleReviveCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9056,6 +9079,7 @@ public:
 
     static bool HandleDismissCommand(ChatHandler* handler, char const* args)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9142,6 +9166,7 @@ public:
     /// .companionsync list - what is bound, and what each companion is doing.
     static bool HandleListCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9180,6 +9205,7 @@ public:
 
     static bool HandleSyncCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         if (!g_cfg.enable)
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r is disabled in the server configuration.");
@@ -9205,6 +9231,7 @@ public:
     /// reopened it. This is the cheap, silent answer the panel polls while it is visible.
     static bool HandleRefreshCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player || !g_cfg.enable)
             return false;
@@ -9220,6 +9247,7 @@ public:
 
     static bool HandlePinsCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9266,6 +9294,7 @@ public:
     /// whole binding, so four companions are one command.
     static bool HandleQuestsCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9346,6 +9375,7 @@ public:
 
     static bool HandleStatusCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9447,6 +9477,7 @@ public:
 
     static bool HandleLevelCommand(ChatHandler* handler, char const* /*args*/)
     {
+        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9588,7 +9619,7 @@ public:
     CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
         { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
           PLAYERHOOK_ON_QUEST_ABANDON, PLAYERHOOK_ON_BEFORE_TELEPORT,
-          PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE }) { }
+          PLAYERHOOK_ON_LEVEL_CHANGED }) { }
 
     /// A hearthstone, a portal or a summon is about to move the player: note it, and let the
     /// fast tick bring the companion along once the destination has finished loading.
@@ -9651,18 +9682,6 @@ public:
 
         TeachTrainerContent(player, owner);   // spells, talents - as they unlock
         TeachProfessions(player, owner);      // ceiling, tools, recipes
-    }
-
-    /// Any .companionsync command opens a short conversation window: the answers a
-    /// command generates speak at once instead of joining the ambient rate limit's
-    /// queue. The hook sees every chat line including dot-commands, so one place
-    /// marks the burst for all of the module's verbs.
-    void OnPlayerBeforeSendChatMessage(Player* player, uint32& /*type*/, uint32& /*lang*/, std::string& msg) override
-    {
-        if (!player || !player->GetSession() || player->GetSession()->IsBot())
-            return;
-        if (msg.rfind(".companionsync", 0) == 0 || msg.rfind(".companionadmin", 0) == 0)
-            g_commandBurst[player->GetGUID().GetCounter()] = uint32(time(nullptr));
     }
 
     void OnPlayerLogin(Player* player) override
