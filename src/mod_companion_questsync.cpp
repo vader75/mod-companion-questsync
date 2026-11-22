@@ -2876,6 +2876,76 @@ namespace
         return tookUp;
     }
 
+    /// The highest gathering requirement the zone's own nodes carry, resolved once per
+    /// zone from the gameobject spawns inside its WorldMapArea bounds. The lock table
+    /// distinguishes the line itself: Index 2 = the herbalism locks, 3 = the mining
+    /// locks (verified against this realm's node templates), and Skill is the required
+    /// value - Bruiseweed's nodes ask 100, Briarthorn 70, a Copper Vein 1. When no node
+    /// resolves, the caller falls back to the zone level.
+    static uint32 ZoneNodeRequirement(std::pair<uint16, uint16> const& pair, uint32 zoneId)
+    {
+        static std::map<uint32, uint32> cache;
+        auto const cached = cache.find(zoneId);
+        if (cached != cache.end())
+            return cached->second;
+
+        uint32 wantedIndex = 0;
+        if (pair.first == SKILL_HERBALISM)
+            wantedIndex = 2;
+        else if (pair.first == SKILL_MINING)
+            wantedIndex = 3;
+        else
+        {
+            cache[zoneId] = 0;
+            return 0;                                     // skinning walks the mob levels
+        }
+
+        // the zone's bounds, from the same WorldMapArea parse the pin zones use
+        WorldMapAreaRow const* bounds = nullptr;
+        for (WorldMapAreaRow const& row : g_worldMapAreas)
+            if (row.areaId == int32(zoneId))
+            {
+                if (!bounds || (row.x2 - row.x1) * (row.y2 - row.y1) <
+                               (bounds->x2 - bounds->x1) * (bounds->y2 - bounds->y1))
+                    bounds = &row;
+            }
+
+        uint32 best = 0;
+        if (bounds)
+        {
+            float const x1 = std::min(bounds->x1, bounds->x2);
+            float const x2 = std::max(bounds->x1, bounds->x2);
+            float const y1 = std::min(bounds->y1, bounds->y2);
+            float const y2 = std::max(bounds->y1, bounds->y2);
+
+            QueryResult nodes = WorldDatabase.Query(
+                "SELECT g.position_x, g.position_y, gt.data0 FROM gameobject g "
+                "JOIN gameobject_template gt ON gt.entry = g.id "
+                "WHERE gt.type = 3 AND gt.data0 <> 0 AND g.map = {}", bounds->mapId);
+            if (nodes)
+            {
+                do
+                {
+                    Field* fields = nodes->Fetch();
+                    float const x = fields[0].Get<float>();
+                    float const y = fields[1].Get<float>();
+                    if (x < x1 || x > x2 || y < y1 || y > y2)
+                        continue;
+
+                    LockEntry const* lock = sLockStore.LookupEntry(fields[2].Get<uint32>());
+                    if (!lock || lock->Type[0] != 2 || lock->Index[0] != wantedIndex)
+                        continue;
+
+                    best = std::max<uint32>(best, lock->Skill[0] ? lock->Skill[0] : 1);
+                } while (nodes->NextRow());
+            }
+        }
+
+        cache[zoneId] = best;
+        LOG_INFO("server.loading", "[CompanionQuestSync] zone {} node requirement: {}", zoneId, best);
+        return best;
+    }
+
     /// The land asks a minimum of its gatherers. A companion walking into a zone it
     /// cannot work yet catches its gathering skill up to what the zone asks - once per
     /// zone, with one honest line - and never below what it earned organically. The
@@ -2895,6 +2965,10 @@ namespace
         // non-zero area_level (a newer zone) still wins.
         uint32 const zoneId = owner->GetZoneId();
         uint32 zoneLevel = 0;
+        auto const pair = ClassProfessionPair(bot->getClass());
+
+        // what the land actually asks: the highest node requirement its own nodes carry
+        uint32 const nodeReq = ZoneNodeRequirement(pair, zoneId);
         AreaTableEntry const* area = sAreaTableStore.LookupEntry(zoneId);
         if (area && area->area_level > 0)
             zoneLevel = uint32(area->area_level);
@@ -2914,7 +2988,7 @@ namespace
                 if (known == zoneId) { zoneLevel = level; break; }
         }
 
-        if (!zoneLevel)
+        if (!zoneLevel && !nodeReq)
             return;                                       // an unknown zone asks nothing new
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
@@ -2923,8 +2997,8 @@ namespace
             return;
         lastZone = zoneId;
 
-        auto const pair = ClassProfessionPair(bot->getClass());
-        uint32 const zoneMin = std::min<uint32>(zoneLevel * 5, 450);
+        uint32 const zoneMin = nodeReq ? std::min<uint32>(nodeReq, 450)
+                                       : std::min<uint32>(zoneLevel * 5, 450);
         uint16 const skill = pair.first;
         uint16 const cur = bot->GetSkillValue(skill);
         if (cur >= zoneMin)
