@@ -3,8 +3,8 @@
 -- Data, names and commands. Everything the server tells us arrives on the whisper
 -- channel, because a 3.3.5 client cannot ask the server anything.
 --
---   Comp sync 2: Healy,5,1,32,4,ogs,110|Soak,9,2,32,2,o,105
---                name,class,race,level,quests,flags,free slots
+--   Comp sync 2: Healy,5,1,32,4,ogs,110|Soak,9,2,32,2,o,105|Nia,7,3,12,1,og,8,y=Skinning 50/150
+--                name,class,race,level,quests,flags,free slots[,y=gather cur/max]
 --
 --   Pool stock 2: 1-5=12|3-2=9 ...
 --                race-class=free bodies, so the picker can grey out what the pool
@@ -118,10 +118,15 @@ function G.ParseCompPayload(payload)
     local rows = {}
 
     for entry in string.gmatch(payload or "", "[^|]+") do
-        local name, classId, raceId, level, quests, flags, free =
-            string.match(entry, "^([^,]+),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)$")
+        local name, classId, raceId, level, quests, flags, free, gather =
+            string.match(entry, "^([^,]+),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)(,y=.+)?$")
 
         if name and name ~= "" then
+            local gatherName, gatherCur, gatherMax
+            if gather then
+                local ypart = gather:sub(4)
+                gatherName, gatherCur, gatherMax = string.match(ypart, "^(.*%S)%s+(%d+)/(%d+)$")
+            end
             rows[#rows + 1] = {
                 name = name,
                 classId = tonumber(classId) or 0,
@@ -130,6 +135,7 @@ function G.ParseCompPayload(payload)
                 quests = tonumber(quests) or 0,
                 flags = flags or "-",
                 free = tonumber(free) or 0,
+                gather = gatherName and (gatherName .. " " .. gatherCur .. "/" .. gatherMax) or nil,
             }
         end
     end

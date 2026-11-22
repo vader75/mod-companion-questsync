@@ -264,6 +264,10 @@ CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TidyVendorJunk = 1
 CompanionQuestSync.MapPins = 1
 CompanionQuestSync.TidySurplus = 1
+# The land asks a minimum of its gatherers: on entering a zone, a companion whose
+# gathering skill sits below the zone asks (~5 points per zone level) is caught up to
+# that minimum once, with one line in chat. Organically-gathered skill is never reduced.
+CompanionQuestSync.GatherCatchUp = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
 CompanionQuestSync.ItemKeepQuality = 2

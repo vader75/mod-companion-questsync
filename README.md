@@ -144,6 +144,12 @@ Everything in this section is autonomous or one click; nothing needs a command t
   adds only nodes its own skill can work, so it stops at what it can actually use while
   it follows you, and questing carries on normally - the trigger is deliberately
   low-priority.
+- **The land asks a minimum of its gatherers** (`GatherCatchUp`, default on) - a companion
+  walking into a zone it cannot work yet catches its gathering skill up to what the zone
+  asks, once per zone, with one line in chat (*"I caught my Skinning up to 50 - this is
+  what this land asks"*). The approximation is the zone's own level in the classic
+  currency of five points per level; organically-gathered skill above it is never touched,
+  and the card in the window shows the skill against its ceiling.
 - **Produce** (card button, `.companionsync produce <name>`) - the companion crafts what
   its own gathering already paid for: the miner smelts its ore into bars and cuts
   sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker

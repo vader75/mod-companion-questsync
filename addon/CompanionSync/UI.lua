@@ -128,6 +128,10 @@ local function StatusText(companion)
     local parts = {}
     parts[#parts + 1] = ("%d quest%s"):format(companion.quests, companion.quests == 1 and "" or "s")
 
+    if companion.gather then
+        parts[#parts + 1] = COL_MUTED .. companion.gather .. COL_RESET
+    end
+
     if companion.free > 0 then
         if companion.free <= 4 then
             parts[#parts + 1] = COL_WARN .. companion.free .. " free slots - bags tight, a letter may be coming" .. COL_RESET

@@ -117,6 +117,7 @@ namespace
         bool tidyVendorJunk    = true;      // at zero slots, bin what playerbots would vendor
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool tidySurplus       = true;      // last resort: bin spare consumables/materials
+        bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
@@ -365,6 +366,7 @@ namespace
     std::map<std::pair<uint32, uint32>, uint32> g_extraSince;         // (bot, quest) -> first seen extra
     std::set<std::pair<uint32, uint32>> g_failedSeen;                 // (bot, quest) already reported failed
     std::set<uint32> g_deadNoticeAt;                      // bots whose death was announced, one per death
+    std::map<uint32, uint32> g_lastGatherZone;            // bot guid -> last zone the gather catch-up ran for
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -534,6 +536,7 @@ namespace
         g_cfg.tidyVendorJunk     = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyVendorJunk", true);
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
         g_cfg.tidySurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidySurplus", true);
+        g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
@@ -681,6 +684,7 @@ namespace
     void PurgeCompanionState(uint32 botGuid)
     {
         g_passMemo.erase(botGuid);
+        g_lastGatherZone.erase(botGuid);
         g_groundStall.erase(botGuid);
         g_gatherPending.erase(botGuid);
 
@@ -2872,6 +2876,44 @@ namespace
         return tookUp;
     }
 
+    /// The land asks a minimum of its gatherers. A companion walking into a zone it
+    /// cannot work yet catches its gathering skill up to what the zone asks - once per
+    /// zone, with one honest line - and never below what it earned organically. The
+    /// approximation is the zone's own level in the classic currency of five points
+    /// per level (Westfall asks ~50, Elwynn ~25).
+    static void CatchUpGatherSkill(Player* owner, Player* bot)
+    {
+        if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+            return;
+
+        if (owner->GetMapId() != bot->GetMapId() || !owner->GetZoneId())
+            return;
+
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(owner->GetZoneId());
+        if (!area || area->area_level <= 0)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32& lastZone = g_lastGatherZone[botGuid];
+        if (lastZone == owner->GetZoneId())
+            return;
+        lastZone = owner->GetZoneId();
+
+        auto const pair = ClassProfessionPair(bot->getClass());
+        uint32 const zoneMin = std::min<uint32>(uint32(area->area_level) * 5, 450);
+        uint16 const skill = pair.first;
+        uint16 const cur = bot->GetSkillValue(skill);
+        if (cur >= zoneMin)
+            return;
+
+        uint16 const ceiling = uint16(std::max<uint32>(zoneMin, ProfessionCap(bot->GetLevel())));
+        bot->SetSkill(skill, 0, uint16(zoneMin), ceiling);
+
+        SayToOwner(bot, owner,
+                   "I caught my " + std::string(ProfessionOf(skill).name) + " up to " +
+                   std::to_string(zoneMin) + " - this is what this land asks.", 30);
+    }
+
     /// A gathering profession is only as good as its tool: skinning needs the knife,
     /// mining the pick. The grant at teach time can lose to a full bag, so the upkeep
     /// keeps trying every pass until the tool is in the pack - then it stays silent.
@@ -4847,8 +4889,10 @@ namespace
 #ifdef MOD_PLAYERBOTS
         // A tool that failed to land once must not wait for a "dirty" pass: this is a
         // keep-trying guarantee, not change-driven work, so it runs before the memo
-        // early-return the same way the upkeep it belongs to does.
+        // early-return the same way the upkeep it belongs to does. The gather catch-up
+        // rides the same slot - what the land asks does not wait for a dirty pass either.
         EnsureProfessionTools(bot);
+        CatchUpGatherSkill(owner, bot);
 #endif
 
         // Keep a couple of slots free so quest items can be picked up and
@@ -5914,6 +5958,18 @@ namespace
             line += SafePinName(name) + "," + std::to_string(classId) + "," + std::to_string(raceId) + "," +
                     std::to_string(level) + "," + std::to_string(quests) + "," +
                     (flags.empty() ? "-" : flags) + "," + std::to_string(freeSlots);
+
+#ifdef MOD_PLAYERBOTS
+            // the gathering half of the pair, so the card shows where the skill stands -
+            // a catch-up is visible the moment the number jumps
+            if (online)
+            {
+                auto const pair = ClassProfessionPair(bot->getClass());
+                uint16 const skill = pair.first;
+                line += ",y=" + std::string(ProfessionOf(skill).name) + " " +
+                        std::to_string(bot->GetSkillValue(skill)) + "/" + std::to_string(ProfessionCap(bot->GetLevel()));
+            }
+#endif
         }
 
         return line;
