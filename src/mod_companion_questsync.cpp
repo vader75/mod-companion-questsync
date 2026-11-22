@@ -123,6 +123,7 @@ namespace
         bool tidySurplus       = true;      // last resort: bin spare consumables/materials
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
+        bool autoProduce       = true;      // crafting is its own habit; the button is for the report
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
@@ -374,6 +375,7 @@ namespace
     std::map<uint32, uint32> g_lastGatherZone;            // bot guid -> last zone the gather catch-up ran for
     std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
     std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
+    std::map<uint32, uint32> g_lastAutoProduce;           // bot guid -> unix time of the last quiet craft
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -545,6 +547,7 @@ namespace
         g_cfg.tidySurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidySurplus", true);
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
+        g_cfg.autoProduce        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoProduce", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
@@ -2978,6 +2981,113 @@ namespace
         return proto ? std::string(proto->Name1) : std::string("?");
     }
 
+    /// Craft what the companion's own gathering already paid for. The recipe is found
+    /// among the bot's OWN known spells by what it creates, its reagents are read from
+    /// the spell itself, and only the shop-bought pieces are granted - gathered reagents
+    /// are waited for, never conjured. Products land in bags, get used in play, and any
+    /// overflow rides MailHome. Returns the lines for the chat report.
+    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner, bool announce = true)
+    {
+        auto const pair = ClassProfessionPair(bot->getClass());
+        std::vector<std::string> report;
+        std::string made;
+        std::string waiting;
+
+        for (uint32 const product : ProductsOf(pair.second))
+        {
+            // the recipe: a spell the companion knows that creates this item
+            uint32 spellId = 0;
+            for (auto const& entry : bot->GetSpellMap())
+            {
+                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry.first);
+                if (!info)
+                    continue;
+                for (uint8 e = 0; e < 3; ++e)
+                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
+                        uint32(info->Effects[e].ItemType) == product)
+                        spellId = entry.first;
+            }
+
+            if (!spellId)
+            {
+                waiting += (waiting.empty() ? "" : ", ") + ItemNameFor(product) + " (recipe not learned)";
+                continue;
+            }
+
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+
+            // reagents: grant the shop-bought pieces a small stack; gathered pieces wait
+            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+            {
+                uint32 const item = uint32(info->Reagent[r]);
+                uint32 const need = info->ReagentCount[r];
+                if (!item || !need || bot->GetItemCount(item) >= need)
+                    continue;
+
+                if (IsGatherableReagent(pair.first, item))
+                {
+                    waiting += (waiting.empty() ? "" : ", ") +
+                               ItemNameFor(item) + " " + std::to_string(bot->GetItemCount(item)) + "/" + std::to_string(need);
+                }
+                else
+                {
+                    uint32 const give = std::min<uint32>(5, need * 2);
+                    ItemPosCountVec dest;
+                    if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
+                        if (Item* bought = bot->StoreNewItem(dest, item, true))
+                            bot->SendNewItem(bought, give, true, false, true);
+                }
+            }
+
+            // up to two batches while the reagents hold out, then verify honestly
+            uint32 const before = bot->GetItemCount(product);
+            for (uint8 batch = 0; batch < 2; ++batch)
+            {
+                bool ready = true;
+                for (uint8 r = 0; r < MAX_SPELL_REAGENTS && ready; ++r)
+                {
+                    uint32 const item = uint32(info->Reagent[r]);
+                    uint32 const need = info->ReagentCount[r];
+                    ready = !item || !need || bot->GetItemCount(item) >= need;
+                }
+                if (!ready)
+                    break;
+
+                bot->CastSpell(bot, spellId, true);
+            }
+
+            uint32 const produced = bot->GetItemCount(product) - before;
+            if (produced)
+            {
+                if (!made.empty())
+                    made += ", ";
+                made += std::to_string(produced) + "x " + ItemNameFor(product);
+            }
+        }
+
+        if (!made.empty())
+        {
+            report.push_back("made " + made);
+            if (announce)
+                SayToOwner(bot, owner, "I made " + made + " - I will use what fits, the rest goes to your mailbox.", 30);
+        }
+        if (!waiting.empty())
+        {
+            report.push_back("waiting on " + waiting);
+            if (announce)
+                SayToOwner(bot, owner, "I am waiting on " + waiting + " - I will keep gathering.", 30);
+        }
+        if (report.empty())
+        {
+            report.push_back("nothing to produce");
+            if (announce)
+                SayToOwner(bot, owner, "I have nothing I can craft just now - I keep an eye on what I gather.", 30);
+        }
+
+        return report;
+    }
+
+
     /// A vendor the companion could be standing at: any live creature with the vendor
     /// or repair flag within range, found the way the core searches its own cells.
     static Creature* VendorNearby(Player* bot, float range)
@@ -5218,6 +5328,20 @@ namespace
         TeachCraftRecipes(bot, recipeSkills[0], recipeCap);
         TeachCraftRecipes(bot, recipeSkills[1], recipeCap);
         RestockNearVendor(owner, bot);   // near a trade or repair NPC: restock, mend, quietly
+        // crafting is the companion's own habit, not a request: every few minutes it
+        // turns what its gathering paid for into the useful thing, silently - the
+        // products land in bags, get used in play, and the overflow rides MailHome.
+        // The Produce button stays for the moment the report itself is wanted.
+        if (g_cfg.autoProduce && !inCombat)
+        {
+            uint32& lastAuto = g_lastAutoProduce[botGuid];
+            uint32 const now = uint32(time(nullptr));
+            if (!lastAuto || now - lastAuto >= 180)
+            {
+                lastAuto = now;
+                ProduceForCompanion(bot, owner, /*announce=*/false);
+            }
+        }
 #endif
 
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
@@ -8501,109 +8625,6 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
-    /// Craft what the companion's own gathering already paid for. The recipe is found
-    /// among the bot's OWN known spells by what it creates, its reagents are read from
-    /// the spell itself, and only the shop-bought pieces are granted - gathered reagents
-    /// are waited for, never conjured. Products land in bags, get used in play, and any
-    /// overflow rides MailHome. Returns the lines for the chat report.
-    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner)
-    {
-        auto const pair = ClassProfessionPair(bot->getClass());
-        std::vector<std::string> report;
-        std::string made;
-        std::string waiting;
-
-        for (uint32 const product : ProductsOf(pair.second))
-        {
-            // the recipe: a spell the companion knows that creates this item
-            uint32 spellId = 0;
-            for (auto const& entry : bot->GetSpellMap())
-            {
-                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry.first);
-                if (!info)
-                    continue;
-                for (uint8 e = 0; e < 3; ++e)
-                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
-                        uint32(info->Effects[e].ItemType) == product)
-                        spellId = entry.first;
-            }
-
-            if (!spellId)
-            {
-                waiting += (waiting.empty() ? "" : ", ") + ItemNameFor(product) + " (recipe not learned)";
-                continue;
-            }
-
-            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
-
-            // reagents: grant the shop-bought pieces a small stack; gathered pieces wait
-            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
-            {
-                uint32 const item = uint32(info->Reagent[r]);
-                uint32 const need = info->ReagentCount[r];
-                if (!item || !need || bot->GetItemCount(item) >= need)
-                    continue;
-
-                if (IsGatherableReagent(pair.first, item))
-                {
-                    waiting += (waiting.empty() ? "" : ", ") +
-                               ItemNameFor(item) + " " + std::to_string(bot->GetItemCount(item)) + "/" + std::to_string(need);
-                }
-                else
-                {
-                    uint32 const give = std::min<uint32>(5, need * 2);
-                    ItemPosCountVec dest;
-                    if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
-                        if (Item* bought = bot->StoreNewItem(dest, item, true))
-                            bot->SendNewItem(bought, give, true, false, true);
-                }
-            }
-
-            // up to two batches while the reagents hold out, then verify honestly
-            uint32 const before = bot->GetItemCount(product);
-            for (uint8 batch = 0; batch < 2; ++batch)
-            {
-                bool ready = true;
-                for (uint8 r = 0; r < MAX_SPELL_REAGENTS && ready; ++r)
-                {
-                    uint32 const item = uint32(info->Reagent[r]);
-                    uint32 const need = info->ReagentCount[r];
-                    ready = !item || !need || bot->GetItemCount(item) >= need;
-                }
-                if (!ready)
-                    break;
-
-                bot->CastSpell(bot, spellId, true);
-            }
-
-            uint32 const produced = bot->GetItemCount(product) - before;
-            if (produced)
-            {
-                if (!made.empty())
-                    made += ", ";
-                made += std::to_string(produced) + "x " + ItemNameFor(product);
-            }
-        }
-
-        if (!made.empty())
-        {
-            report.push_back("made " + made);
-            SayToOwner(bot, owner, "I made " + made + " - I will use what fits, the rest goes to your mailbox.", 30);
-        }
-        if (!waiting.empty())
-        {
-            report.push_back("waiting on " + waiting);
-            SayToOwner(bot, owner, "I am waiting on " + waiting + " - I will keep gathering.", 30);
-        }
-        if (report.empty())
-        {
-            report.push_back("nothing to produce");
-            SayToOwner(bot, owner, "I have nothing I can craft just now - I keep an eye on what I gather.", 30);
-        }
-
-        return report;
-    }
-
     /// .companionsync trade <name> - the card's Trade button.
     ///
     /// The companion opens a trade with the owner and fills it with its surplus: every
