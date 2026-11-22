@@ -4644,9 +4644,6 @@ namespace
         // minutes for something to change before it may speak.
         FlushWhisperQueue(owner, bot);
 
-        // Presence: one Hello a minute, so the client's patience window never reads a quiet stretch as a dead module.
-        SendHeartbeat(owner);
-
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -6257,6 +6254,14 @@ namespace
         // that silently stops being tracked reads as "it stopped following me", and the
         // next thing they do is file a bug about the module rather than about the row.
         ReportDroppedBindings(owner);
+
+        // Presence belongs to the OWNER, not to whichever companion happens to be out:
+        // the heartbeat used to run inside the per-companion pass, which never ran while
+        // no companion was summoned - the owner sat online with a login Hello and then
+        // silence, and the window read "not responding" while the module was alive and
+        // simply idle. One Hello a minute from the moment the owner is in the world,
+        // zero companions or four.
+        SendHeartbeat(owner);
 
         if (bots.empty())
             return aggregate;
