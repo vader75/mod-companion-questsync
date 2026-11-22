@@ -4639,11 +4639,6 @@ namespace
             return report;
         }
 
-        // The queue drains even on a clean pass: the memo gate is about quest work, not
-        // about speech - on a long run of quiet passes a queued line otherwise waits
-        // minutes for something to change before it may speak.
-        FlushWhisperQueue(owner, bot);
-
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -6254,6 +6249,11 @@ namespace
         // that silently stops being tracked reads as "it stopped following me", and the
         // next thing they do is file a bug about the module rather than about the row.
         ReportDroppedBindings(owner);
+
+        // Speech drains at the owner level too: a line queued while a companion was out
+        // must not wait for a companion to come back out before it may speak or be
+        // dropped as stale - each entry resolves its own speaker, and stale entries drop.
+        FlushWhisperQueue(owner, nullptr);
 
         // Presence belongs to the OWNER, not to whichever companion happens to be out:
         // the heartbeat used to run inside the per-companion pass, which never ran while

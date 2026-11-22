@@ -216,6 +216,9 @@ CompanionQuestSync.FollowThroughTeleport = 1
 #                         "I cannot talk to the quest giver".
 #        Default:     1
 CompanionQuestSync.HandInMode = 1
+# 2 = the companion hands in itself, but only within HandInNearDistance of the giver;
+#     beyond that it whispers to be led (no reward, no teleport)
+CompanionQuestSync.HandInNearDistance = 40
 #    CompanionQuestSync.HandInDelaySeconds
 #        Description: How long a finished quest stays visible before it rewards itself.
 #                     The gold hand-in pin and the companion standing at the giver are the
