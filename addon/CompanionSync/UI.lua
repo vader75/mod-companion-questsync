@@ -797,11 +797,34 @@ local function CreateLauncher()
     local anchor = Minimap or UIParent
     launcher = CreateFrame("Button", "CompanionSyncLauncher", UIParent)
 launcher:SetSize(24, 24)
-if CompanionSyncDB then
-    CompanionSyncDB.launcher = CompanionSyncDB.launcher or { x = 6, y = -60 }
+
+-- The button rides the minimap's EDGE RING, centre-anchored: any interface suite that
+-- moves or rescales the minimap carries it along, and a drag can never strand it mid-screen.
+-- The old top-left pixel offsets were relative to a minimap of one size in one place, which
+-- is exactly what a suite like Dragon UI rearranges.
+local function MinimapRadius()
+    if anchor ~= Minimap and Minimap then return math.max(Minimap:GetWidth(), Minimap:GetHeight()) / 2 end
+    return (anchor.GetWidth and math.max(anchor:GetWidth() or 140, anchor:GetHeight() or 140) / 2) or 70
 end
-local savedPos = (CompanionSyncDB and CompanionSyncDB.launcher) or { x = 6, y = -60 }
-launcher:SetPoint("TOPLEFT", anchor, "TOPLEFT", savedPos.x or 6, savedPos.y or -60)
+local function RingRadius()
+    return MinimapRadius() + 14
+end
+
+local saved = CompanionSyncDB and CompanionSyncDB.launcher or nil
+-- Legacy saves ({x = 6, y = -60}) were top-left pixel offsets from a minimap of one size;
+-- their values cannot be carried across a suite that rearranges the map, so they reset to
+-- the default west-edge spot - one drag puts the button anywhere the ring allows.
+if saved and (saved.legacy or (saved.x < 40 and saved.y > -200)) then
+    saved = nil
+end
+if not saved then
+    local r = RingRadius()
+    saved = { x = -r, y = 0 }        -- default: straight west of the minimap
+end
+if CompanionSyncDB then
+    CompanionSyncDB.launcher = saved
+end
+launcher:SetPoint("CENTER", anchor, "CENTER", saved.x, saved.y)
 launcher:SetFrameStrata("HIGH")
 launcher:SetBackdrop({
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -857,16 +880,27 @@ end)
 launcher:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
 
-    -- Save the position relative to the minimap, so the button travels with the map if it is
-    -- ever moved or rescaled, and stays where the player put it across logins.
+    -- Take the dragged position as an angle around the minimap: measure the button's
+    -- centre against the minimap's, clamp onto the edge ring, and save it
+    -- centre-relative so the button follows the map wherever a suite puts it.
     local anchor = Minimap or UIParent
     local left, top = self:GetLeft(), self:GetTop()
-    local ax, ay = anchor:GetLeft(), anchor:GetTop()
-    local dx = (left and ax) and (left - ax) or 0
-    local dy = (top and ay) and (top - ay) or 0
+    if not left then return end
+    local bx, by = left + 12, top - 12
+    local mcx, mcy = anchor:GetCenter()
+
+    local dx, dy = bx - mcx, by - mcy
+    local r = RingRadius()
+    local d = math.sqrt(dx * dx + dy * dy)
+    if d > 0.001 then
+        local k = math.min(1, r / d)
+        dx, dy = dx * k, dy * k        -- clamp onto the ring, keep the angle
+    else
+        dx, dy = -r, 0
+    end
 
     self:ClearAllPoints()
-    self:SetPoint("TOPLEFT", anchor, "TOPLEFT", dx, dy)
+    self:SetPoint("CENTER", anchor, "CENTER", dx, dy)
 
     if CompanionSyncDB then
         CompanionSyncDB.launcher = { x = dx, y = dy }
