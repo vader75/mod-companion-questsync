@@ -1,0 +1,87 @@
+diff --git a/src/server/game/Entities/Player/TradeData.h b/src/server/game/Entities/Player/TradeData.h
+--- a/src/server/game/Entities/Player/TradeData.h
++++ b/src/server/game/Entities/Player/TradeData.h
+@@ -19,6 +19,10 @@
+ #define __TRADE_DATA_H__
+
+ #include "Define.h"
++#include <functional>
++#include <utility>
++
++#define AC_TRADE_OFFER_GUARD 1
+
+ class Item;
+ class ObjectGuid;
+@@ -58,6 +62,15 @@ public:                                                 // constructors
+     [[nodiscard]] bool IsAccepted() const { return _accepted; }
+     void SetAccepted(bool state, bool forTrader = false);
+
++    using OfferGuard = std::function<bool(Player*, Player*, TradeData const*)>;
++    void SetOfferGuard(uint64 token, OfferGuard guard)
++    {
++        _offerToken = token;
++        _offerGuard = std::move(guard);
++    }
++    [[nodiscard]] uint64 GetOfferToken() const { return _offerToken; }
++    [[nodiscard]] bool AcceptsOffer() const { return !_offerGuard || _offerGuard(_player, _trader, this); }
++
+     [[nodiscard]] bool IsInAcceptProcess() const { return m_acceptProccess; }
+     void SetInAcceptProcess(bool state) { m_acceptProccess = state; }
+
+@@ -65,6 +78,8 @@ private:                                                // internal functions
+     void Update(bool for_trader = true);
+
+ private:                                                // fields
++    uint64 _offerToken = 0;
++    OfferGuard _offerGuard;
+     Player*    _player;                                // Player who own of this TradeData
+     Player*    _trader;                                // Player who trade with m_player
+
+diff --git a/src/server/game/Handlers/TradeHandler.cpp b/src/server/game/Handlers/TradeHandler.cpp
+--- a/src/server/game/Handlers/TradeHandler.cpp
++++ b/src/server/game/Handlers/TradeHandler.cpp
+@@ -242,8 +242,43 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& /*recvPacket*/)
+     Player* trader = my_trade->GetTrader();
+
+     TradeData* his_trade = trader->m_trade;
+-    if (!his_trade)
++    if (!his_trade || his_trade->GetTrader() != _player)
+         return;
+
++    // Keep the trade records on a rejected accept. Playerbots uses their
++    // disappearance after this opcode to recognise a completed transfer.
++    auto const rejectAccept = [&]
++    {
++        my_trade->SetAccepted(false);
++        his_trade->SetAccepted(false);
++    };
++
++    if (((IsBot() || trader->GetSession()->IsBot()) &&
++         (_player->IsInCombat() || trader->IsInCombat())) ||
++        !my_trade->AcceptsOffer() || !his_trade->AcceptsOffer())
++    {
++        rejectAccept();
++        return;
++    }
++
++    // Direct server-side callers can bypass the client handler's slot checks.
++    // A pointer repeated in the transfer arrays can be consumed by a merge in
++    // the first slot, then accessed again in a later slot.
++    for (uint8 slot = 0; slot < TRADE_SLOT_TRADED_COUNT; ++slot)
++    {
++        Item const* mine = my_trade->GetItem(TradeSlots(slot));
++        Item const* theirs = his_trade->GetItem(TradeSlots(slot));
++        for (uint8 earlier = 0; earlier < slot; ++earlier)
++        {
++            if ((mine && mine == my_trade->GetItem(TradeSlots(earlier))) ||
++                (theirs && theirs == his_trade->GetItem(TradeSlots(earlier))))
++            {
++                LOG_ERROR("network.opcode", "Trade canceled: duplicate item in trade slots");
++                rejectAccept();
++                return;
++            }
++        }
++    }
++
+     Item* myItems[TRADE_SLOT_TRADED_COUNT]  = { };
+     Item* hisItems[TRADE_SLOT_TRADED_COUNT] = { };

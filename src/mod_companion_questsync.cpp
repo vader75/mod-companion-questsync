@@ -389,17 +389,21 @@ namespace
     {
         uint32 ownerGuid = 0;
         uint32 at = 0;
-        std::vector<std::pair<uint32, uint32>> offer;   // {item entry, count} - values, not pointers
+        std::vector<std::pair<ObjectGuid, uint32>> offer; // exact source stack and surplus count
         bool applied = false;                           // the window is filled; now guard it
-        uint8 filled = 0;                               // trade slots the apply actually filled
+        bool announceFailure = false;                  // automatic probes do not report routine deferrals
+
         uint64 noticeId = 0;                            // identifies this offer, not a later window
-        std::vector<std::pair<TradeSlots, ObjectGuid>> offeredItems;
+        struct OfferedItem { TradeSlots slot; ObjectGuid guid; uint32 count; };
+        std::vector<OfferedItem> offeredItems;
     };
+    constexpr uint32 TradeReserveCount = 5;
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
+    static std::vector<std::pair<ObjectGuid, uint32>> PlanTradeSurplus(Player* bot);
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
                     uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0);
-    static uint16 FindFreeBagPos(Player* bot);
+    static uint16 FindFreeBagPos(Player* bot, Item const* item);
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -995,9 +999,46 @@ namespace
         return ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid));
     }
 
-    /// Apply the stashed trade offers: the bot's own tick has now answered the begin
-    /// (CMSG_BEGIN_TRADE went out, the owner's window is up), so SetItem lands where
-    /// the client can see it - and the announcement waits for that moment too.
+    static bool CanTradeSurplusNow(Player* bot, Player* owner)
+    {
+        return bot->IsInWorld() && owner->IsInWorld() && bot->IsAlive() && owner->IsAlive() &&
+               bot->GetSession() && owner->GetSession() && !bot->IsInCombat() && !owner->IsInCombat() &&
+               bot->IsWithinDistInMap(owner, TRADE_DISTANCE, false);
+    }
+
+    static bool MatchesTradeOffer(Player* bot, TradeData const* trade, PendingTrade const& pending)
+    {
+        if (pending.offeredItems.empty() || trade->GetMoney() || trade->GetSpell())
+            return false;
+
+        std::map<uint32, uint32> totals;
+        for (auto const& [slot, guid, count] : pending.offeredItems)
+        {
+            Item const* item = trade->GetItem(slot);
+            if (!item || item->GetGUID() != guid || item->GetCount() != count)
+                return false;
+            totals[item->GetEntry()] += count;
+        }
+        for (uint8 slot = uint8(pending.offeredItems.size()); slot < TRADE_SLOT_COUNT; ++slot)
+            if (trade->GetItem(TradeSlots(slot)))
+                return false;
+        for (auto const& [entry, offered] : totals)
+            if (bot->GetItemCount(entry, false) < offered + TradeReserveCount)
+                return false;
+        return true;
+    }
+
+    static void CancelSurplusTrade(Player* bot, Player* owner, char const* reason)
+    {
+        WorldPacket packet;
+        if (WorldSession* session = bot->GetSession())
+            session->HandleCancelTradeOpcode(packet);
+
+        if (reason)
+            SayToOwner(bot, owner, reason, 30);
+    }
+
+    /// Fill after the bot has had time to answer the begin-trade round trip.
     void ApplyPendingTrades()
     {
         for (auto itr = g_pendingTrade.begin(); itr != g_pendingTrade.end();)
@@ -1008,92 +1049,88 @@ namespace
                 ? ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid))
                 : nullptr;
 
-            if (!bot || !owner || !bot->GetTradeData() ||
-                bot->GetTradeData()->GetTrader() != owner || !owner->GetTradeData())
+            TradeData* trade = bot ? bot->GetTradeData() : nullptr;
+            TradeData* other = owner ? owner->GetTradeData() : nullptr;
+            if (!trade || !other || trade->GetTrader() != owner || other->GetTrader() != bot
+#ifdef AC_TRADE_OFFER_GUARD
+                || trade->GetOfferToken() != pending.noticeId
+#endif
+                )
             {
                 itr = g_pendingTrade.erase(itr);   // the window never opened, or either side cancelled
                 continue;
             }
 
-            if (uint32(time(nullptr)) - pending.at < 2 ||
-                bot->IsInCombat() || owner->IsInCombat())
+            if (!CanTradeSurplusNow(bot, owner))
             {
-                ++itr;                             // wait: round trip, or combat passes
+                CancelSurplusTrade(bot, owner, nullptr);
+                itr = g_pendingTrade.erase(itr);
                 continue;
             }
 
             if (pending.applied)
             {
-                // the window is filled: every slot the apply filled must still resolve to
-                // a LIVE item (GetItem walks the stored GUID, a dead item resolves null).
-                // A stack merge on the bot's side - a craft, a loot pickup - frees one of
-                // the two merged objects while the trade still references it; the transfer
-                // then crashes the world on the dead pointer. The trade is cancelled the
-                // moment its integrity breaks, before any accept can move a dead item.
-                bool integrityBroke = false;
-                for (uint8 slot = 0; slot < pending.filled && !integrityBroke; ++slot)
+                // A missing or replaced stack invalidates what the player was offered.
+                if (!trade->IsAccepted() || !MatchesTradeOffer(bot, trade, pending))
                 {
-                    if (!bot->GetTradeData()->GetItem(TradeSlots(slot)))
-                    {
-                        WorldPacket p;
-                        bot->GetSession()->HandleCancelTradeOpcode(p);
-                        SayToOwner(bot, owner,
-                                   "The trade fell apart - one of the stacks was used up. I will offer again.", 30);
-                        integrityBroke = true;
-                    }
-                }
-
-                if (!integrityBroke && !bot->GetTradeData())
-                    integrityBroke = true;      // the trade is over: accepted or cancelled
-
-                if (integrityBroke)
+                    CancelSurplusTrade(bot, owner, "My offer changed. I'll check what I can spare and try again.");
                     itr = g_pendingTrade.erase(itr);
+                }
                 else
                     ++itr;                      // the guard is live; the trade ends, the record goes
                 continue;
             }
 
-            // the hand-over is a gift between companions, not commerce: the window is up
-            // now, so find the items by value and fill it - every pointer is found and
-            // used inside this one call, nothing survives it
-            uint32 offered = 0;
-            for (uint8 slot = 0; slot < pending.offer.size() && slot < 6; ++slot)
+            if (uint32(time(nullptr)) - pending.at < 2)
             {
-                uint32 const entry = pending.offer[slot].first;
-                uint32 const want = pending.offer[slot].second;
+                ++itr;
+                continue;
+            }
 
-                // the biggest stack of this entry in the bot's own bags
-                Item* best = nullptr;
-                for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END && !best; ++i)
-                    if (Item* it = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
-                        if (it->GetTemplate()->ItemId == entry && it->CanBeTraded())
-                            best = it;
-                for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END && !best; ++i)
-                    if (Bag* bag = bot->GetBagByPos(i))
-                        for (uint8 j = 0; j < bag->GetBagSize() && !best; ++j)
-                            if (Item* it = bot->GetItemByPos(i, j))
-                                if (it->GetTemplate()->ItemId == entry && it->CanBeTraded())
-                                    best = it;
-                if (!best)
+            // Never overwrite a slot added by another trade path.
+            bool empty = true;
+            for (uint8 slot = 0; slot < TRADE_SLOT_COUNT; ++slot)
+                empty = empty && !trade->GetItem(TradeSlots(slot));
+            if (!empty || trade->GetMoney() || trade->GetSpell())
+            {
+                CancelSurplusTrade(bot, owner, pending.announceFailure
+                    ? "The trade changed before I could fill it. Please try again when you're ready." : nullptr);
+                itr = g_pendingTrade.erase(itr);
+                continue;
+            }
+
+            // Recalculate the reserve before touching bags. Never substitute a stack
+            // with the same item entry: it may already be offered or held in reserve.
+            if (PlanTradeSurplus(bot) != pending.offer)
+            {
+                CancelSurplusTrade(bot, owner, nullptr);
+                itr = g_pendingTrade.erase(itr);
+                continue;
+            }
+
+            uint32 offered = 0;
+            for (auto const& [guid, want] : pending.offer)
+            {
+                Item* tradeItem = bot->GetItemByGuid(guid);
+                if (!tradeItem || !tradeItem->CanBeTraded() || tradeItem->GetCount() < want ||
+                    trade->HasItem(tradeItem->GetGUID()))
                     continue;
 
-                Item* tradeItem = best;
-                if (best->GetCount() > want)
+                if (tradeItem->GetCount() > want)
                 {
-                    // the reserve sits inside this stack: split the spare out first
-                    uint16 const dstPos = FindFreeBagPos(bot);
+                    uint16 const dstPos = FindFreeBagPos(bot, tradeItem);
                     if (!dstPos)
                         continue;
-                    bot->SplitItem(best->GetPos(), dstPos, want);
+                    bot->SplitItem(tradeItem->GetPos(), dstPos, want);
                     tradeItem = bot->GetItemByPos(dstPos);
-                    if (!tradeItem)
+                    if (!tradeItem || !tradeItem->CanBeTraded() || tradeItem->GetCount() != want ||
+                        trade->HasItem(tradeItem->GetGUID()))
                         continue;
                 }
 
-                bot->GetTradeData()->SetItem(TradeSlots(slot), tradeItem);
-                pending.offeredItems.emplace_back(TradeSlots(slot), tradeItem->GetGUID());
-                pending.offer[slot] = { entry, want };   // which slot carries what, for the guard
-                ++pending.filled;
+                uint8 const slot = uint8(offered);
+                trade->SetItem(TradeSlots(slot), tradeItem);
+                pending.offeredItems.push_back({ TradeSlots(slot), tradeItem->GetGUID(), want });
                 ++offered;
             }
 
@@ -1101,14 +1138,19 @@ namespace
             // and the transfer completes the moment the owner accepts
             if (offered)
             {
-                bot->GetTradeData()->SetAccepted(true);
                 pending.applied = true;
+                trade->SetAccepted(true);
                 SayToOwner(bot, owner, "I put " + std::to_string(offered) +
                            " stack(s) in the trade - take them, they are yours.", 30, 0, false, pending.noticeId);
                 ++itr;                            // the record stays: the guard is live now
             }
             else
-                itr = g_pendingTrade.erase(itr);        }
+            {
+                CancelSurplusTrade(bot, owner, pending.announceFailure
+                    ? "I couldn't prepare any spare stacks. I'll check again when there's room." : nullptr);
+                itr = g_pendingTrade.erase(itr);
+            }
+        }
     }
 
     /// Bring companions along when the owner teleports.
@@ -2656,16 +2698,12 @@ namespace
         TradeData const* other = owner->GetTradeData();
         if (!trade || !other || trade->GetTrader() != owner || other->GetTrader() != bot || !trade->IsAccepted())
             return false;
+#ifdef AC_TRADE_OFFER_GUARD
+        if (trade->GetOfferToken() != noticeId)
+            return false;
+#endif
 
-        // Same traders can reopen before the pending-trade sweep runs. Require the
-        // module's actual offered items, not just an open window with those traders.
-        for (auto const& [slot, guid] : pending->second.offeredItems)
-        {
-            Item const* item = trade->GetItem(slot);
-            if (!item || item->GetGUID() != guid)
-                return false;
-        }
-        return !pending->second.offeredItems.empty();
+        return MatchesTradeOffer(bot, trade, pending->second);
     }
 
     /// Send whatever was held back by the rate limit, one per pass.
@@ -3369,13 +3407,13 @@ namespace
 
 
     /// A free bag position for a split stack, packed the way SplitItem wants it.
-    static uint16 FindFreeBagPos(Player* bot)
+    static uint16 FindFreeBagPos(Player* bot, Item const* item)
     {
         for (uint16 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
             if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
                 return uint16((INVENTORY_SLOT_BAG_0 << 8) | i);
         for (uint16 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i))
+            if (Bag* bag = bot->GetBagByPos(i); bag && ItemCanGoIntoBag(item->GetTemplate(), bag->GetTemplate()))
                 for (uint8 j = 0; j < bag->GetBagSize(); ++j)
                     if (!bot->GetItemByPos(i, j))
                         return uint16((i << 8) | j);
@@ -3384,9 +3422,7 @@ namespace
 
     /// Open a trade with the owner and fill it with the surplus above the keep-five
     /// reserve: every gathered mat and produced item, biggest stacks first, six slots.
-    /// Returns the stacks offered (0 = nothing spare, or the trade would not open).
-    /// With announce it says its lines - the self-trade stays quiet about nothing.
-    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce)
+    static std::vector<std::pair<ObjectGuid, uint32>> PlanTradeSurplus(Player* bot)
     {
         auto const pair = ClassProfessionPair(bot->getClass());
 
@@ -3395,11 +3431,12 @@ namespace
         std::map<uint32, uint32> keepLeft;
         for (CraftLane const& lane : CraftLanes(pair.second))
             for (CraftRecipe const& recipe : lane.recipes)
-                keepLeft[recipe.product] = 5;
+                keepLeft[recipe.product] = TradeReserveCount;
         for (uint32 const id : GatheredReagentsOf(pair.first))
-            keepLeft[id] = 5;
+            keepLeft[id] = TradeReserveCount;
 
-        std::vector<std::pair<Item*, uint32>> offers;
+        std::vector<std::pair<ObjectGuid, uint32>> offers;
+
         auto consider = [&](Item* item)
         {
             if (!item || !item->CanBeTraded())
@@ -3415,21 +3452,8 @@ namespace
             if (!spare)
                 return;
 
-            // SetItem trades the WHOLE stack: the reserve sits inside this stack, so the
-            // spare is split into its own stack first and that stack goes in the trade
-            Item* tradeItem = item;
-            if (spare < count)
-            {
-                uint16 const dstPos = FindFreeBagPos(bot);
-                if (!dstPos)
-                    return;            // no room to keep the reserve whole - the stack waits
-
-                bot->SplitItem(item->GetPos(), dstPos, spare);
-                tradeItem = bot->GetItemByPos(dstPos);
-                if (!tradeItem)
-                    return;
-            }
-            offers.push_back({ tradeItem, spare });
+            if (spare == count || FindFreeBagPos(bot, item))
+                offers.emplace_back(item->GetGUID(), spare);
         };
 
         for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
@@ -3440,8 +3464,24 @@ namespace
                 for (uint8 j = 0; j < bag->GetBagSize(); ++j)
                     consider(bot->GetItemByPos(i, j));
 
-        std::sort(offers.begin(), offers.end(),
+        std::stable_sort(offers.begin(), offers.end(),
                   [](auto const& a, auto const& b) { return a.second > b.second; });
+        if (offers.size() > TRADE_SLOT_TRADED_COUNT)
+            offers.resize(TRADE_SLOT_TRADED_COUNT);
+        return offers;
+    }
+
+    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce)
+    {
+#ifndef AC_TRADE_OFFER_GUARD
+        if (announce)
+            SayToOwner(bot, owner, "I can't prepare a safe trade on this realm. Check with the realm administrator.");
+        return 0;
+#else
+        if (!CanTradeSurplusNow(bot, owner) || bot->GetTradeData() || owner->GetTradeData())
+            return 0;
+
+        auto offers = PlanTradeSurplus(bot);
 
         if (offers.empty())
         {
@@ -3449,10 +3489,6 @@ namespace
                 SayToOwner(bot, owner, "I have nothing spare to hand you - I keep what I gather for the road.", 30);
             return 0;
         }
-
-        // the trade window holds six stacks; the rest waits for another press
-        if (offers.size() > 6)
-            offers.resize(6);
 
         WorldPacket pInit(CMSG_INITIATE_TRADE);
         pInit << owner->GetGUID();
@@ -3476,10 +3512,22 @@ namespace
         pending.ownerGuid = owner->GetGUID().GetCounter();
         pending.at = uint32(time(nullptr));
         pending.noticeId = ++g_nextTradeNoticeId;
-        for (auto const& [item, spare] : offers)
-            pending.offer.push_back({ item->GetTemplate()->ItemId, spare });
+        pending.announceFailure = announce;
+        pending.offer = std::move(offers);
 
-        return uint32(offers.size());
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint64 const noticeId = pending.noticeId;
+        td->SetOfferGuard(noticeId, [botGuid, noticeId](Player* source, Player* target, TradeData const* trade)
+        {
+            auto const it = g_pendingTrade.find(botGuid);
+            return it != g_pendingTrade.end() && it->second.noticeId == noticeId && it->second.applied &&
+                   source->GetGUID().GetCounter() == botGuid &&
+                   target->GetGUID().GetCounter() == it->second.ownerGuid &&
+                   CanTradeSurplusNow(source, target) && MatchesTradeOffer(source, trade, it->second);
+        });
+
+        return uint32(pending.offer.size());
+#endif
     }
 
 
@@ -5710,7 +5758,7 @@ namespace
         // and the hand-over happens on its own too: beside you with something spare,
         // the companion opens the trade itself - mail stays the fallback for what
         // cannot wait for a moment together
-        if (g_cfg.autoTrade && !inCombat)
+        if (g_cfg.autoTrade && CanTradeSurplusNow(bot, owner))
         {
             uint32& lastAutoTrade = g_lastAutoTrade[botGuid];
             uint32 const now2 = uint32(time(nullptr));
@@ -5718,7 +5766,7 @@ namespace
                 bot->GetDistance(owner) <= 11.0f && !bot->GetTrader() && !owner->GetTradeData())
             {
                 lastAutoTrade = now2;
-                if (!OpenTradeSurplus(bot, owner, /*announce=*/true))
+                if (!OpenTradeSurplus(bot, owner, /*announce=*/false))
                     lastAutoTrade = 0;      // nothing spare: re-check next pass, silently
             }
         }

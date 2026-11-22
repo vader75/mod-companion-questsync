@@ -22,10 +22,12 @@ class TradeNoticeContract(unittest.TestCase):
 
     def test_replacement_window_must_still_contain_the_original_offer(self):
         check = SOURCE.split('bool IsLiveTradeNotice(', 1)[1].split('void FlushWhisperQueue', 1)[0]
-        self.assertIn('pending->second.offeredItems', check)
-        self.assertIn('GetItem(slot)', check)
-        self.assertIn('item->GetGUID() != guid', check)
-        self.assertIn('pending.offeredItems.emplace_back(TradeSlots(slot), tradeItem->GetGUID());', SOURCE)
+        self.assertIn('MatchesTradeOffer(bot, trade, pending->second)', check)
+        match = SOURCE.split('static bool MatchesTradeOffer(', 1)[1].split('static void CancelSurplusTrade', 1)[0]
+        self.assertIn('pending.offeredItems', match)
+        self.assertIn('GetItem(slot)', match)
+        self.assertIn('item->GetGUID() != guid', match)
+        self.assertIn('pending.offeredItems.push_back({ TradeSlots(slot), tradeItem->GetGUID(), want });', SOURCE)
 
     def test_vital_notices_keep_priority_over_live_offers(self):
         flush = SOURCE.split('void FlushWhisperQueue(', 1)[1].split('void Flush', 1)[0]

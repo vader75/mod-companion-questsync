@@ -9,8 +9,14 @@ A companion is a body this module bound to an owner in **its own table**,
 `mod-playerbots` AddClass pool itself, wipes them, names them, dresses them and
 returns them when released. The only thing it can borrow from `mod-wowlegends` is a
 read of that module's binding table, so two modules never level the same body — and
-that is switchable off (`RespectLegacyBindings = 0`). Nothing in the core,
-`mod-playerbots` or `mod-wowlegends` is patched.
+that is switchable off (`RespectLegacyBindings = 0`). The module runs without changes
+to the core, `mod-playerbots` or `mod-wowlegends`. For WOW Legends builds, also apply
+the [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) from the
+core source root with `git apply` before building worldserver. It rejects duplicate
+items before any transfer, blocks acceptance of bot trades during combat, and lets
+the module recheck the exact offer and reserve when the core handles Accept.
+Without it, companion surplus offers are disabled; ordinary trades and the rest of
+the module are unchanged. The module installer does not modify the core automatically.
 
 Test plan: [`docs/companion-test-plan.md`](docs/companion-test-plan.md) — a 40-minute
 in-game checklist covering every command in this file.
