@@ -763,15 +763,17 @@ local function CreateWindow()
     -- The fallback for a quest that cannot be gathered: items that lie on the ground (oats in
     -- a field, cloth in a crate). The companion tries on its own, and this is for when the
     -- world will not co-operate - the object was taken, or it never respawned.
-    -- One click parses every companion for anything a trainer would have taught and
-    -- its unspent talents; companions raised before the teaching fix are caught up here.
-    local train = Button(footer, "Train all", 72, function() Ack() G.Action("learn") end,
-        "Teach every companion its missing spells and spend its unspent talents.")
-    train:SetPoint("LEFT", catchUp, "RIGHT", 6, 0)
-
     local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
         "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
     catchUp:SetPoint("LEFT", quests, "RIGHT", 6, 0)
+
+    -- One click parses every companion for anything a trainer would have taught and
+    -- its unspent talents; companions raised before the teaching fix are caught up here.
+    -- (An earlier version anchored this to a button declared two lines later - the nil
+    -- reference threw in game and the button silently never existed.)
+    local train = Button(footer, "Train all", 72, function() Ack() G.Action("learn") end,
+        "Teach every companion its missing spells and spend its unspent talents.")
+    train:SetPoint("LEFT", catchUp, "RIGHT", 6, 0)
 
     LayoutWindow(0)
 
