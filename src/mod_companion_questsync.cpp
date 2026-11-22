@@ -999,15 +999,17 @@ namespace
                 ? ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid))
                 : nullptr;
 
-            if (!bot || !owner || !bot->GetTradeData() || bot->GetTradeData()->GetTrader() != owner)
+            if (!bot || !owner || !bot->GetTradeData() ||
+                bot->GetTradeData()->GetTrader() != owner || !owner->GetTradeData())
             {
-                itr = g_pendingTrade.erase(itr);   // the window never opened, or was closed
+                itr = g_pendingTrade.erase(itr);   // the window never opened, or either side cancelled
                 continue;
             }
 
-            if (uint32(time(nullptr)) - pending.at < 2)
+            if (uint32(time(nullptr)) - pending.at < 2 ||
+                bot->IsInCombat() || owner->IsInCombat())
             {
-                ++itr;                             // give the bot's tick its round trip
+                ++itr;                             // wait: round trip, or combat passes
                 continue;
             }
 
