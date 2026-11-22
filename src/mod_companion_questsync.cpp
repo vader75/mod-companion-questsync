@@ -261,7 +261,6 @@ namespace
     std::unordered_map<uint32, SessionTally> g_session;   // owner guid -> tally
     std::map<uint32, std::string> g_lastSessionSummary;   // owner guid -> last logout's digest
     std::map<uint32, std::set<uint32>> g_sessionRefused;  // owner guid -> quests refused once
-    std::map<uint32, std::set<uint32>> g_seenQuests;      // bot guid -> quests in its log last pass
     std::map<uint32, uint32> g_walkAt;                    // bot guid -> unix time
     std::map<uint32, std::string> g_lastPinSync;          // owner guid -> last pin line sent
     std::map<uint32, uint32> g_heartbeatAt;               // owner guid -> last Hello
@@ -694,7 +693,6 @@ namespace
         for (auto itr = g_gatherAnnounced.begin(); itr != g_gatherAnnounced.end();)
             itr = (itr->first == botGuid) ? g_gatherAnnounced.erase(itr) : std::next(itr);
 
-        g_seenQuests.erase(botGuid);
         g_repairing.erase(botGuid);
         g_notified.erase(botGuid);
         g_pendingNotices.erase(botGuid);
@@ -4711,27 +4709,10 @@ namespace
         FlushNotices(owner, bot);
         FlushWhisperQueue(owner, bot);
 
-        // Quest cleared: say so once, so the addon can drop its pin instead of
-        // leaving a marker on a quest that is already done.
-        {
-            std::set<uint32>& previous = g_seenQuests[bot->GetGUID().GetCounter()];
-            std::set<uint32> current;
-
-            for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
-                if (uint32 const id = bot->GetQuestSlotQuestId(slot))
-                    current.insert(id);
-
-            for (uint32 const gone : previous)
-            {
-                if (current.count(gone) || !bot->IsQuestRewarded(gone))
-                    continue;
-
-                if (Quest const* done = sObjectMgr->GetQuestTemplate(gone))
-                    SayToOwner(bot, owner, "Finished '" + done->GetTitle() + "' - that pin can go.", 30);
-            }
-
-            previous = current;
-        }
+        // The quest's disappearance is announced by the payload itself: the pin sync
+        // below resends in the same pass, and the map clears the moment it lands - a
+        // whisper repeating the removal afterwards only arrived after the fact ("that
+        // pin can go" under a map that had already let it go). The map is the message.
 
         // Authoritative pin list, so a stale marker cannot survive a desync.
 

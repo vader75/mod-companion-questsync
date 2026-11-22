@@ -231,6 +231,23 @@ if ChatFrame_AddMessageEventFilter then
         if IsProtocolLine(message) then return true end
         return false
     end)
+
+    -- The companions' AI narrates its quest menu at every giver the owner opens -
+    -- "Quest Rewarded: ...", "Quest Available: ...", "Cannot talk to quest giver" at an
+    -- innkeeper with no quests at all. Every fact in those lines already reaches the
+    -- player through this module's own prefixed whispers and the payload; the narration
+    -- is the echo that made one hand-in read as three events. The echo is filtered;
+    -- the module's own lines all begin "Name: " and pass untouched.
+    local narrationEchoes = {
+        "Quest Rewarded: ", "Quest Available: ", "Quest Incompleted: ",
+        "Already on ", "Quest completed ", "Cannot talk to quest giver",
+    }
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_WHISPER", function(_, _, message)
+        for _, echo in ipairs(narrationEchoes) do
+            if string.sub(message or "", 1, #echo) == echo then return true end
+        end
+        return false
+    end)
 end
 
 -- Parts of a chunked payload are held until the set is complete, then joined. Sharing
