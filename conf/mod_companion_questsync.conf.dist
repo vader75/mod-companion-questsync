@@ -268,6 +268,12 @@ CompanionQuestSync.TidySurplus = 1
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
 CompanionQuestSync.GatherCatchUp = 1
+
+#    Near a trade or repair NPC the companion tops up the shop-bought reagents its
+#    known recipes ask (vials, threads, coal) to a small stock, and a repairer's
+#    hammer mends its gear at the usual price. At most once every five minutes per
+#    companion, announced with one quiet line. 0 = never restock.
+CompanionQuestSync.VendorRestock = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
 CompanionQuestSync.ItemKeepQuality = 2

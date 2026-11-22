@@ -139,7 +139,12 @@ Everything in this section is autonomous or one click; nothing needs a command t
   The gathering ceiling follows the level in the classic tiers - 75 at level 1,
   150 (Journeyman) at 10, 225 (Expert) at 20, 300 (Artisan) at 35 - raised automatically
   on every level raise and by the **Professions** button; gathered progress is never reset.
-  The gathering tools a pair needs (Mining Pick, Skinning Knife) are handed out with it.
+  The gathering tools a pair needs (Mining Pick, Skinning Knife) are handed out with it,
+  and the **craft recipes the ceiling unlocks come with the craft**: every create-item
+  spell on the pair's lines whose required rank sits at or under the current cap is
+  learned on every profession teach and every level raise, resolved from the
+  SkillLineAbility DBC - so Produce finds its recipes the way it always promised,
+  instead of reporting them "not learned".
   The playerbots **gather strategy** is armed on every teach: on a timer the companion
   adds only nodes its own skill can work, so it stops at what it can actually use while
   it follows you, and questing carries on normally - the trigger is deliberately
@@ -162,6 +167,17 @@ Everything in this section is autonomous or one click; nothing needs a command t
   the gathering half - what it gathers, it can work - and the catch-up lines ride the
   whisper queue's vital lane, so a fresh-login burst of invitations cannot delay them
   for long. The card in the window shows the skill against its ceiling.
+- **Talents and spells arrive when the level does** - organic level-ups included. A
+  companion grinding with the party earns its talent points through the core's own
+  level-up, which grants nothing; the module teaches at that exact moment (the
+  `OnPlayerLevelChanged` hook), so Train all is a backstop for anything raised before
+  the hook existed, not the only teacher.
+- **Vendors are used** (`VendorRestock`, default on) - standing near a trade or
+  repair NPC, the companion tops up the shop-bought reagents its known recipes ask
+  (vials, threads, coal) to a small stock - the same shopping-trip stand-in Produce
+  makes - and a repairer's hammer mends what the day's work dented, paying the
+  usual price. At most once every five minutes per companion, one quiet line either
+  way ("I restocked 5x Empty Vial and had my gear repaired.").
 - **Produce** (card button, `.companionsync produce <name>`) - the companion crafts what
   its own gathering already paid for: the miner smelts its ore into bars and cuts
   sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker
@@ -287,6 +303,7 @@ each one. The defaults that matter most:
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
 | `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
+| `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |
