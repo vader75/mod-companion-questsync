@@ -146,10 +146,22 @@ Everything in this section is autonomous or one click; nothing needs a command t
   low-priority.
 - **The land asks a minimum of its gatherers** (`GatherCatchUp`, default on) - a companion
   walking into a zone it cannot work yet catches its gathering skill up to what the zone
-  asks, once per zone, with one line in chat (*"I caught my Skinning up to 50 - this is
-  what this land asks"*). The approximation is the zone's own level in the classic
-  currency of five points per level; organically-gathered skill above it is never touched,
-  and the card in the window shows the skill against its ceiling.
+  asks, once per zone, with one line in chat (*"I caught my Herbalism up to 150 - this
+  is what this land asks"*). What the zone asks is read from the world itself, not
+  guessed: at boot the module indexes every ground node (gameobject chests with a
+  gathering lock) and per zone takes the **highest node requirement its own nodes
+  carry** - Bruiseweed asks Herbalism 100, a Copper Vein Mining 1 - resolved separately
+  per skill line and cached, because herbs and veins answer differently for the same
+  zone. The zone's level in the classic five-points-per-level currency is only the
+  fallback when no node resolves (Skinning has no fixed nodes: it walks the mob levels).
+  The answer is then clamped to the **level's own tier ceiling** - what the land asks,
+  within what the level can hold - so a sloppy `WorldMapArea` bounding box (this realm's
+  Westfall row spans half the eastern kingdoms) can never drag a neighbouring zone's
+  high node in and hand a level-12 companion a 210 skill. Organically-gathered skill
+  above the zone minimum is never touched. The production half of the pair rises with
+  the gathering half - what it gathers, it can work - and the catch-up lines ride the
+  whisper queue's vital lane, so a fresh-login burst of invitations cannot delay them
+  for long. The card in the window shows the skill against its ceiling.
 - **Produce** (card button, `.companionsync produce <name>`) - the companion crafts what
   its own gathering already paid for: the miner smelts its ore into bars and cuts
   sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker
@@ -274,6 +286,7 @@ each one. The defaults that matter most:
 | `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
+| `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |
