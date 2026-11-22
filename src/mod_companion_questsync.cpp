@@ -61,6 +61,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #ifdef MOD_PLAYERBOTS
 #include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
 #include "PlayerbotFactory.h"      // teach a hand-raised level what a trainer would
+#include "RandomPlayerbotMgr.h"    // the per-bot value store keeps the profession choice
 #endif
 #include "QuestDef.h"
 #include "ScriptMgr.h"
@@ -1757,6 +1758,7 @@ namespace
     void SendHeartbeat(Player* owner);            // defined below
 #ifdef MOD_PLAYERBOTS
     std::pair<uint32, uint32> TeachTrainerContent(Player* bot, Player* owner);  // defined below
+    std::string TeachProfessions(Player* bot, Player* owner);                   // defined below
 #endif
     void SendCompSync(Player* owner, bool force);  // defined below
     Player* ResolveCompanion(Player* owner, SyncReport& report);
@@ -2712,6 +2714,7 @@ namespace
         // So teach it what a trainer would at the new level; the Train button shares
         // this path for companions raised before the fix.
         TeachTrainerContent(bot, owner);
+        TeachProfessions(bot, owner);
 #endif
 
         if (g_cfg.debug >= 1)
@@ -2758,6 +2761,101 @@ namespace
         }
 
         return { learned, spent };
+    }
+
+    /// The class-appropriate profession pair, chosen once per body and kept: one of the
+    /// two always gathers, because the point of a companion profession is what it picks
+    /// up while walking with you - ore for the plate classes, hides for the leather
+    /// ones, herbs for everyone else. The gather strategy does the picking up itself:
+    /// on a timer it adds only nodes the bot's own skill can work.
+    static std::pair<uint16, uint16> ClassProfessionPair(uint8 cls)
+    {
+        switch (cls)
+        {
+            case CLASS_WARRIOR:
+            case CLASS_PALADIN:
+            case CLASS_DEATH_KNIGHT:
+                return { SKILL_MINING, SKILL_BLACKSMITHING };
+            case CLASS_HUNTER:
+            case CLASS_ROGUE:
+            case CLASS_SHAMAN:
+                return { SKILL_SKINNING, SKILL_LEATHERWORKING };
+            default:
+                return { SKILL_HERBALISM, SKILL_ALCHEMY };
+        }
+    }
+
+    struct ProfessionEntry { uint32 learnSpell; char const* name; uint32 tool; };
+    static ProfessionEntry ProfessionOf(uint16 skill)
+    {
+        switch (skill)
+        {
+            case SKILL_MINING:         return { 2580, "Mining",         2901 };  // + a Mining Pick
+            case SKILL_SKINNING:       return { 8613, "Skinning",       7005 };  // + a Skinning Knife
+            case SKILL_BLACKSMITHING:  return { 2018, "Blacksmithing",  0 };
+            case SKILL_LEATHERWORKING: return { 2108, "Leatherworking", 0 };
+            case SKILL_ALCHEMY:        return { 2259, "Alchemy",        0 };
+            default:                   return { 2366, "Herbalism",      0 };
+        }
+    }
+
+    /// The skill ceiling a trainer would sell at this level - the classic tiers.
+    static uint32 ProfessionCap(uint8 level)
+    {
+        if (level >= 35) return 300;
+        if (level >= 20) return 225;
+        if (level >= 10) return 150;
+        return 75;
+    }
+
+    /// Teach both professions (or re-cap what a level raise un-capped), hand the tools
+    /// a gathering profession needs, and make sure the gather strategy is on so the
+    /// companion actively works its own nodes while it follows you. Returns the names
+    /// it just took up, for the report.
+    std::string TeachProfessions(Player* bot, Player* owner)
+    {
+        auto const pair = ClassProfessionPair(bot->getClass());
+
+        // The choice is kept for the body: a re-roll would throw away gathered skill.
+        uint32 const stored = sRandomPlayerbotMgr.GetValue(bot, "cqProfPair");
+        uint32 const want = uint32(pair.first) * 1000 + uint32(pair.second);
+        if (!stored)
+            sRandomPlayerbotMgr.SetValue(bot, "cqProfPair", want);
+
+        uint32 const cap = ProfessionCap(bot->GetLevel());
+        std::string tookUp;
+
+        uint16 const skills[2] = { pair.first, pair.second };
+        for (uint16 const skill : skills)
+        {
+            ProfessionEntry const entry = ProfessionOf(skill);
+            if (!bot->HasSpell(entry.learnSpell))
+            {
+                bot->learnSpell(entry.learnSpell);
+                if (!tookUp.empty())
+                    tookUp += " and ";
+                tookUp += entry.name;
+            }
+            if (entry.tool && !bot->GetItemCount(entry.tool))
+            {
+                ItemPosCountVec dest;
+                if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry.tool, 1) == EQUIP_ERR_OK)
+                    if (Item* tool = bot->StoreNewItem(dest, entry.tool, true))
+                        bot->SendNewItem(tool, 1, true, false, true);
+            }
+            // raise the ceiling only; gathered progress is never reset
+            uint16 const cur = bot->GetSkillValue(skill);
+            bot->SetSkill(skill, 0, std::min<uint16>(cur, uint16(cap)), uint16(cap));
+        }
+
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->ChangeStrategy("+gather", BOT_STATE_NON_COMBAT);
+
+        if (!tookUp.empty())
+            SayToOwner(bot, owner, "I took up " + tookUp +
+                       " - I will gather what I pass from now on.", 30);
+
+        return tookUp;
     }
 #endif
 
@@ -7404,6 +7502,7 @@ public:
             { "release", HandleReleaseCommand, SEC_PLAYER, Console::No },
             { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
             { "learn", HandleLearnCommand, SEC_PLAYER, Console::No },
+            { "professions", HandleProfessionsCommand, SEC_PLAYER, Console::No },
             { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -7950,6 +8049,81 @@ public:
     /// Companions raised before the teaching fix are the reason this exists - a raise
     /// now brings its own spells, but what was missed while it did not stays missing
     /// until something parses for it.
+    /// .companionsync professions [name] - the window's Professions button.
+    ///
+    /// One click parses every companion: teach the class-appropriate pair it does not
+    /// have, re-cap what a level raise un-capped, hand the gathering tools, and make
+    /// sure the gather strategy is on. The chat summary answers at a glance: the pair,
+    /// each gathered skill against its ceiling.
+    static bool HandleProfessionsCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the module is disabled.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        std::vector<uint32> targets;
+        if (want.empty())
+        {
+            for (uint32 const botGuid : bound)
+                if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                    targets.push_back(botGuid);
+        }
+        else
+        {
+            uint32 const botGuid = ResolveCompanion(player, want, bound);
+            if (!botGuid)
+            {
+                handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.", want);
+                return true;
+            }
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && bot->IsInWorld())
+                targets.push_back(botGuid);
+        }
+
+        if (targets.empty())
+        {
+            handler->PSendSysMessage("|cffffc94dCompanion quest sync|r: nobody in the world to teach.");
+            return true;
+        }
+
+        for (uint32 const botGuid : targets)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+                continue;
+
+#ifdef MOD_PLAYERBOTS
+            std::string const tookUp = TeachProfessions(bot, player);
+
+            auto const pair = ClassProfessionPair(bot->getClass());
+            std::string const a = ProfessionOf(pair.first).name;
+            std::string const b = ProfessionOf(pair.second).name;
+            std::string const aNew = tookUp.find(a) == std::string::npos ? "" : " (new)";
+            std::string const bNew = tookUp.find(b) == std::string::npos ? "" : " (new)";
+            handler->PSendSysMessage("|cff20ff20{}|r: {}{} {}, {}{} {} - gathering on.",
+                                     bot->GetName(),
+                                     a, aNew, bot->GetSkillValue(pair.first),
+                                     b, bNew, bot->GetSkillValue(pair.second));
+#endif
+        }
+
+        return true;
+    }
+
     static bool HandleLearnCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;

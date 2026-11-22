@@ -11,7 +11,7 @@
 
 local addonName, G = ...
 
-local WIDTH = 620
+local WIDTH = 680
 local PAD = 16                      -- one inset for every edge; nothing is eyeballed
 local CARD_HEIGHT = 88
 local CARD_GAP = 8
@@ -763,9 +763,16 @@ local function CreateWindow()
     -- The fallback for a quest that cannot be gathered: items that lie on the ground (oats in
     -- a field, cloth in a crate). The companion tries on its own, and this is for when the
     -- world will not co-operate - the object was taken, or it never respawned.
+    -- Professions are taught alongside spells on every raise; this button parses each
+    -- companion for the pair it is missing, re-caps what a level un-capped, hands the
+    -- gathering tools, and arms the gather strategy so nodes are actively worked.
+    local professions = Button(footer, "Professions", 88, function() Ack() G.Action("professions") end,
+        "Teach each companion its class professions, raise the gathering ceiling, and turn gathering on.")
+    professions:SetPoint("LEFT", quests, "RIGHT", 6, 0)
+
     local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
         "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
-    catchUp:SetPoint("LEFT", quests, "RIGHT", 6, 0)
+    catchUp:SetPoint("LEFT", professions, "RIGHT", 6, 0)
 
     -- One click parses every companion for anything a trainer would have taught and
     -- its unspent talents; companions raised before the teaching fix are caught up here.
