@@ -2831,16 +2831,25 @@ namespace
     /// the ceiling instead of trailing behind it.
     static void TeachCraftRecipes(Player* bot, uint16 skill, uint32 cap)
     {
-        for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(skill))
+        uint32 candidates = 0, learned = 0;
+        auto const& abilities = GetSkillLineAbilitiesBySkillLine(skill);
+        for (SkillLineAbilityEntry const* entry : abilities)
         {
             if (entry->MinSkillLineRank > cap)
                 continue;
             SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
             if (!info || info->Effects[0].Effect != SPELL_EFFECT_CREATE_ITEM)
                 continue;
+            ++candidates;
             if (!bot->HasSpell(entry->Spell))
+            {
                 bot->learnSpell(entry->Spell);
+                ++learned;
+            }
         }
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] recipes: line={} abilities={} candidates={} learned={}",
+                     uint32(skill), abilities.size(), candidates, learned);
     }
 
     /// Teach both professions (or re-cap what a level raise un-capped), hand the tools
@@ -8468,7 +8477,7 @@ public:
                     continue;
                 for (uint8 e = 0; e < 3; ++e)
                     if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
-                        uint32(info->Effects[e].MiscValue) == product)
+                        uint32(info->Effects[e].ItemType) == product)
                         spellId = entry.first;
             }
 
