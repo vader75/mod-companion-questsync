@@ -4972,6 +4972,15 @@ namespace
             return report;
         }
 
+#ifdef MOD_PLAYERBOTS
+        // A tool that failed to land once must not wait for a "dirty" pass: this is a
+        // keep-trying guarantee, not change-driven work, so it runs before the memo
+        // early-return the same way the upkeep it belongs to does. The gather catch-up
+        // rides the same slot - what the land asks does not wait for a dirty pass either.
+        EnsureProfessionTools(bot);
+        CatchUpGatherSkill(owner, bot);
+#endif
+
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
         auto const memo = g_passMemo.find(botGuid);
         if (memo != g_passMemo.end() && memo->second.clean && memo->second.digest == digest)
@@ -4983,15 +4992,6 @@ namespace
 
         if (!inCombat)
             AlignLevel(owner, bot, report);
-
-#ifdef MOD_PLAYERBOTS
-        // A tool that failed to land once must not wait for a "dirty" pass: this is a
-        // keep-trying guarantee, not change-driven work, so it runs before the memo
-        // early-return the same way the upkeep it belongs to does. The gather catch-up
-        // rides the same slot - what the land asks does not wait for a dirty pass either.
-        EnsureProfessionTools(bot);
-        CatchUpGatherSkill(owner, bot);
-#endif
 
         // Keep a couple of slots free so quest items can be picked up and
         // quest source items stored, instead of discovering the shortage only
