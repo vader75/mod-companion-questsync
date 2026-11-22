@@ -4820,10 +4820,6 @@ namespace
         // once a companion's logs settled the digest short-circuit returned above them, so a
         // body created from the pool stayed naked forever while every pass reported "in sync".
         EnsureBags(owner, bot);
-
-#ifdef MOD_PLAYERBOTS
-        EnsureProfessionTools(bot);
-#endif
         EnsureStartingGear(owner, bot);
 
         if (g_cfg.requireGrouped && !report.grouped)
@@ -4847,6 +4843,13 @@ namespace
 
         if (!inCombat)
             AlignLevel(owner, bot, report);
+
+#ifdef MOD_PLAYERBOTS
+        // A tool that failed to land once must not wait for a "dirty" pass: this is a
+        // keep-trying guarantee, not change-driven work, so it runs before the memo
+        // early-return the same way the upkeep it belongs to does.
+        EnsureProfessionTools(bot);
+#endif
 
         // Keep a couple of slots free so quest items can be picked up and
         // quest source items stored, instead of discovering the shortage only
@@ -8279,6 +8282,12 @@ public:
             return true;
         }
 
+        if (bot->IsInCombat())
+        {
+            SayToOwner(bot, player, "I am in the middle of something - ask me when it is calm.", 30);
+            return true;
+        }
+
         if (bot->GetDistance(player) > 11.0f)
         {
             SayToOwner(bot, player, "Come a little closer and I will hand it over.", 30);
@@ -8294,12 +8303,13 @@ public:
 
         auto const pair = ClassProfessionPair(bot->getClass());
 
-        // five of every produced item and gathered mat stays in its own bags
-        std::map<uint32, uint32> keep;
+        // five of every produced item and gathered mat stays in its own bags - the
+        // reserve is consumed across every stack of the same item, not per stack
+        std::map<uint32, uint32> keepLeft;
         for (uint32 const product : ProductsOf(pair.second))
-            keep[product] = 5;
+            keepLeft[product] = 5;
         for (uint32 const id : GatheredReagentsOf(pair.first))
-            keep[id] = 5;
+            keepLeft[id] = 5;
 
         std::vector<std::pair<Item*, uint32>> offers;
         auto consider = [&](Item* item)
@@ -8307,13 +8317,31 @@ public:
             if (!item || !item->CanBeTraded())
                 return;
 
-            auto const kept = keep.find(item->GetEntry());
-            if (kept == keep.end())
+            auto const kept = keepLeft.find(item->GetEntry());
+            if (kept == keepLeft.end())
                 return;                                       // never its gear, quest items or food
 
             uint32 const count = item->GetCount();
-            if (count > kept->second)
-                offers.push_back({ item, count - kept->second });
+            uint32 const spare = count > kept->second ? count - kept->second : 0;
+            kept->second -= std::min(count, kept->second);
+            if (!spare)
+                return;
+
+            // SetItem trades the WHOLE stack: the reserve sits inside this stack, so the
+            // spare is split into its own stack first and that stack goes in the trade
+            Item* tradeItem = item;
+            if (spare < count)
+            {
+                uint16 const dstPos = FindFreeBagPos(bot);
+                if (!dstPos)
+                    return;            // no room to keep the reserve whole - the stack waits
+
+                bot->SplitItem(item->GetPos(), dstPos, spare);
+                tradeItem = bot->GetItemByPos(dstPos);
+                if (!tradeItem)
+                    return;
+            }
+            offers.push_back({ tradeItem, spare });
         };
 
         for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
@@ -8368,6 +8396,20 @@ public:
         return true;
     }
 
+    /// A free bag position for a split stack, packed the way SplitItem wants it.
+    static uint16 FindFreeBagPos(Player* bot)
+    {
+        for (uint16 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+                return uint16((INVENTORY_SLOT_BAG_0 << 8) | i);
+        for (uint16 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+            if (Bag* bag = bot->GetBagByPos(i))
+                for (uint16 j = 0; j < bag->GetBagSize(); ++j)
+                    if (!bot->GetItemByPos(i, j))
+                        return uint16((i << 8) | j);
+        return 0;
+    }
+
     /// .companionsync produce [name] - the card's Produce button.
     ///
     /// One click makes the companion work its own gathering: smelt its ore, cut its
@@ -8411,6 +8453,12 @@ public:
         if (!bot || !bot->IsInWorld() || !bot->IsAlive())
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not standing in the world.", CompanionNameFor(botGuid));
+            return true;
+        }
+
+        if (bot->IsInCombat())
+        {
+            SayToOwner(bot, player, "I am in the middle of something - ask me when it is calm.", 30);
             return true;
         }
 
