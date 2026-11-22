@@ -8139,6 +8139,20 @@ public:
 
         if (total)
             handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} item(s) gathered - the hand-in runs on the next pass.", total);
+
+        if (Player* player = (handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr))
+        {
+            Player* speaker = nullptr;
+            for (uint32 const botGuid : bots)
+                if (Player* b = FindCompanionPlayer(botGuid))
+                    if (!speaker || b->GetDistance(player) < speaker->GetDistance(player))
+                        speaker = b;
+            if (speaker)
+                SayToOwner(speaker, player,
+                           total ? ("I gathered the rest of what lies on the ground - " +
+                                    std::to_string(total) + " item(s); the hand-in runs on the next pass.")
+                                 : "Nobody owes anything that lies on the ground right now.", 30);
+        }
     }
 
     static bool HandleCatchUpCommand(ChatHandler* handler, char const* /*args*/)
@@ -9422,6 +9436,29 @@ public:
 
             if (!listed)
                 handler->PSendSysMessage("  nothing open - it is waiting for you to pick something up.");
+
+            // a press is a conversation: the chat list carries the detail, the whisper
+            // carries the summary the player actually asked for
+            {
+                uint32 ready = 0, owing = 0;
+                for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+                {
+                    uint32 const qid = bot->GetQuestSlotQuestId(slot);
+                    if (!qid)
+                        continue;
+                    Quest const* quest = sObjectMgr->GetQuestTemplate(qid);
+                    if (!quest)
+                        continue;
+                    if (bot->GetQuestStatus(qid) == QUEST_STATUS_COMPLETE)
+                        ++ready;
+                    else if (!DescribeMissingItems(bot, quest).empty())
+                        ++owing;
+                }
+                SayToOwner(bot, player,
+                           ("I carry " + std::to_string(CountQuestLog(bot)) + " quest(s): " +
+                            std::to_string(ready) + " ready to hand in, " +
+                            std::to_string(owing) + " still owing items - the list is in chat."), 30);
+            }
         }
 
         return true;

@@ -108,6 +108,34 @@ end
 -- cards
 -- ---------------------------------------------------------------------------
 
+-- A chip is a small outlined pill with one or two words, in the colour of its meaning:
+-- gold for work in progress, green for something ready, muted for quiet fact. It says
+-- what something is; it is never the thing you click. The row under a companion reads
+-- as three of them, and the hover carries the detail.
+local function Chip(parent, anchor, order)
+    local chip = CreateFrame("Frame", nil, parent)
+    chip:SetHeight(15)
+    chip:SetPoint("TOPLEFT", anchor, "TOPLEFT", 16 + (order - 1) * 108, -50)
+
+    chip.bg = chip:CreateTexture(nil, "BACKGROUND")
+    chip.bg:SetAllPoints()
+    chip.bg:SetTexture(1, 1, 1, 0.05)
+
+    chip.edge = CreateFrame("Frame", nil, chip)
+    chip.edge:SetAllPoints()
+    chip.edge:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    chip.edge:SetBackdropBorderColor(1, 1, 1, 0.14)
+
+    chip.text = chip:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    chip.text:SetPoint("CENTER", 0, 0)
+
+    return chip
+end
+
 local function StatusText(companion)
     -- a release is a server-side sequence (dismiss, wipe, rename, unbind, ledger); until the
     -- roster drops the name, say so rather than looking like a button that did nothing
@@ -192,11 +220,39 @@ local function CreateCard(index)
     Wrap(card.status, WIDTH - 2 * PAD - TEXT_RIGHT_INSET - 12)
     card.status:SetJustifyH("LEFT")
 
+    -- the chips that carry the row's facts: quests, gathering, bag room
+    card.questChip = Chip(card, card, 1)
+    card.gatherChip = Chip(card, card, 2)
+    card.slotsChip = Chip(card, card, 3)
+
+    -- and one thin meter under them: the gathering skill against its ceiling
+    card.meter = card:CreateTexture(nil, "ARTWORK")
+    card.meter:SetHeight(3)
+    card.meter:SetPoint("TOPLEFT", 16, -70)
+    card.meter:SetWidth(180)
+    card.meterBg = card:CreateTexture(nil, "BORDER")
+    card.meterBg:SetHeight(3)
+    card.meterBg:SetPoint("TOPLEFT", 16, -70)
+    card.meterBg:SetWidth(180)
+    card.meterBg:SetTexture(1, 1, 1, 0.08)
+
     -- the whole card responds to the cursor, so the row under it is obviously the one the
     -- buttons belong to
     card:EnableMouse(true)
-    card:SetScript("OnEnter", function(self) self.bg:SetTexture(1, 1, 1, 0.075) end)
-    card:SetScript("OnLeave", function(self) self.bg:SetTexture(1, 1, 1, 0.045) end)
+    card:SetScript("OnEnter", function(self)
+        self.bg:SetTexture(1, 1, 1, 0.075)
+        if not self.companion then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(self.companion.name .. " - level " .. (self.companion.level or 0), 1, 0.85, 0.4)
+        GameTooltip:AddLine(StatusText(self.companion), 1, 1, 1, true)
+        GameTooltip:AddLine(" ", 0, 0, 0)
+        GameTooltip:AddLine("Crafting and trading are its own habits now - produce and hand-over happen as you play.", 0.7, 0.7, 0.7, true)
+        GameTooltip:Show()
+    end)
+    card:SetScript("OnLeave", function(self)
+        self.bg:SetTexture(1, 1, 1, 0.045)
+        GameTooltip:Hide()
+    end)
 
     -- The dead companion's one action: near, the body rises at the usual
     -- resurrection penalty; far, its spirit releases at the graveyard and the ghost
@@ -218,20 +274,8 @@ local function CreateCard(index)
     end, "Bring its level up to yours.")
     card.levelButton:SetPoint("RIGHT", -100, 18)
 
-    -- The companion works its own gathering: smelt its ore, brew its herbs, cut its
-    -- stones. Shop-bought reagents come from the module; gathered ones are waited for.
-    card.produceButton = Button(card, "Produce", 68, function()
-        if card.companion then G.Action("produce", card.companion.name) end
-    end, "Craft what its gathering already paid for - used in play, overflow mailed home.")
-    card.produceButton:SetPoint("BOTTOMRIGHT", -210, -12)
-
-    -- Hand over its surplus in person: it opens the trade with everything above what it
-    -- keeps for itself; you accept. Standing next to it is the whole prerequisite.
-    card.tradeButton = Button(card, "Trade", 58, function()
-        if card.companion then G.Action("trade", card.companion.name) end
-    end, "It hands over its spare mats and craftwork - it keeps five of each for itself.")
-    card.tradeButton:SetPoint("BOTTOMRIGHT", -284, -12)
-
+    -- Crafting and trading are the companion's own habits now, so their buttons are
+    -- gone: a card reads state and carries the actions only a player can decide.
     card.mapButton = Button(card, "Map", 44, function()
         G.Run(".companionsync pins")
         ToggleWorldMap()
@@ -571,7 +615,38 @@ function G.Refresh()
                 card.subtitle:SetText(COL_MUTED .. "not in the world" .. COL_RESET)
             end
 
-            card.status:SetText(StatusText(companion))
+            -- the chips carry the row's facts; the words-only status line moves to the
+            -- hover, which is where the map's markers already keep their detail
+            local quests = companion.quests or 0
+            card.questChip.text:SetText(("%d quest%s"):format(quests, quests == 1 and "" or "s"))
+            card.questChip.text:SetTextColor(0.85, 0.85, 0.85)
+            card.questChip:SetWidth(math.max(56, 14 + #card.questChip.text:GetText() * 5))
+
+            local skill = companion.gather
+            card.gatherChip.text:SetText(skill or "-")
+            card.gatherChip.text:SetTextColor(0.85, 0.85, 0.85)
+            card.gatherChip:SetWidth(math.max(56, 14 + #(skill or "-") * 5))
+
+            local free = companion.free or 0
+            if free <= 4 then
+                card.slotsChip.text:SetText(("%d slots - tight"):format(free))
+                card.slotsChip.text:SetTextColor(1, 0.75, 0.35)
+            else
+                card.slotsChip.text:SetText(("%d slots free"):format(free))
+                card.slotsChip.text:SetTextColor(0.85, 0.85, 0.85)
+            end
+            card.slotsChip:SetWidth(math.max(56, 14 + #card.slotsChip.text:GetText() * 5))
+
+            -- the meter: the gathering skill against its ceiling, class-coloured
+            local cur, cap = string.match(skill or "", "(%d+)/(%d+)$")
+            if cur then
+                local pct = math.min(100, (tonumber(cur) / math.max(1, tonumber(cap))) * 100)
+                card.meter:SetWidth(math.max(2, 180 * pct / 100))
+                card.meter:SetTexture(r, g, b, 0.8)
+                card.meter:Show()
+            else
+                card.meter:Hide()
+            end
 
             card.primary:SetText(online and "Dismiss" or "Summon")
 
@@ -591,7 +666,6 @@ function G.Refresh()
             if G.HasFlag(companion, "d") then card.reviveButton:Show() else card.reviveButton:Hide() end
 
             if online then card.mapButton:Show() else card.mapButton:Hide() end
-            if online then card.produceButton:Show() else card.produceButton:Hide() end
 
             card:Show()
         else
