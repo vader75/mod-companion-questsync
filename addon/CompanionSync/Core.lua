@@ -118,14 +118,19 @@ function G.ParseCompPayload(payload)
     local rows = {}
 
     for entry in string.gmatch(payload or "", "[^|]+") do
+        -- Lua patterns have no optional groups: the y= field is a second, anchored
+        -- match, and the plain seven-field form stands in when it does not fit.
         local name, classId, raceId, level, quests, flags, free, gather =
-            string.match(entry, "^([^,]+),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)(,y=.+)?$")
+            string.match(entry, "^([^,]+),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),y=(.+)$")
+        if not name then
+            name, classId, raceId, level, quests, flags, free =
+                string.match(entry, "^([^,]+),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*)$")
+        end
 
         if name and name ~= "" then
             local gatherName, gatherCur, gatherMax
             if gather then
-                local ypart = gather:sub(4)
-                gatherName, gatherCur, gatherMax = string.match(ypart, "^(.*%S)%s+(%d+)/(%d+)$")
+                gatherName, gatherCur, gatherMax = string.match(gather, "^(.*%S)%s+(%d+)/(%d+)$")
             end
             rows[#rows + 1] = {
                 name = name,
