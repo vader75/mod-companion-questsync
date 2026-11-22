@@ -88,15 +88,7 @@ Per pass, for each owner with bindings:
    on the giver's map points the way. `1` rewards from any distance; `0` returns to the
    bot-AI path, which needs the giver in the companion's sight - the shape that produced
    "I cannot talk to the quest giver".
-8. **Hand-in steps — a hearthstone, a portal or a summon moves the player, so the companion
-   goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
-   walking away never teleports anything, and a companion is never dragged into a
-   battleground or arena. `FollowThroughTeleport = 0` turns it off.
-7. **Hand-ins** — a completed quest is handed in through the companion's own reward
-   command. If the owner is standing at the giver the companion steps to their side;
-   if they are anywhere else it goes to the giver itself and says where it went, so
-   "cannot talk to the quest giver" is a distance the module never creates.
-9. **Pins and whispers** — the open quests of companions the owner cannot see are
+8. **Pins and whispers** — the open quests of companions the owner cannot see are
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
    is said once, in words, naming the next action. The roster line is only re-sent when
    something that matters changes: free bag slots drift on their own and wait for a
@@ -116,7 +108,64 @@ are counted separately and reported (`NotifySkippedQuests`). Objective counters 
 deliberately not copied — group quest credit already reaches the companion — and
 timed quests are skipped because their client timer cannot be transferred.
 
+
+## Companions that grow: spells, talents, professions, and their own two hands
+
+Everything in this section is autonomous or one click; nothing needs a command typed.
+
+- **A raise teaches itself.** A level the module grants - syncing to the owner, or the
+  **Level** button - brings its own spells, weapon and profession skills, class spells and
+  everything a trainer would sell at the new level (the bot factory's own learn path), and
+  the fresh talent points are spent along the spec the companion already has: incrementally,
+  never a reset, never a re-roll. The core grants no spells on level-up (3.3.5 puts them
+  behind trainers) and playerbots' own auto-learn is gated to random bots, of which this
+  realm runs none - without this a raised companion fought on at rank-1 spells with its
+  talents unspent.
+- **Train all** (window button, `.companionsync learn [name]`) parses every companion in
+  the world for spells and talents missed while that fix was not in place. Each companion
+  whispers its own verdict; the handler sums the totals in chat.
+- **Professions** - every companion takes a class-appropriate pair, and one of the two
+  always gathers, because the point of a companion profession is what it picks up while
+  walking with you:
+
+  | Class | Pair |
+  |---|---|
+  | Warrior, Paladin, Death Knight | Mining + Blacksmithing |
+  | Hunter, Rogue, Shaman | Skinning + Leatherworking |
+  | Druid, Mage, Priest, Warlock | Herbalism + Alchemy |
+
+  The choice is kept for the body's life (playerbots' per-bot value store, key
+  `cqProfPair`); re-teaching never re-rolls it, so gathered skill is never thrown away.
+  The gathering ceiling follows the level in the classic tiers - 75 at level 1,
+  150 (Journeyman) at 10, 225 (Expert) at 20, 300 (Artisan) at 35 - raised automatically
+  on every level raise and by the **Professions** button; gathered progress is never reset.
+  The gathering tools a pair needs (Mining Pick, Skinning Knife) are handed out with it.
+  The playerbots **gather strategy** is armed on every teach: on a timer the companion
+  adds only nodes its own skill can work, so it stops at what it can actually use while
+  it follows you, and questing carries on normally - the trigger is deliberately
+  low-priority.
+- **Produce** (card button, `.companionsync produce <name>`) - the companion crafts what
+  its own gathering already paid for: the miner smelts its ore into bars and cuts
+  sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker
+  kits its hides. The recipe is found among the companion's own known spells by what it
+  creates, and its reagents are read from the spell itself - nothing hardcoded twice. Only
+  shop-bought pieces (vials and the like) are granted, a small stack standing in for the
+  shopping trip; gathered reagents are waited for, never conjured
+  (*"I am waiting on Bruiseweed 1/1 - I will keep gathering"*). Products land in bags,
+  the AI uses them in play, and the overflow rides MailHome.
+- **Trade** (card button, `.companionsync trade <name>`) - standing next to a companion,
+  it opens a trade with you and offers its surplus: every gathered mat and produced item
+  above the five it keeps for itself, biggest stacks first, six slots (the trade window's
+  own limit). Gear, quest items and food are never offered. You accept; the bot's
+  accept-trade trigger answers on its side. Trade range applies - it asks you closer.
+- **Revive** (card button on a dead companion, `.companionsync revive <name>`) - within
+  forty yards the body rises where it fell, at the half-strength a real resurrection
+  would carry; beyond that its spirit releases at the graveyard the way the client's own
+  Release button does, its ghost walks home on its own, and the resurrect hook re-arms
+  the follow so it rejoins at your side.
+
 ## Commands
+
 
 Player commands are `SEC_PLAYER`: no RBAC row, no database change. They are not
 available over SOAP, for the same reason `.companion` is not.
@@ -128,6 +177,11 @@ available over SOAP, for the same reason `.companion` is not.
 | `.companionsync level` | level-align only |
 | `.companionsync quests` | compare the two logs, quest by quest |
 | `.companionsync catchup` | finish a quest the companion cannot gather for itself |
+| `.companionsync learn [name]` | teach every companion (or one) its missing spells, spend its unspent talents |
+| `.companionsync professions [name]` | teach the class profession pair, re-cap to the level, arm gathering |
+| `.companionsync produce <name>` | craft what its own gathering already paid for |
+| `.companionsync trade <name>` | open a trade and hand over its surplus |
+| `.companionsync revive <name>` | raise a fallen companion, or let its spirit walk home |
 | `.companionsync pins` | push map pins now |
 | `.companionsync refresh` | resend the panel payload now |
 | `.companionsync list` | every companion with its state |

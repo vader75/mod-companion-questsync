@@ -221,6 +221,13 @@ local function CreateCard(index)
     end, "Craft what its gathering already paid for - used in play, overflow mailed home.")
     card.produceButton:SetPoint("BOTTOMRIGHT", -210, -12)
 
+    -- Hand over its surplus in person: it opens the trade with everything above what it
+    -- keeps for itself; you accept. Standing next to it is the whole prerequisite.
+    card.tradeButton = Button(card, "Trade", 58, function()
+        if card.companion then G.Action("trade", card.companion.name) end
+    end, "It hands over its spare mats and craftwork - it keeps five of each for itself.")
+    card.tradeButton:SetPoint("BOTTOMRIGHT", -284, -12)
+
     card.mapButton = Button(card, "Map", 44, function()
         G.Run(".companionsync pins")
         ToggleWorldMap()

@@ -7504,6 +7504,7 @@ public:
             { "learn", HandleLearnCommand, SEC_PLAYER, Console::No },
             { "professions", HandleProfessionsCommand, SEC_PLAYER, Console::No },
             { "produce", HandleProduceCommand, SEC_PLAYER, Console::No },
+            { "trade", HandleTradeCommand, SEC_PLAYER, Console::No },
             { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -8043,34 +8044,26 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
-    /// The items each pair's own gathering can supply - node drops and the hides that
-    /// come straight off corpses. A missing reagent inside this set means "go gather";
+    /// The gathered mats a pair supplies - node drops and the hides that come straight
+    /// off corpses. A missing produce reagent inside this set means "go gather";
     /// anything else is the shop's part, and the module stands in for the shopping trip.
-    static bool IsGatherableReagent(uint16 skill, uint32 item)
+    static std::vector<uint32> GatheredReagentsOf(uint16 skill)
     {
         switch (skill)
         {
-            case SKILL_HERBALISM:
-                return item == 765   // Silverleaf
-                    || item == 2447  // Peacebloom
-                    || item == 2449  // Earthroot
-                    || item == 2450  // Briarthorn
-                    || item == 2452  // Swiftthistle
-                    || item == 2453  // Bruiseweed
-                    || item == 785;  // Mageroyal
-            case SKILL_MINING:
-                return item == 2770  // Copper Ore
-                    || item == 2771  // Tin Ore
-                    || item == 2835  // Rough Stone
-                    || item == 2836; // Coarse Stone
-            case SKILL_SKINNING:
-                return item == 2318  // Light Leather
-                    || item == 2319  // Medium Leather
-                    || item == 2934  // Ruined Leather Scraps
-                    || item == 783;  // Light Hide
-            default:
-                return false;
+            case SKILL_HERBALISM:   return { 765, 2447, 2449, 2450, 2452, 2453, 785 };
+            case SKILL_MINING:      return { 2770, 2771, 2835, 2836 };
+            case SKILL_SKINNING:    return { 2318, 2319, 2934, 783 };
+            default:                return {};
         }
+    }
+
+    static bool IsGatherableReagent(uint16 skill, uint32 item)
+    {
+        for (uint32 const gathered : GatheredReagentsOf(skill))
+            if (gathered == item)
+                return true;
+        return false;
     }
 
     /// What each pair produces at this band, in order: the smelt first for miners -
@@ -8194,6 +8187,142 @@ public:
         }
 
         return report;
+    }
+
+    /// .companionsync trade <name> - the card's Trade button.
+    ///
+    /// The companion opens a trade with the owner and fills it with its surplus: every
+    /// gathered mat and produced item above the five it keeps for itself, biggest stacks
+    /// first, six slots (the trade window's own limit). The owner accepts; the bot's
+    /// accept-trade trigger answers on its side. Nothing else in its bags - gear, quest
+    /// items, food - is ever offered.
+    static bool HandleTradeCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the module is disabled.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        if (want.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: .companionsync trade <name>");
+            return true;
+        }
+
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        uint32 const botGuid = ResolveCompanion(player, want, bound);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.", want);
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not standing in the world.", CompanionNameFor(botGuid));
+            return true;
+        }
+
+        if (bot->GetDistance(player) > 11.0f)
+        {
+            SayToOwner(bot, player, "Come a little closer and I will hand it over.", 30);
+            return true;
+        }
+
+#ifdef MOD_PLAYERBOTS
+        if (bot->GetTrader())
+        {
+            SayToOwner(bot, player, "I am already in a trade - give me a moment.", 30);
+            return true;
+        }
+
+        auto const pair = ClassProfessionPair(bot->getClass());
+
+        // five of every produced item and gathered mat stays in its own bags
+        std::map<uint32, uint32> keep;
+        for (uint32 const product : ProductsOf(pair.second))
+            keep[product] = 5;
+        for (uint32 const id : GatheredReagentsOf(pair.first))
+            keep[id] = 5;
+
+        std::vector<std::pair<Item*, uint32>> offers;
+        auto consider = [&](Item* item)
+        {
+            if (!item || !item->CanBeTraded())
+                return;
+
+            auto const kept = keep.find(item->GetEntry());
+            if (kept == keep.end())
+                return;                                       // never its gear, quest items or food
+
+            uint32 const count = item->GetCount();
+            if (count > kept->second)
+                offers.push_back({ item, count - kept->second });
+        };
+
+        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+
+        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+            if (Bag* bag = bot->GetBagByPos(i))
+                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                    consider(bot->GetItemByPos(i, j));
+
+        std::sort(offers.begin(), offers.end(),
+                  [](auto const& a, auto const& b) { return a.second > b.second; });
+
+        if (offers.empty())
+        {
+            SayToOwner(bot, player, "I have nothing spare to hand you - I keep what I gather for the road.", 30);
+            return true;
+        }
+
+        // the trade window holds six stacks; the rest waits for another press
+        if (offers.size() > 6)
+            offers.resize(6);
+
+        WorldPacket pInit(CMSG_INITIATE_TRADE);
+        pInit << player->GetGUID();
+        bot->GetSession()->HandleInitiateTradeOpcode(pInit);
+
+        TradeData* td = bot->GetTradeData();
+        if (!td)
+        {
+            SayToOwner(bot, player, "The trade did not open - try again in a moment.", 30);
+            return true;
+        }
+
+        uint32 offered = 0;
+        for (uint8 slot = 0; slot < offers.size(); ++slot)
+        {
+            td->SetItem(TradeSlots(slot), offers[slot].first);
+            ++offered;
+        }
+
+        if (!offered)
+        {
+            SayToOwner(bot, player, "Nothing would go in the trade - try again in a moment.", 30);
+            return true;
+        }
+
+        SayToOwner(bot, player, "I put " + std::to_string(offered) +
+                   " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
+#endif
+
+        return true;
     }
 
     /// .companionsync produce [name] - the card's Produce button.
