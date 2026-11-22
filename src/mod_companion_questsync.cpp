@@ -4759,6 +4759,43 @@ namespace
         return out;
     }
 
+    /// How far each companion still is from completing a quest, as have/need per
+    /// objective ("3/8" - the quest log's own language). Only objectives with work left
+    /// speak: a finished objective says nothing, and a finished quest says nothing at all.
+    std::string OwedText(Player* bot, Quest const* quest)
+    {
+        std::string out;
+        for (uint8 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        {
+            int32 const entry = quest->RequiredNpcOrGo[i];
+            uint32 const need = quest->RequiredNpcOrGoCount[i];
+            if (!entry || !need)
+                continue;
+
+            uint32 const have = bot->GetReqKillOrCastCurrentCount(quest->GetQuestId(), entry);
+            if (have >= need)
+                continue;
+            if (!out.empty())
+                out += ";";
+            out += std::to_string(std::min<uint32>(have, need)) + "/" + std::to_string(need);
+        }
+        for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            uint32 const item = quest->RequiredItemId[i];
+            uint32 const need = quest->RequiredItemCount[i];
+            if (!item || !need)
+                continue;
+
+            uint32 const have = bot->GetItemCount(item);
+            if (have >= need)
+                continue;
+            if (!out.empty())
+                out += ";";
+            out += std::to_string(std::min<uint32>(have, need)) + "/" + std::to_string(need);
+        }
+        return out;
+    }
+
     std::string BuildPinLine(Player* owner)
     {
         struct Entry
@@ -4870,6 +4907,15 @@ namespace
 
                     if (MultiCompanionSpeech(bot))
                         title += "@" + SafePinName(bot->GetName());
+
+                    // what this companion still owes, as the quest log counts it -
+                    // "3/8" after the name, nothing when the quest is ready to hand in
+                    if (bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                    {
+                        std::string owed = OwedText(bot, quest);
+                        if (!owed.empty())
+                            title += ":" + owed;
+                    }
 
                     bool merged = false;
                     for (Entry& existing : entries)

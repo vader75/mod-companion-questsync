@@ -96,9 +96,15 @@ local function SyncPins(payload)
             -- several segments and a name appears twice. Collect DISTINCT titles and
             -- DISTINCT owners, in order - "The Collector + Wanted: Hogger" over
             -- "Drodan + Ilyrin", not four names with two of them doubled.
-            local titles, ownerList, seenTitle, seenOwner = {}, {}, {}, {}
+            local titles, ownerList, owedList, seenTitle, seenOwner = {}, {}, {}, {}, {}
             for segment in string.gmatch(name, "[^+]+") do
-                local q, c = SplitCompanion((segment:gsub("^%s+", ""):gsub("%s+$", "")))
+                segment = segment:gsub("^%s+", ""):gsub("%s+$", "")
+                -- "Title@Drodan:3/8" - the owed token rides after the companion name and
+                -- is always digits and slashes, so a title colon (Wanted: 'Hogger') can
+                -- never be mistaken for it
+                local owed = segment:match(":([%d/;]+)$")
+                local base = owed and segment:gsub(":[%d/;]+$", "") or segment
+                local q, c = SplitCompanion(base)
                 if q and q ~= "" and not seenTitle[q] then
                     seenTitle[q] = true
                     titles[#titles + 1] = q
@@ -109,6 +115,10 @@ local function SyncPins(payload)
                     CompanionPins.companions = CompanionPins.companions or {}
                     CompanionPins.companions[c] = true
                 end
+                if owed then
+                    owedList[#owedList + 1] = (c and c ~= "" and (c .. " ")) or ""
+                    owedList[#owedList] = (owedList[#owedList] or "") .. owed
+                end
             end
             local title = table.concat(titles, " + ")
             table.insert(fresh, {
@@ -117,6 +127,7 @@ local function SyncPins(payload)
                 quest = (title ~= "" and title) or "companion quest",
                 companion = ownerList[1],
                 owners = table.concat(ownerList, " + "),
+                owed = table.concat(owedList, ", "),
                 at = time(),
                 -- the zone is the SERVER's word for where the pin lives; the player's
                 -- own location at receive time was never the pin's location
@@ -166,6 +177,11 @@ local function NewPin(index)
     -- went and hover was the sole detail surface.
     f:EnableMouse(true)
     f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- A UI suite skinning the map can hand out frame levels above the pin's own: sit
+    -- clearly on top of the map's scroll level, or the cursor never reaches the frame.
+    if WorldMapDetailFrame and WorldMapDetailFrame.GetFrameLevel then
+        f:SetFrameLevel((WorldMapDetailFrame:GetFrameLevel() or 0) + 10)
+    end
 
     -- a soft offset copy of the glyph, so it holds up over bright parchment without a
     -- plate behind it (the OUTLINE font flag alone thins out at small sizes)
@@ -196,15 +212,15 @@ local function NewPin(index)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         local pin = self.pin
         if pin then
+            -- one line per job: the quest, who owes how much, where, and the escape hatch
             GameTooltip:AddLine(pin.quest or "companion quest", 1, 0.92, 0.6)
-            if pin.owners and pin.owners ~= "" then
-                for owner in string.gmatch(pin.owners, "[^+]+") do
-                    GameTooltip:AddLine("owed by" .. owner, 0.8, 0.8, 0.8)
-                end
+            if pin.owed and pin.owed ~= "" then
+                GameTooltip:AddLine(pin.owed, 0.98, 0.86, 0.37)
+            elseif pin.owners and pin.owners ~= "" then
+                GameTooltip:AddLine("companion: " .. pin.owners, 0.85, 0.85, 0.85)
             end
-            GameTooltip:AddLine(string.format("%s - %s", pin.style.label,
-                (pin.zone and pin.zone ~= "" and pin.zone or "here")), 0.85, 0.85, 0.85)
-            GameTooltip:AddLine(string.format("map %d, %d", pin.x, pin.y), 0.6, 0.6, 0.6)
+            GameTooltip:AddLine((pin.zone and pin.zone ~= "" and pin.zone or "here") ..
+                " - " .. pin.style.label, 0.85, 0.85, 0.85)
             GameTooltip:AddLine("right-click to remove", 0.5, 0.5, 0.5)
         end
         GameTooltip:Show()
@@ -480,8 +496,8 @@ function CompanionPins:Redraw()
             f.label:SetTextColor(r, g, b)
 
             -- the companions that owe it, on their own muted line - every name whole
-            if pin.owners and pin.owners ~= "" then
-                f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
+            if pin.owed and pin.owed ~= "" then
+                f.owner:SetText("|cffffd98a" .. pin.owed .. "|r")
             else
                 f.owner:SetText("")
             end
