@@ -67,12 +67,15 @@ local function SaveDB()
     CompanionPinsDB = CompanionPinsDB or {}
     CompanionPinsDB.offsetX, CompanionPinsDB.offsetY = CompanionPins.offsetX, CompanionPins.offsetY
     CompanionPinsDB.showLegend = CompanionPins.showLegend
+    CompanionPinsDB.showLabels = CompanionPins.showLabels
 end
 
 local function LoadDB()
     CompanionPinsDB = CompanionPinsDB or { pins = {} }
     CompanionPins.showLegend = CompanionPinsDB.showLegend
     if CompanionPins.showLegend == nil then CompanionPins.showLegend = true end
+    CompanionPins.showLabels = CompanionPinsDB.showLabels
+    if CompanionPins.showLabels == nil then CompanionPins.showLabels = false end
 
     CompanionPins.offsetX = CompanionPinsDB.offsetX or 0
     CompanionPins.offsetY = CompanionPinsDB.offsetY or 0
@@ -459,40 +462,51 @@ function CompanionPins:Redraw()
         f.glyph:SetTextColor(r, g, b)
         f.shadow:SetText(style.glyph)
 
-        local text = pin.quest or "companion quest"
-        if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
-        f.label:SetText(text)
-        f.label:SetTextColor(r, g, b)
+        -- Glyphs are the map's language, not labels: eight quests with persistent text
+        -- carpeted the map and the rows of nudged labels collided anyway. The glyph's
+        -- colour already says the state and its spot says where; the hover tooltip
+        -- carries the full detail (title, owed by, zone, coords). Persistent labels are
+        -- an opt-in via /cpins labels, and the nudge runs only in that mode.
+        if CompanionPins.showLabels then
+            local text = pin.quest or "companion quest"
+            if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
+            f.label:SetText(text)
+            f.label:SetTextColor(r, g, b)
 
-        -- the companions that owe it, on their own muted line - every name whole
-        if pin.owners and pin.owners ~= "" then
-            f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
-        else
-            f.owner:SetText("")
-        end
-
-        -- Nudge the label down a row when it would land on one already placed: two
-        -- Goldshire hand-ins are four percent apart, invisible at map scale.
-        local width = f.label:GetStringWidth()
-        local row = 0
-        for attempt = 0, 3 do
-            row = attempt
-            local clash = false
-            local myCentreX = px + 16 + width / 2
-            for _, other in ipairs(placed) do
-                if math.abs(myCentreX - other.x) * 2 < (width + other.w)
-                   and math.abs(py - (other.y)) < 13 then
-                    clash = true
-                    break
-                end
+            -- the companions that owe it, on their own muted line - every name whole
+            if pin.owners and pin.owners ~= "" then
+                f.owner:SetText("|cff9a9a9a" .. pin.owners .. "|r")
+            else
+                f.owner:SetText("")
             end
-            if not clash then break end
-        end
 
-        f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
-        -- the clash test compares this pin's GLYPH centre against the other's LABEL
-        -- centre; both sides now use the label centre, so a near-miss cannot pass
-        table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
+            -- Nudge the label down a row when it would land on one already placed: two
+            -- Goldshire hand-ins are four percent apart, invisible at map scale.
+            local width = f.label:GetStringWidth()
+            local row = 0
+            for attempt = 0, 3 do
+                row = attempt
+                local clash = false
+                local myCentreX = px + 16 + width / 2
+                for _, other in ipairs(placed) do
+                    if math.abs(myCentreX - other.x) * 2 < (width + other.w)
+                       and math.abs(py - (other.y)) < 13 then
+                        clash = true
+                        break
+                    end
+                end
+                if not clash then break end
+            end
+
+            f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
+            -- the clash test compares this pin's GLYPH centre against the other's LABEL
+            -- centre; both sides now use the label centre, so a near-miss cannot pass
+            table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
+        else
+            f.label:SetText("")
+            f.owner:SetText("")
+            f.label:SetPoint("LEFT", f, "RIGHT", 4, 0)
+        end
 
         end   -- /cpins only
         shown = shown + 1
@@ -527,6 +541,14 @@ SlashCmdList["WLPINS"] = function(msg)
         CompanionPins.pins = {}
         SaveDB(); CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r cleared.")
+
+    elseif msg == "labels" then
+        CompanionPins.showLabels = not CompanionPins.showLabels
+        SaveDB()
+        CompanionPins:Redraw()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r persistent labels " ..
+            (CompanionPins.showLabels and "|cff20ff20on|r - hover a marker for detail" or
+            "off|r - the tooltip on hover carries the detail") .. ".")
 
     elseif msg == "legend" then
         CompanionPins.showLegend = not CompanionPins.showLegend

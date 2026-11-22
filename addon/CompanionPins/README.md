@@ -54,6 +54,12 @@ Enable **Companion Pins** on the addon screen.
 
 ## The markers
 
+A marker is a glyph, not a label. Persistent quest titles next to every pin carpeted the
+map - eight quests wrote more text than the zone did. By default the map shows glyphs only:
+the colour says the state, the spot says where, and hovering a marker shows everything
+(title, owed by whom, zone, coordinates). Players who want the text back can run
+`/cpins labels`; the choice is remembered and the label-clash nudging runs only in that mode.
+
 A marker is a glyph, not a badge: the client's own `?`/`!` language needs no legend, and a
 plated pin collapses into a black square at map scale. The quest name sits to its right so
 the terrain stays visible.
@@ -75,6 +81,7 @@ are pins to explain. `/cpins legend` hides or shows it, and the choice is rememb
 |---|---|
 | `/cpins` | help |
 | `/cpins legend` | show or hide the key on the map |
+| `/cpins labels` | toggle persistent text labels (default off - the hover tooltip carries the detail) |
 | `/cpins list` | the pins it is holding |
 | `/cpins clear` | remove them all |
 | `/cpins only <name>` | show one companion's pins (`/cpins all` to show every companion again) |
