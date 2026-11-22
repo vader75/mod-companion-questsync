@@ -2953,7 +2953,10 @@ namespace
     /// per level (Westfall asks ~50, Elwynn ~25).
     static void CatchUpGatherSkill(Player* owner, Player* bot)
     {
-        if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+        // deliberately not gated on combat: this is a stat write, not a spell - a
+        // companion that never leaves a fight (a Westfall grind is exactly that) would
+        // otherwise wait for a quiet pass that never comes
+        if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive())
             return;
 
         if (owner->GetMapId() != bot->GetMapId() || !owner->GetZoneId())
@@ -3017,7 +3020,9 @@ namespace
     /// keeps trying every pass until the tool is in the pack - then it stays silent.
     static void EnsureProfessionTools(Player* bot)
     {
-        if (!bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+        // same as the catch-up: the grant is a bag write, and a companion in a running
+        // fight would never see a quiet pass
+        if (!bot->IsInWorld() || !bot->IsAlive())
             return;
 
         auto const pair = ClassProfessionPair(bot->getClass());
