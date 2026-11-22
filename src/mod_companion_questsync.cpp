@@ -51,6 +51,10 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "LootMgr.h"
 #include "Map.h"
 #include "MapMgr.h"
+#include "Cell.h"
+#include "CellImpl.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
 #include <chrono>
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
@@ -118,6 +122,7 @@ namespace
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool tidySurplus       = true;      // last resort: bin spare consumables/materials
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
+        bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
@@ -367,6 +372,7 @@ namespace
     std::set<std::pair<uint32, uint32>> g_failedSeen;                 // (bot, quest) already reported failed
     std::set<uint32> g_deadNoticeAt;                      // bots whose death was announced, one per death
     std::map<uint32, uint32> g_lastGatherZone;            // bot guid -> last zone the gather catch-up ran for
+    std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -537,6 +543,7 @@ namespace
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
         g_cfg.tidySurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidySurplus", true);
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
+        g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
@@ -2716,14 +2723,12 @@ namespace
         bot->GiveLevel(ownerLevel);
 
 #ifdef MOD_PLAYERBOTS
-        // A hand-granted level teaches nothing on its own: GiveLevel raises the level and
-        // grants talent points nobody spends, because playerbots' auto-learn and
-        // auto-pick-talents are gated to random bots and this realm runs none - a
-        // level-raised companion fought on with rank-1 spells and empty talent trees.
-        // So teach it what a trainer would at the new level; the Train button shares
-        // this path for companions raised before the fix.
-        TeachTrainerContent(bot, owner);
-        TeachProfessions(bot, owner);
+        // A hand-granted level teaches nothing on its own: GiveLevel raises the level
+        // and grants talent points nobody spends, because playerbots' auto-learn and
+        // auto-pick-talents are gated to random bots and this realm runs none. The
+        // teaching itself lives in OnPlayerLevelChanged, which GiveLevel fires -
+        // this raise and an organic level-up arrive at the same place, and the
+        // Train button still backstops companions raised before the hook existed.
 #endif
 
         if (g_cfg.debug >= 1)
@@ -2817,6 +2822,27 @@ namespace
         return 75;
     }
 
+    /// The craft recipes a trainer would sell at this level's ceiling: every spell on
+    /// the profession's line whose first effect is CREATE_ITEM and whose required
+    /// rank sits at or under the cap is learned. Produce resolves its recipes from
+    /// the spellbook by what they create - this feeds that spellbook, so the pair's
+    /// production half can actually craft what the gathering half pays for. Rides
+    /// every profession teach and every level raise, so the recipe set grows with
+    /// the ceiling instead of trailing behind it.
+    static void TeachCraftRecipes(Player* bot, uint16 skill, uint32 cap)
+    {
+        for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(skill))
+        {
+            if (entry->MinSkillLineRank > cap)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
+            if (!info || info->Effects[0].Effect != SPELL_EFFECT_CREATE_ITEM)
+                continue;
+            if (!bot->HasSpell(entry->Spell))
+                bot->learnSpell(entry->Spell);
+        }
+    }
+
     /// Teach both professions (or re-cap what a level raise un-capped), hand the tools
     /// a gathering profession needs, and make sure the gather strategy is on so the
     /// companion actively works its own nodes while it follows you. Returns the names
@@ -2855,6 +2881,9 @@ namespace
             // raise the ceiling only; gathered progress is never reset
             uint16 const cur = bot->GetSkillValue(skill);
             bot->SetSkill(skill, 0, std::min<uint16>(cur, uint16(cap)), uint16(cap));
+
+            // and the recipes the ceiling unlocks - the craft is taught with the craft
+            TeachCraftRecipes(bot, skill, cap);
         }
 
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
@@ -2879,6 +2908,129 @@ namespace
                        " - I will gather what I pass from now on.", 30);
 
         return tookUp;
+    }
+
+    /// The gathered mats a pair supplies - node drops and the hides that come straight
+    /// off corpses. A missing produce reagent inside this set means "go gather";
+    /// anything else is the shop's part, and the module stands in for the shopping trip.
+    static std::vector<uint32> GatheredReagentsOf(uint16 skill)
+    {
+        switch (skill)
+        {
+            case SKILL_HERBALISM:   return { 765, 2447, 2449, 2450, 2452, 2453, 785 };
+            case SKILL_MINING:      return { 2770, 2771, 2835, 2836 };
+            case SKILL_SKINNING:    return { 2318, 2319, 2934, 783 };
+            default:                return {};
+        }
+    }
+
+    static bool IsGatherableReagent(uint16 skill, uint32 item)
+    {
+        for (uint32 const gathered : GatheredReagentsOf(skill))
+            if (gathered == item)
+                return true;
+        return false;
+    }
+
+    /// Item name for the report, or "?" when the template is gone.
+    static std::string ItemNameFor(uint32 item)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+        return proto ? std::string(proto->Name1) : std::string("?");
+    }
+
+    /// A vendor the companion could be standing at: any live creature with the vendor
+    /// or repair flag within range, found the way the core searches its own cells.
+    static Creature* VendorNearby(Player* bot, float range)
+    {
+        std::list<Unit*> units;
+        Acore::AnyUnitInObjectRangeCheck check(bot, range);
+        Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+        Cell::VisitObjects(bot, searcher, range);
+
+        for (Unit* u : units)
+            if (Creature* c = u->ToCreature())
+                if (c->IsAlive() && (c->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) ||
+                                     c->HasNpcFlag(UNIT_NPC_FLAG_REPAIR)))
+                    return c;
+        return nullptr;
+    }
+
+    /// Near a trade or repair NPC the module stands in for the shopping trip a bot
+    /// cannot walk: the reagents its known recipes ask that no node yields are
+    /// topped up to a small stock (the same stand-in Produce makes when it crafts),
+    /// and a repairer's hammer mends what the day's work dented, paying the same
+    /// price a player would. One line says what happened; the restock runs at most
+    /// once every five minutes per companion, so standing at the vendor is quiet.
+    void RestockNearVendor(Player* owner, Player* bot)
+    {
+        if (!g_cfg.vendorRestock || !bot->IsInWorld() || !bot->IsAlive())
+            return;
+
+        Creature* vendor = VendorNearby(bot, 40.0f);
+        if (!vendor)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const now = uint32(time(nullptr));
+        uint32& last = g_lastVendorRestock[botGuid];
+        if (last && now - last < 300)
+            return;
+
+        auto const pair = ClassProfessionPair(bot->getClass());
+        std::set<uint32> reagents;
+        uint16 const restockSkills[2] = { pair.first, pair.second };
+        for (uint16 const skill : restockSkills)
+        {
+            // what its own known recipes ask: the same spells Produce crafts from
+            for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(skill))
+            {
+                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
+                if (!info || !bot->HasSpell(entry->Spell))
+                    continue;
+                if (info->Effects[0].Effect != SPELL_EFFECT_CREATE_ITEM)
+                    continue;
+                for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+                {
+                    uint32 const item = uint32(info->Reagent[r]);
+                    if (item && !IsGatherableReagent(pair.first, item))
+                        reagents.insert(item);
+                }
+            }
+        }
+
+        std::string topped;
+        for (uint32 const item : reagents)
+        {
+            uint32 const want = 5;
+            uint32 const have = bot->GetItemCount(item);
+            if (have >= want)
+                continue;
+            uint32 const give = std::min<uint32>(want - have, 10);
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) != EQUIP_ERR_OK)
+                continue;
+            if (Item* bought = bot->StoreNewItem(dest, item, true))
+            {
+                bot->SendNewItem(bought, give, true, false, true);
+                if (!topped.empty())
+                    topped += ", ";
+                topped += std::to_string(give) + "x " + ItemNameFor(item);
+            }
+        }
+
+        bool repaired = vendor->HasNpcFlag(UNIT_NPC_FLAG_REPAIR) &&
+                        bot->DurabilityRepairAll(true, 1.0f, false) > 0;
+
+        g_lastVendorRestock[botGuid] = now;
+
+        if (topped.empty() && !repaired)
+            return;
+
+        std::string const said = topped.empty()
+            ? std::string("I had my gear repaired while we were here.")
+            : "I restocked " + topped + (repaired ? " and had my gear repaired." : ".");
+        SayToOwner(bot, owner, said, 30);
     }
 
     /// The highest gathering requirement the zone's own nodes carry, resolved once per
@@ -5006,6 +5158,7 @@ namespace
         // rides the same slot - what the land asks does not wait for a dirty pass either.
         EnsureProfessionTools(bot);
         CatchUpGatherSkill(owner, bot);
+        RestockNearVendor(owner, bot);   // near a trade or repair NPC: restock, mend, quietly
 #endif
 
         // Keyed by companion: one bot's unchanged logs must not suppress another's pass.
@@ -8271,28 +8424,6 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
-    /// The gathered mats a pair supplies - node drops and the hides that come straight
-    /// off corpses. A missing produce reagent inside this set means "go gather";
-    /// anything else is the shop's part, and the module stands in for the shopping trip.
-    static std::vector<uint32> GatheredReagentsOf(uint16 skill)
-    {
-        switch (skill)
-        {
-            case SKILL_HERBALISM:   return { 765, 2447, 2449, 2450, 2452, 2453, 785 };
-            case SKILL_MINING:      return { 2770, 2771, 2835, 2836 };
-            case SKILL_SKINNING:    return { 2318, 2319, 2934, 783 };
-            default:                return {};
-        }
-    }
-
-    static bool IsGatherableReagent(uint16 skill, uint32 item)
-    {
-        for (uint32 const gathered : GatheredReagentsOf(skill))
-            if (gathered == item)
-                return true;
-        return false;
-    }
-
     /// What each pair produces at this band, in order: the smelt first for miners -
     /// bars from their own ore - then the pieces the craft feeds.
     static std::vector<uint32> ProductsOf(uint16 skill)
@@ -8304,13 +8435,6 @@ public:
             case SKILL_ALCHEMY:        return { 118 };          // Minor Healing Potion
             default:                   return {};
         }
-    }
-
-    /// Item name for the report, or "?" when the template is gone.
-    static std::string ItemNameFor(uint32 item)
-    {
-        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
-        return proto ? std::string(proto->Name1) : std::string("?");
     }
 
     /// Craft what the companion's own gathering already paid for. The recipe is found
@@ -9417,7 +9541,8 @@ public:
     // did nothing before.
     CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
         { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
-          PLAYERHOOK_ON_QUEST_ABANDON, PLAYERHOOK_ON_BEFORE_TELEPORT }) { }
+          PLAYERHOOK_ON_QUEST_ABANDON, PLAYERHOOK_ON_BEFORE_TELEPORT,
+          PLAYERHOOK_ON_LEVEL_CHANGED }) { }
 
     /// A hearthstone, a portal or a summon is about to move the player: note it, and let the
     /// fast tick bring the companion along once the destination has finished loading.
@@ -9452,6 +9577,34 @@ public:
         g_pendingFollow[player->GetGUID().GetCounter()] = uint32(time(nullptr));
 
         return true;
+    }
+
+    /// A companion that levels organically - grinding with the party, turn-ins its
+    /// own AI performed - earns its talent points and trainer spells through the
+    /// core's GiveLevel, which grants nothing on its own. The hook is the moment
+    /// those points unlock: teach them then, so Train all is a backstop rather than
+    /// the only teacher. The module's own raises fire the same hook through
+    /// GiveLevel, so both paths arrive here and nobody is taught twice.
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldLevel*/) override
+    {
+        if (!g_cfg.enable || !g_tableReady)
+            return;
+        if (!player || !player->GetSession() || !player->GetSession()->IsBot())
+            return;
+
+        // only a body this module owns: the query is one indexed row, and a level
+        // change is rare enough that no cache is worth building for it
+        QueryResult row = CharacterDatabase.Query(("SELECT owner_guid FROM " + g_cfg.bindingTable +
+            " WHERE bot_guid = " + std::to_string(player->GetGUID().GetCounter())).c_str());
+        if (!row)
+            return;
+
+        Player* owner = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>((*row)[0].Get<uint32>()));
+        if (!owner)
+            return;
+
+        TeachTrainerContent(player, owner);   // spells, talents - as they unlock
+        TeachProfessions(player, owner);      // ceiling, tools, recipes
     }
 
     void OnPlayerLogin(Player* player) override
