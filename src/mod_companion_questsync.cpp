@@ -2956,6 +2956,9 @@ namespace
         // deliberately not gated on combat: this is a stat write, not a spell - a
         // companion that never leaves a fight (a Westfall grind is exactly that) would
         // otherwise wait for a quiet pass that never comes
+        if (g_cfg.debug >= 2)
+            LOG_INFO("server.loading", "[CompanionQuestSync] catch-up gate: cfg={} world={} alive={} ownerZone={}",
+                     g_cfg.gatherCatchUp, bot->IsInWorld(), bot->IsAlive(), owner->GetZoneId());
         if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive())
             return;
 
