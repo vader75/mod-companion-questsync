@@ -1019,10 +1019,15 @@ namespace
                     ++offered;
                 }
 
+            // the hand-over is a gift between companions, not commerce: the bot's side is
+            // accepted up front, so playerbots' trade merchant never prices the window or
+            // asks for coin - the transfer completes the moment the owner accepts
+            if (offered)
+                bot->GetTradeData()->SetAccepted(true);
+
             if (offered && pending.announce)
                 SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                           " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
-
+                           " stack(s) in the trade - take them, they are yours.", 30);
             itr = g_pendingTrade.erase(itr);
         }
     }
