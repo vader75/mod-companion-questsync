@@ -387,6 +387,8 @@ namespace
         uint32 ownerGuid = 0;
         uint32 at = 0;
         std::vector<std::pair<uint32, uint32>> offer;   // {item entry, count} - values, not pointers
+        bool applied = false;                           // the window is filled; now guard it
+        uint8 filled = 0;                               // trade slots the apply actually filled
     };
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
@@ -1013,6 +1015,37 @@ namespace
                 continue;
             }
 
+            if (pending.applied)
+            {
+                // the window is filled: every slot the apply filled must still resolve to
+                // a LIVE item (GetItem walks the stored GUID, a dead item resolves null).
+                // A stack merge on the bot's side - a craft, a loot pickup - frees one of
+                // the two merged objects while the trade still references it; the transfer
+                // then crashes the world on the dead pointer. The trade is cancelled the
+                // moment its integrity breaks, before any accept can move a dead item.
+                bool integrityBroke = false;
+                for (uint8 slot = 0; slot < pending.filled && !integrityBroke; ++slot)
+                {
+                    if (!bot->GetTradeData()->GetItem(TradeSlots(slot)))
+                    {
+                        WorldPacket p;
+                        bot->GetSession()->HandleCancelTradeOpcode(p);
+                        SayToOwner(bot, owner,
+                                   "The trade fell apart - one of the stacks was used up. I will offer again.", 30);
+                        integrityBroke = true;
+                    }
+                }
+
+                if (!integrityBroke && !bot->GetTradeData())
+                    integrityBroke = true;      // the trade is over: accepted or cancelled
+
+                if (integrityBroke)
+                    itr = g_pendingTrade.erase(itr);
+                else
+                    ++itr;                      // the guard is live; the trade ends, the record goes
+                continue;
+            }
+
             // the hand-over is a gift between companions, not commerce: the window is up
             // now, so find the items by value and fill it - every pointer is found and
             // used inside this one call, nothing survives it
@@ -1051,6 +1084,8 @@ namespace
                 }
 
                 bot->GetTradeData()->SetItem(TradeSlots(slot), tradeItem);
+                pending.offer[slot] = { entry, want };   // which slot carries what, for the guard
+                ++pending.filled;
                 ++offered;
             }
 
@@ -1061,9 +1096,11 @@ namespace
                 bot->GetTradeData()->SetAccepted(true);
                 SayToOwner(bot, owner, "I put " + std::to_string(offered) +
                            " stack(s) in the trade - take them, they are yours.", 30);
+                pending.applied = true;
+                ++itr;                            // the record stays: the guard is live now
             }
-
-            itr = g_pendingTrade.erase(itr);        }
+            else
+                itr = g_pendingTrade.erase(itr);        }
     }
 
     /// Bring companions along when the owner teleports.
@@ -5542,8 +5579,8 @@ namespace
         // turns what its gathering paid for into the useful thing, silently - the
         // products land in bags, get used in play, and the overflow rides MailHome.
         // The Produce button stays for the moment the report itself is wanted.
-        if (g_cfg.autoProduce && !inCombat)
-        {
+        if (g_cfg.autoProduce && !inCombat && !bot->GetTradeData())   // a craft could merge
+        {                                                             // a stack in the trade
             uint32& lastAuto = g_lastAutoProduce[botGuid];
             uint32 const now = uint32(time(nullptr));
             if (!lastAuto || now - lastAuto >= 180)
