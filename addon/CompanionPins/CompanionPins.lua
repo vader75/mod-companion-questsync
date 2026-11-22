@@ -1,21 +1,6 @@
--- Companion Pins - 3.3.5a (Interface 30300)
---
--- The server cannot draw a quest-area pin for a quest that is not in your own log,
--- and cannot colour one at all. The companion already says where it needs to go:
---   "... I will gather them as we go (map 64, 59)."
---   "... I will hand it in next time we are near (map 43, 65)."
--- This addon turns those whispers into signposts.
---
--- v0.3  shape carries the meaning, not just colour: a round badge for a hand-in,
---       a square badge with a corner flag for work still to do, and both sit on a
---       black outline plate so nothing can be mistaken for map art.
-
+-- Companion Pins - WoW 3.3.5a (Interface 30300).
+-- The server publishes authoritative map snapshots; the client only renders them.
 local ADDON = "CompanionPins"
--- Pins are deleted, never recoloured, once they are this old. /cpins life changes it.
--- A pin exists exactly as long as the server says it does. No lifetimes, no saved
--- pin sets, no whisper parsing: the server's payload is the whole truth, and this
--- addon is a renderer. Every "leftover pin" bug here came from the client guessing
--- at state it could not see.
 local FLIP_Y = false
 
 local CompanionPins = CreateFrame("Frame")
@@ -30,7 +15,7 @@ CompanionPins.offsetX = 0
 CompanionPins.offsetY = 0
 CompanionPins.pins = {}
 CompanionPins.frames = {}
-CompanionPins.only = nil   -- show one companion's pins, or all
+CompanionPins.only = false   -- show one companion's pins, or all
 
 -- shape: "round" (hand-in) or "square" (work to do)
 local STYLE = {
@@ -84,79 +69,62 @@ end
 -- "Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange" is the server's own
 -- answer to "which pins are real". Rebuilding from it is what cleans the map after a
 -- desync: anything it does not mention is removed, anything missing is added back.
+local lastPayload, lastSnapshotAt
+local pending, appliedRevision, legacy
+local lastHelloAt, lastRequestAt
+
 local function SyncPins(payload)
-    local fresh = {}
-    for entry in string.gmatch(payload or "", "[^|]+") do
-        -- grammar: x,y,h=Title@Companion[,z=ZoneName][ +N]
-        local x, y, style, name, zone = string.match(entry, "^%s*(%d+)%s*,%s*(%d+)%s*,%s*([hg])%s*=%s*(.+),z=([^+|]+)")
-        if x and y then
-            name = string.match(name, "^[^,]+") or name
-            -- A merged entry reads "TitleA@Drodan + TitleB@Drodan + TitleA@Ilyrin + ...":
-            -- one tile can carry two quests for two companions, so a companion appears in
-            -- several segments and a name appears twice. Collect DISTINCT titles and
-            -- DISTINCT owners, in order - "The Collector + Wanted: Hogger" over
-            -- "Drodan + Ilyrin", not four names with two of them doubled.
-            local titles, ownerList, owedList, seenTitle, seenOwner = {}, {}, {}, {}, {}
-            for segment in string.gmatch(name, "[^+]+") do
-                segment = segment:gsub("^%s+", ""):gsub("%s+$", "")
-                -- "Title@Drodan:3/8" - the owed token rides after the companion name and
-                -- is always digits and slashes, so a title colon (Wanted: 'Hogger') can
-                -- never be mistaken for it
+    lastSnapshotAt = time()
+    if lastPayload == payload then return end
+    lastPayload = payload
+    local fresh, companions = {}, {}
+    for entry in string.gmatch(payload, "[^|]+") do
+        local x, y, style, name, zone = entry:match("^(%d+),(%d+),([hg])=(.+),z=(.-)%s*$")
+        if x and tonumber(x) <= 100 and tonumber(y) <= 100 and zone ~= "" then
+            local pin = { x = tonumber(x), y = tonumber(y), zone = zone,
+                style = style == "h" and STYLE.handin or STYLE.gather, details = {} }
+            -- Server joins titles with the literal separator ' + '. Keep the quest,
+            -- companion and progress together instead of flattening independent lists.
+            for raw in (name .. " + "):gmatch("(.-) %+ ") do
+                local segment = raw:gsub("^%s+", ""):gsub("%s+$", "")
                 local owed = segment:match(":([%d/;]+)$")
-                local base = owed and segment:gsub(":[%d/;]+$", "") or segment
-                local q, c = SplitCompanion(base)
-                if q and q ~= "" and not seenTitle[q] then
-                    seenTitle[q] = true
-                    titles[#titles + 1] = q
-                end
-                if c and c ~= "" and not seenOwner[c] then
-                    seenOwner[c] = true
-                    ownerList[#ownerList + 1] = c
-                    CompanionPins.companions = CompanionPins.companions or {}
-                    CompanionPins.companions[c] = true
-                end
-                if owed then
-                    owedList[#owedList + 1] = (c and c ~= "" and (c .. " ")) or ""
-                    owedList[#owedList] = (owedList[#owedList] or "") .. owed
+                local quest, companion = SplitCompanion(owed and segment:gsub(":[%d/;]+$", "") or segment)
+                if quest and quest ~= "" then
+                    pin.details[#pin.details + 1] = { quest = quest, companion = companion, owed = owed }
+                    if companion then companions[companion] = true end
                 end
             end
-            local title = table.concat(titles, " + ")
-            table.insert(fresh, {
-                x = tonumber(x), y = tonumber(y),
-                style = (style == "h") and STYLE.handin or STYLE.gather,
-                quest = (title ~= "" and title) or "companion quest",
-                companion = ownerList[1],
-                owners = table.concat(ownerList, " + "),
-                owed = table.concat(owedList, ", "),
-                at = time(),
-                -- the zone is the SERVER's word for where the pin lives; the player's
-                -- own location at receive time was never the pin's location
-                zone = zone and (zone:gsub("%s+$", "")) or nil,
-            })
+            pin.quest = pin.details[1] and pin.details[1].quest or "Companion quest"
+            pin.companion = pin.details[1] and pin.details[1].companion
+            fresh[#fresh + 1] = pin
         end
     end
-
-    local removed = #CompanionPins.pins - #fresh
-    CompanionPins.pins = fresh
-    SaveDB()
-
-    local ok, err = pcall(function() CompanionPins:Redraw() end)
-    if not ok then
-        DEFAULT_CHAT_FRAME:AddMessage("|cffff6060CompanionPins|r draw failed: " .. tostring(err))
-    end
-
-    if CompanionPins.debug then
-        DEFAULT_CHAT_FRAME:AddMessage(string.format(
-            "|cff00ccffCompanionPins|r synced: %d pin(s), %d removed", #fresh, removed > 0 and removed or 0))
-    end
+    CompanionPins.pins, CompanionPins.companions = fresh, companions
+    CompanionPins:Redraw()
 end
 
-local function RemovePin(pin)
-    for i, p in ipairs(CompanionPins.pins) do
-        if p == pin then table.remove(CompanionPins.pins, i); break end
+local function CompleteParts(buffer)
+    for i = 1, buffer.total do
+        if buffer.parts[i] == nil then return false end
     end
-    SaveDB(); CompanionPins:Redraw()
+    return true
 end
+
+local function RequestPins(force, opening)
+    if not WorldMapFrame or not WorldMapFrame:IsShown() then return end
+    local now = time()
+    if not force then
+        if not lastHelloAt or now - lastHelloAt > 120 then return end
+        local fresh = lastSnapshotAt and now - lastSnapshotAt < 120
+        if appliedRevision and lastSnapshotAt and not pending and (not opening or fresh) then return end
+        if not pending and lastRequestAt and fresh then return end
+    end
+    if lastRequestAt and now - lastRequestAt < 15 then return end
+    lastRequestAt = now
+    SendChatMessage(".companionsync pins v2", "SAY")
+end
+
+CompanionPins_Request = RequestPins
 
 --------------------------------------------------------------------------
 -- drawing
@@ -176,7 +144,7 @@ local function NewPin(index)
     -- dead since the pin frames existed, and it only became visible when the labels
     -- went and hover was the sole detail surface.
     f:EnableMouse(true)
-    f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
     -- A UI suite skinning the map can hand out frame levels above the pin's own: sit
     -- clearly on top of the map's scroll level, or the cursor never reaches the frame.
     if WorldMapDetailFrame and WorldMapDetailFrame.GetFrameLevel then
@@ -186,12 +154,12 @@ local function NewPin(index)
     -- a soft offset copy of the glyph, so it holds up over bright parchment without a
     -- plate behind it (the OUTLINE font flag alone thins out at small sizes)
     f.shadow = f:CreateFontString(nil, "BACKGROUND")
-    f.shadow:SetFont(STANDARD_TEXT_FONT, 25, "OUTLINE")
+    f.shadow:SetFont(STANDARD_TEXT_FONT, 19, "OUTLINE")
     f.shadow:SetPoint("CENTER", f, "CENTER", 1, -1)
     f.shadow:SetTextColor(0, 0, 0, 0.9)
 
     f.glyph = f:CreateFontString(nil, "OVERLAY")
-    f.glyph:SetFont(STANDARD_TEXT_FONT, 25, "OUTLINE")
+    f.glyph:SetFont(STANDARD_TEXT_FONT, 19, "OUTLINE")
     f.glyph:SetPoint("CENTER", f, "CENTER", 0, 0)
 
     -- label to the right of the marker: the terrain under it stays visible, unlike a
@@ -201,35 +169,37 @@ local function NewPin(index)
     f.label:SetPoint("LEFT", f, "RIGHT", 4, 0)
     f.label:SetJustifyH("LEFT")
 
-    -- who owes this: its own line under the quest, so ownership never fights the title
-    -- for characters and never gets truncated into "@Dr..."
-    f.owner = f:CreateFontString(nil, "OVERLAY")
-    f.owner:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
-    f.owner:SetPoint("TOPLEFT", f.label, "BOTTOMLEFT", 0, -1)
-    f.owner:SetJustifyH("LEFT")
+    f.count = f:CreateFontString(nil, "OVERLAY")
+    f.count:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
+    f.count:SetPoint("BOTTOMLEFT", f.glyph, "BOTTOMRIGHT", 0, 2)
+    f.count:SetTextColor(0.97, 0.92, 0.79)
 
     f:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         local pin = self.pin
         if pin then
-            -- one line per job: the quest, who owes how much, where, and the escape hatch
-            GameTooltip:AddLine(pin.quest or "companion quest", 1, 0.92, 0.6)
-            if pin.owed and pin.owed ~= "" then
-                GameTooltip:AddLine(pin.owed, 0.98, 0.86, 0.37)
-            elseif pin.owners and pin.owners ~= "" then
-                GameTooltip:AddLine("companion: " .. pin.owners, 0.85, 0.85, 0.85)
+            GameTooltip:AddLine(pin.zone or "Companion quests", 1, 0.92, 0.6)
+            local titles, order = {}, {}
+            for _, row in ipairs(pin.details) do
+                local title = (row.style == STYLE.handin and "? " or "! ") .. row.quest
+                if not titles[title] then
+                    titles[title] = {}
+                    order[#order + 1] = title
+                end
+                local detail = row.companion or "Companion"
+                if row.owed then detail = detail .. "  " .. row.owed:gsub(";", "  ·  ") end
+                titles[title][#titles[title] + 1] = detail
             end
-            GameTooltip:AddLine((pin.zone and pin.zone ~= "" and pin.zone or "here") ..
-                " - " .. pin.style.label, 0.85, 0.85, 0.85)
-            GameTooltip:AddLine("right-click to remove", 0.5, 0.5, 0.5)
+            for _, title in ipairs(order) do
+                GameTooltip:AddLine(title, 1, 0.92, 0.6, true)
+                for _, detail in ipairs(titles[title]) do
+                    GameTooltip:AddLine("  " .. detail, 0.85, 0.85, 0.85, true)
+                end
+            end
         end
         GameTooltip:Show()
     end)
     f:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    f:SetScript("OnClick", function(self, button)
-        if button == "RightButton" and self.pin then RemovePin(self.pin) end
-    end)
-
     CompanionPins.frames[index] = f
     return f
 end
@@ -237,9 +207,7 @@ end
 -- legend: what a marker means, bottom right of the map
 --------------------------------------------------------------------------
 
--- Three lines of text on a soft dark plate. The map is parchment and the markers are
--- glyphs, so a legend that is a box with a border fights the map the same way a plated
--- pin did. Small, dim, and it only appears while there is something to explain.
+-- A small outlined-text legend, without a plate or border.
 local LEGEND = {
     { style = STYLE.gather, text = "work left" },
     { style = STYLE.handin, text = "ready to hand in" },
@@ -255,14 +223,7 @@ local function BuildLegend()
     f:SetPoint("BOTTOMRIGHT", WorldMapDetailFrame, "BOTTOMRIGHT", -12, 46)
     f:SetFrameStrata("MEDIUM")
 
-    f:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 10,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    f:SetBackdropColor(0, 0, 0, 0.35)
-    f:SetBackdropBorderColor(1, 1, 1, 0.10)
+    f:EnableMouse(false)
 
     for index, row in ipairs(LEGEND) do
         local glyph = f:CreateFontString(nil, "OVERLAY")
@@ -288,122 +249,88 @@ end
 --------------------------------------------------------------------------
 
 CompanionPins:RegisterEvent("PLAYER_LOGIN")
--- The module sends its pins as system messages prefixed CSYNC, not whispers: a whisper
--- needs a live speaker, and the map has to work when no companion is out. This addon kept
--- listening on the whisper channel after that change, so it silently received nothing and
--- its pins were whatever an older session had left in saved variables - an old title sitting
--- on another quest's area.
-CompanionPins:RegisterEvent("CHAT_MSG_WHISPER")
-CompanionPins:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 CompanionPins:RegisterEvent("CHAT_MSG_SYSTEM")
 CompanionPins:RegisterEvent("WORLD_MAP_UPDATE")
 
-CompanionPins:SetScript("OnEvent", function(self, event, arg1, arg2)
+if ChatFrame_AddMessageEventFilter then
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
+        return type(message) == "string" and (message:sub(1, 14) == "CSYNC|Pin set "
+            or message:sub(1, 15) == "CSYNC|Pin sync ")
+    end)
+end
+
+CompanionPins:SetScript("OnEvent", function(self, event, message)
     if event == "PLAYER_LOGIN" then
         LoadDB()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r v" .. CompanionPins.version ..
-            " loaded - " .. #self.pins .. " pin(s). /cpins for help.")
-
-    elseif event == "CHAT_MSG_WHISPER" or event == "CHAT_MSG_MONSTER_WHISPER"
-        or event == "CHAT_MSG_SYSTEM" then
-        if self.debug then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r whisper: " .. tostring(arg1))
+        if WorldMapFrame then
+            WorldMapFrame:HookScript("OnShow", function()
+                self:Redraw()
+                RequestPins(false, true)
+            end)
         end
-        -- "Finished 'Kobold Candles' - that pin can go." arrives when the companion
-        -- actually hands a quest in; the marker has done its job by then.
-        -- the server greys these lines so they do not shout in chat; strip the
-        -- colour codes before trying to read anything out of them
-        local text = string.gsub(arg1 or "", "|c%x%x%x%x%x%x%x%x", "")
-        text = string.gsub(text, "|r", "")
-
-        -- system messages carry every line the server says; only ours are prefixed
-        if event == "CHAT_MSG_SYSTEM" then
-            if string.sub(text, 1, 6) ~= "CSYNC|" then return end
-            text = string.sub(text, 7)
-        end
-
-        -- "Finished 'X' - that pin can go." is spoken the moment a companion hands a
-        -- quest in, which can be most of a payload window ahead of the next "Pin sync".
-        -- Remove that quest's marker on the spot: the next payload is still the whole
-        -- truth and re-syncs everything, this just refuses to show a cleared pin for a
-        -- minute. The pin's title is the server-truncated form, so match it as a
-        -- prefix of the full quest name the notice carries.
-        local finished = string.match(text, "Finished%s+'(.+)'%s+-%s+that pin can go")
-        if finished then
-            local done = string.lower(finished)
-            local before = #self.pins
-            local kept = {}
-            for _, pin in ipairs(self.pins) do
-                local q = string.gsub(string.lower(pin.quest or ""), "%s*%.%.$", "")
-                if q == "" or string.find(done, q, 1, true) then
-                    kept[#kept + 1] = pin
-                end
-            end
-            if #kept < before then
-                self.pins = kept
-                SaveDB()
-                local ok, err = pcall(function() self:Redraw() end)
-                if not ok then
-                    DEFAULT_CHAT_FRAME:AddMessage("|cffff6060CompanionPins|r draw failed: " .. tostring(err))
-                end
-                if self.debug then
-                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanionPins|r cleared a finished quest's pin: " .. finished)
-                end
-            end
-            return
-        end
-
-        -- "Pin sync 1/3: ..." arrives in parts when the companion carries more quests
-        -- than one whisper can hold. Hold them until the set is complete, then rebuild
-        -- once - applying a part on its own would wipe the pins named in the others.
-        local part, total, piece = string.match(text, "^Pin sync (%d+)/(%d+):%s*(.*)$")
-        if part then
-            CompanionPins.syncParts = CompanionPins.syncParts or {}
-
-            -- Abandon a torn set. If a part never arrives (rate limit, relog) the held
-            -- parts would sit there and pair with a later sync, leaving the map showing
-            -- half of one set and half of another. Ten seconds is longer than a
-            -- three-part burst ever takes.
-            local now = time()
-            for i = #CompanionPins.syncParts, 1, -1 do
-                if now - (CompanionPins.syncParts[i].at or 0) > 10 then
-                    table.remove(CompanionPins.syncParts, i)
-                end
-            end
-
-            CompanionPins.syncParts[tonumber(part)] = { text = piece, at = now }
-
-            -- '#' on a sparse table is undefined in Lua: parts arriving as 1 and 3
-            -- reported a length of 3, the set was declared complete with part 2 still
-            -- missing, and SyncPins then deleted the valid pins the missing part named.
-            -- Completeness is checked explicitly, key by key.
-            local complete = true
-            for i = 1, tonumber(total) do
-                if not CompanionPins.syncParts[i] then complete = false break end
-            end
-
-            if complete then
-                local joined = {}
-                for i = 1, tonumber(total) do
-                    joined[i] = CompanionPins.syncParts[i] and CompanionPins.syncParts[i].text or ""
-                end
-                CompanionPins.syncParts = nil
-                SyncPins(table.concat(joined, "|"))
-            end
-            return
-        end
-
-        local syncCount, payload = string.match(text, "^Pin sync (%d+):%s*(.*)$")
-        if syncCount then
-            SyncPins(payload)
-            return
-        end
-
-        -- "Finished 'X'" is narrative now: the next payload already knows the quest is
-        -- gone, and a pin system with one source of truth does not need a second way
-        -- to remove things.
-    elseif event == "WORLD_MAP_UPDATE" then
+        return
+    end
+    if event == "WORLD_MAP_UPDATE" then
         self:Redraw()
+        RequestPins()
+        return
+    end
+    if event ~= "CHAT_MSG_SYSTEM" or type(message) ~= "string" or message:sub(1, 6) ~= "CSYNC|" then return end
+
+    local text = message:sub(7)
+    if self.debug and (text:find("^Pin set ") or text:find("^Pin sync ")) then
+        DEFAULT_CHAT_FRAME:AddMessage("Companion Pins: " .. text)
+    end
+    if text:match("^Hello%s+%d+$") then
+        lastHelloAt = time()
+        RequestPins()
+        return
+    end
+
+    local revision, part, total, piece = text:match("^Pin set (%d+) (%d+)/(%d+):(.*)$")
+    if revision then
+        revision, part, total = tonumber(revision), tonumber(part), tonumber(total)
+        if total < 1 or total > 512 or part < 1 or part > total or #piece > 150 then return end
+        if appliedRevision and revision <= appliedRevision then return end
+        local now = time()
+        if pending and revision < pending.revision then return end
+        if pending and now - pending.at > 10 then
+            if revision == pending.revision then return end
+            pending = nil
+        end
+        if not pending or pending.revision ~= revision then
+            pending = { revision = revision, total = total, at = now, parts = {} }
+        elseif pending.total ~= total then
+            return
+        end
+        pending.parts[part] = piece
+        if CompleteParts(pending) then
+            appliedRevision = revision
+            SyncPins(table.concat(pending.parts, ""))
+            pending, legacy = nil, nil
+        end
+        return
+    end
+    if appliedRevision then return end  -- never roll a v2 map back to an unversioned set
+
+    part, total, piece = text:match("^Pin sync (%d+)/(%d+):%s*(.*)$")
+    if part then
+        part, total = tonumber(part), tonumber(total)
+        if total < 1 or total > 512 or part < 1 or part > total then return end
+        local now = time()
+        if part == 1 then legacy = { total = total, at = now, parts = {} } end
+        if not legacy or legacy.total ~= total or now - legacy.at > 10 then return end
+        legacy.parts[part] = piece
+        if CompleteParts(legacy) then
+            SyncPins(table.concat(legacy.parts, "|"))
+            legacy = nil
+        end
+        return
+    end
+    local single = text:match("^Pin sync %d+:%s*(.*)$")
+    if single then
+        legacy = nil
+        SyncPins(single)
     end
 end)
 
@@ -416,145 +343,96 @@ end)
 
 
 
-function CompanionPins:Redraw()
-    if not WorldMapDetailFrame or not WorldMapDetailFrame:IsShown() then return end
-
-    local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
-    local shown = 0
-    local placed = {}
-    -- The zone filter must fail OPEN: if the client API is missing or misbehaves,
-    -- every pin draws (the pre-filter behaviour) rather than none.
-    local mapName = nil
-    if GetMapInfo then
-        local ok, value = pcall(GetMapInfo)
-        if ok and value then mapName = tostring(value) end
+-- Keep a hand-in at its NPC and group nearby work spots around a single glyph.
+-- A stable ordering keeps the same anchor as filters and progress change.
+function CompanionPins:VisiblePins(mapName, width, height)
+    local candidates = {}
+    local map = mapName and mapName:lower():gsub("[^%w]", "")
+    for _, pin in ipairs(self.pins) do
+        local zone = pin.zone and pin.zone:lower():gsub("[^%w]", "")
+        if not map or not zone or map:find(zone, 1, true) or zone:find(map, 1, true) then
+            local details = {}
+            for _, row in ipairs(pin.details) do
+                if not self.only or (row.companion and row.companion:lower() == self.only) then
+                    details[#details + 1] = { quest = row.quest, companion = row.companion,
+                        owed = row.owed, style = pin.style }
+                end
+            end
+            if #details > 0 then
+                candidates[#candidates + 1] = { x = pin.x, y = pin.y, zone = pin.zone, style = pin.style,
+                    details = details, count = 1 }
+            end
+        end
     end
-
-
-    for i, pin in ipairs(self.pins) do
-        -- "/cpins only <name>" narrows the map to one companion; the others are hidden
-        -- but kept, so clearing the filter brings them straight back.
-        -- A pin belongs to the zone it was made in; drawing it on every map and every
-        -- continent read as "a pin over the wrong town", and the tooltip's zone line was
-        -- the only hint. The zone stamp now decides where the pin shows. While a pin is
-        -- drawn it keeps its data, so opening the right zone's map brings it back.
-        local hidden = CompanionPins.only and pin.companion
-                       and CompanionPins.only ~= string.lower(pin.companion)
-        if not hidden and CompanionPins.only and not pin.companion then
-            hidden = true    -- the filter narrows to companions; untagged pins are not a match
-        end
-        -- Zone names disagree between the DBC ("Elwynn") and the client's map title
-        -- ("Elwynn Forest"); an exact compare hid every pin on every map. A name that
-        -- CONTAINS the other is the same place.
-        if not hidden and pin.zone and mapName then
-            local pz, mz = string.lower(pin.zone), string.lower(mapName)
-            if not string.find(mz, pz, 1, true) and not string.find(pz, mz, 1, true) then
-                hidden = true
+    table.sort(candidates, function(a, b)
+        if a.style ~= b.style then return a.style == STYLE.handin end
+        if a.zone ~= b.zone then return a.zone < b.zone end
+        if a.x ~= b.x then return a.x < b.x end
+        if a.y ~= b.y then return a.y < b.y end
+        return a.details[1].quest < b.details[1].quest
+    end)
+    local clusters = {}
+    for _, pin in ipairs(candidates) do
+        local cluster
+        for _, entry in ipairs(clusters) do
+            local dx, dy = (entry.x - pin.x) * width / 100, (entry.y - pin.y) * height / 100
+            local bothHandIns = pin.style == STYLE.handin and entry.style == STYLE.handin
+            if entry.zone == pin.zone and dx * dx + dy * dy <= 18 * 18 and (not bothHandIns or (dx == 0 and dy == 0)) then
+                cluster = entry
+                break
             end
         end
-
-        if self.debug then
-            DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                "|cff00ccffCompanionPins|r pin '%s' zone '%s' vs map '%s' -> %s",
-                pin.quest or "?", pin.zone or "-", mapName or "-",
-                hidden and "hidden" or "drawn"))
-        end
-
-        if hidden then
-            if CompanionPins.frames[i] then CompanionPins.frames[i]:Hide() end
-            shown = shown + 0
-        else
-        -- Reuse the frame at this index: creating a new one per redraw orphaned the old
-        -- one, still parented to the map and still visible, so every zoom left another
-        -- marker behind that nothing could hide.
-        local f = CompanionPins.frames[i] or NewPin(i)
-        f.pin = pin
-
-        local px = ((pin.x + CompanionPins.offsetX) / 100) * w
-        local py = (FLIP_Y and (1 - (pin.y + CompanionPins.offsetY) / 100)
-                           or ((pin.y + CompanionPins.offsetY) / 100)) * h
-        f:ClearAllPoints()
-        f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -py)
-        f:Show()
-
-        local style = pin.style or STYLE.other
-        local r, g, b = style.ring[1], style.ring[2], style.ring[3]
-
-        f.glyph:SetText(style.glyph)
-        f.glyph:SetTextColor(r, g, b)
-        f.shadow:SetText(style.glyph)
-
-        -- Glyphs are the map's language, not labels: eight quests with persistent text
-        -- carpeted the map and the rows of nudged labels collided anyway. The glyph's
-        -- colour already says the state and its spot says where; the hover tooltip
-        -- carries the full detail (title, owed by, zone, coords). Persistent labels are
-        -- an opt-in via /cpins labels, and the nudge runs only in that mode.
-        if CompanionPins.showLabels then
-            local text = pin.quest or "companion quest"
-            if #text > 22 then text = string.sub(text, 1, 20) .. ".." end
-            f.label:SetText(text)
-            f.label:SetTextColor(r, g, b)
-
-            -- the companions that owe it, on their own muted line - every name whole
-            if pin.owed and pin.owed ~= "" then
-                f.owner:SetText("|cffffd98a" .. pin.owed .. "|r")
-            else
-                f.owner:SetText("")
-            end
-
-            -- Nudge the label down a row when it would land on one already placed: two
-            -- Goldshire hand-ins are four percent apart, invisible at map scale.
-            local width = f.label:GetStringWidth()
-            local row = 0
-            for attempt = 0, 3 do
-                row = attempt
-                local clash = false
-                local myCentreX = px + 16 + width / 2
-                for _, other in ipairs(placed) do
-                    if math.abs(myCentreX - other.x) * 2 < (width + other.w)
-                       and math.abs(py - (other.y)) < 13 then
-                        clash = true
+        if cluster then
+            cluster.count = cluster.count + 1
+            for _, row in ipairs(pin.details) do
+                local duplicate = false
+                for _, prior in ipairs(cluster.details) do
+                    if prior.quest == row.quest and prior.companion == row.companion and prior.style == row.style then
+                        duplicate = true
                         break
                     end
                 end
-                if not clash then break end
+                if not duplicate then cluster.details[#cluster.details + 1] = row end
             end
-
-            f.label:SetPoint("LEFT", f, "RIGHT", 4, -row * 13)
-            -- the clash test compares this pin's GLYPH centre against the other's LABEL
-            -- centre; both sides now use the label centre, so a near-miss cannot pass
-            table.insert(placed, { x = px + 16 + width / 2, y = py - row * 13, w = width, label = true })
         else
-            f.label:SetText("")
-            f.owner:SetText("")
-            f.label:SetPoint("LEFT", f, "RIGHT", 4, 0)
-        end
-
-        end   -- /cpins only
-        shown = shown + 1
-    end
-
-    -- Hidden pins never create their frame, so the table can carry holes and the
-    -- length operator reports a border across one: indexing that border was the
-    -- "attempt to index field '?' (a nil value)" a zone switch could throw mid-draw.
-    for i = #self.pins + 1, #self.frames do
-        local f = self.frames[i]
-        if f then
-            f:Hide()
-            f.pin = nil
+            clusters[#clusters + 1] = pin
         end
     end
-
-    local lg = BuildLegend()
-
-    if CompanionPins.showLegend == false or #self.pins == 0 then
-        lg:Hide()
-    else
-        lg:Show()
-    end
+    return clusters
 end
 
---------------------------------------------------------------------------
+function CompanionPins:Redraw()
+    if not WorldMapDetailFrame or not WorldMapDetailFrame:IsVisible() then return end
+    local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
+    local mapName = GetMapInfo and GetMapInfo()
+    local pins = self:VisiblePins(mapName, w, h)
+    for i, pin in ipairs(pins) do
+        local f = self.frames[i] or NewPin(i)
+        f.pin = pin
+        local px = (pin.x + self.offsetX) / 100 * w
+        local py = (pin.y + self.offsetY) / 100
+        f:ClearAllPoints()
+        f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", px, -(FLIP_Y and (1 - py) or py) * h)
+        local style = pin.style
+        f.glyph:SetText(style.glyph)
+        f.glyph:SetTextColor(style.ring[1], style.ring[2], style.ring[3])
+        f.shadow:SetText(style.glyph)
+        local count = math.max(pin.count, #pin.details)
+        f.count:SetText(count > 1 and tostring(count) or "")
+        local label = pin.details[1].quest
+        if #label > 22 then label = label:sub(1, 20) .. ".." end
+        f.label:SetText(self.showLabels and label or "")
+        f.label:SetTextColor(style.ring[1], style.ring[2], style.ring[3])
+        f:Show()
+    end
+    for i = #pins + 1, #self.frames do
+        self.frames[i]:Hide()
+        self.frames[i].pin = nil
+    end
+    local lg = BuildLegend()
+    if self.showLegend == false or #pins == 0 then lg:Hide() else lg:Show() end
+end
+
 --------------------------------------------------------------------------
 -- commands
 --------------------------------------------------------------------------
@@ -567,8 +445,12 @@ SlashCmdList["WLPINS"] = function(msg)
 
     if msg == "clear" then
         CompanionPins.pins = {}
-        SaveDB(); CompanionPins:Redraw()
+        lastPayload, lastSnapshotAt = nil, nil
+        CompanionPins:Redraw()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r cleared.")
+
+    elseif msg == "refresh" then
+        RequestPins(true)
 
     elseif msg == "labels" then
         CompanionPins.showLabels = not CompanionPins.showLabels
@@ -645,7 +527,7 @@ SlashCmdList["WLPINS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffcc33round gold ?|r  ready to hand in, at the giver")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff59f259square green !|r  area where it still has work")
         DEFAULT_CHAT_FRAME:AddMessage("  |cff9a9a9a/cpins legend|r  show or hide the key on the map")
-        DEFAULT_CHAT_FRAME:AddMessage("  /wlpins list | clear | test | debug | flip")
+        DEFAULT_CHAT_FRAME:AddMessage("  /cpins refresh | list | clear | test | debug | flip")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins offset X Y - nudge the glyph if it sits off the road")
         DEFAULT_CHAT_FRAME:AddMessage("  /wlpins only <name> | all - one companion's glyphs or everyone's")
     end

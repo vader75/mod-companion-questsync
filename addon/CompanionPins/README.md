@@ -1,110 +1,28 @@
-# Companion Pins — quest markers on the world map
+# Companion Pins
 
-Client addon for `mod-companion-questsync`. Draws the companion's hand-ins and its unfinished
-quests on your world map, and explains each marker in a small key in the corner.
+World-map quest markers for WoW 3.3.5a and `mod-companion-questsync`. Enable the addon on the character screen. The server's `PinSync` option defaults to on. No core patch or third-party library is needed.
 
-**Client-side only. No server change, no core edit, nothing to configure on the realm.**
+## Reading the map
 
-The addon directory is `CompanionPins`, matching the `CompanionSync` addon it belongs with;
-everything a player sees says **Companion Pins**, and the command is `/cpins`. It was called
-`WLPins` before v0.9 — the rename carries the saved variables across (`CompanionPinsDB`), so
-an update in place keeps any pins already on the map.
+- Gold `?`: hand in at this NPC. Green `!`: work remains in this area.
+- Nearby markers share a glyph and counter, without moving hand-ins away from their NPCs. Hover for quests, companion names, and progress. Labels are off by default.
+- The server uses fixed objective areas instead of switching to the nearest spawns as companions walk.
 
-## Why an addon at all
+## State and recovery
 
-The 3.3.5a client decides how quest areas look and only draws them for quests in *your own*
-log. The server's quest-POI packet carries no colour or icon field, so "a differently
-coloured marker for a quest the companion still owes" cannot be expressed server-side. An
-addon can draw whatever it likes, so it does.
+Only prefixed system messages can change the map. A complete snapshot replaces the pins; an empty snapshot clears them. Whispers are narrative only.
 
-## What it reads
+The updated server replies to map refreshes with `CSYNC|Pin set <revision> <part>/<total>:<bytes>`. The addon renders only a complete revision and discards older parts. The older `Pin sync` format still works. Opening the roster does not request pins, and the server heartbeat no longer forces a map resend.
 
-The module sends one authoritative line per owner, as a **`CSYNC|`-prefixed system message**,
-not a whisper — a whisper needs a live speaker, and the map has to work with no companion in
-the world:
-
-```
-CSYNC|Pin sync 3: 57,48,g=Brotherhood of Thieves|42,65,h=Report to Goldshire|55,49,g=Milly's Harvest
-```
-
-- `h=` hand in (gold `?`), `g=` work left (green `!`), `e=` an errand only the companion can
-  run (blue `?`).
-- The line is the whole truth: anything it does not mention is removed, so a pin that no
-  longer exists cannot linger.
-- Long sets arrive in parts (`Pin sync 1/3:`) and are reassembled before anything is drawn;
-  parts older than ten seconds are dropped so half a set cannot draw.
-
-## Requirements
-
-| | |
-|---|---|
-| Client | 3.3.5a (Interface `30300`) |
-| Dependencies | none — no Ace, no libraries |
-| Saved variables | `CompanionPinsDB` (pins survive logout, expire after 30 min) |
-| Server side | `mod-companion-questsync` with `PinSync = 1` (the default) |
-
-## Install
-
-```
-Interface/AddOns/CompanionPins/CompanionPins.toc
-Interface/AddOns/CompanionPins/CompanionPins.lua
-```
-
-Enable **Companion Pins** on the addon screen.
-
-## The markers
-
-A marker is a glyph, not a label. Persistent quest titles next to every pin carpeted the
-map - eight quests wrote more text than the zone did. By default the map shows glyphs only:
-the colour says the state, the spot says where, and hovering a marker shows everything
-(title, owed by whom, zone, coordinates). Players who want the text back can run
-`/cpins labels`; the choice is remembered and the label-clash nudging runs only in that mode.
-
-A marker is a glyph, not a badge: the client's own `?`/`!` language needs no legend, and a
-plated pin collapses into a black square at map scale. The quest name sits to its right so
-the terrain stays visible.
-
-| Marker | Meaning |
-|---|---|
-| gold `?` | the companion can hand a quest in here |
-| green `!` | an area where it still has work to do |
-| blue `?` | a turn-in only it can do |
-
-A small key in the bottom-right corner of the map repeats this in three lines while there
-are pins to explain. `/cpins legend` hides or shows it, and the choice is remembered.
-
-## Commands
-
-`/cpins` is the command; `/wlpins` still works.
+`CompanionPinsDB` keeps display preferences, not pins. With this addon, open the map after `/reload` to recover the snapshot. If automatic sync is disabled or the map is stale, use `/cpins refresh` while the map is open. If you keep an older CompanionPins client on the updated server, use `.companionsync pins` after `/reload` to recover an unchanged map immediately; the new server no longer forces legacy maps through on every heartbeat.
 
 | Command | Effect |
 |---|---|
-| `/cpins` | help |
-| `/cpins legend` | show or hide the key on the map |
-| `/cpins labels` | toggle persistent text labels (default off - the hover tooltip carries the detail) |
-| `/cpins list` | the pins it is holding |
-| `/cpins clear` | remove them all |
-| `/cpins only <name>` | show one companion's pins (`/cpins all` to show every companion again) |
-| `/cpins test` | draw a sample pin, to prove drawing works |
-| `/cpins debug` | echo every line it receives |
-| `/cpins flip` | marks mirrored top/bottom? flip them |
-| `/cpins offset <x> <y>` | nudge every marker, if a zone map is a few percent off |
-| `/cpins life <minutes>` | how long a pin survives without being re-sent |
+| `/cpins only <name>` / `/cpins all` | Filter every contributor on a shared marker, or show everyone |
+| `/cpins refresh` | Request a fresh snapshot |
+| `/cpins labels` / `/cpins legend` | Toggle labels or the map key |
+| `/cpins list` / `/cpins clear` | Inspect or clear the local view |
+| `/cpins test` / `/cpins debug` | Draw a sample marker or toggle diagnostics |
+| `/cpins flip` / `/cpins offset <x> <y>` | Calibrate the overlay |
 
-Right-click any marker to remove it. Hover for its quest name and coordinates.
-
-## Limits, honestly
-
-- **It listens on the system channel and ignores anything without the `CSYNC|` tag.** That is
-  the whole contract with the module. If the server's tag or channel ever changes, this addon
-  must change in the same pass — one consumer left on the old channel receives nothing, keeps
-  drawing whatever it last wrote to saved variables, and the report that arrives is "the pin
-  for quest A is labelled quest B", which reads like a mislabelled pin rather than a deaf
-  addon.
-- Markers are placed as a percentage of the zone map, so they land correctly on the continent
-  the coordinates came from. `/cpins offset` covers a zone map that is slightly off and
-  `/cpins flip` a mirrored one.
-- No minimap arrow (that needs world→minimap projection); the world map and the tooltip carry
-  the position.
-- Whisper parsing is gone from the live path, but the whisper branch stays registered for an
-  older server.
+`/wlpins` is still an alias. From the module root, run `python -m unittest discover -s tests -p test_companion_pins.py` for the protocol and clustering checks.

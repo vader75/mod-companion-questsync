@@ -368,6 +368,8 @@ namespace
 
     std::map<uint32, std::string> g_lastPoolStock;        // owner guid -> last pool stock line
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
+    std::map<uint32, uint32> g_pinRevisions;              // presence means this client requested v2
+    std::map<uint32, uint32> g_pinRequestAt;              // bound repeat requests within a session
     std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
     std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
     std::map<std::pair<uint32, uint32>, std::string> g_poiCache;      // (zone, quest) -> "map X, Y"
@@ -1759,14 +1761,14 @@ namespace
     // each with its own points, so the map should show one pin per area, not just the
     // first. Capped at four so a sprawling quest cannot carpet the map; the whisper
     // (`.companionsync quests`) still names every area.
-    std::map<uint32, std::vector<std::pair<std::string, std::string>>> g_poiPinCache;
+    std::map<std::tuple<uint32, uint32, uint32>, std::vector<std::pair<std::string, std::string>>> g_poiPinCache;
 
     /// Where the work actually is: the creatures that drop the item the quest requires.
     ///
     /// A wanted poster's POI points at the poster, and an outline's first corner is
     /// wherever the cartographer started the path - neither is the mob. The loot table
     /// is: for every required item, the creatures whose loot holds it, spawned where
-    /// they spawn. Nearest to the companion first, capped like every other pin; a quest
+    /// they spawn. Stable hotspots are capped like every other pin; a quest
     /// with no resolvable source (or a failed query, retried on a slow clock) falls
     /// through to the POI vector.
     std::map<uint32, std::vector<std::tuple<uint32, float, float>>> g_lootSpawns;  // quest -> (map, x, y)
@@ -1814,55 +1816,86 @@ namespace
         if (spawns->second.empty())
             return false;
 
-        // On the companion's map, nearest first, then the usual conversion each pin.
-        std::vector<std::tuple<uint32, float, float>> here;
-        for (auto const& s : spawns->second)
-            if (std::get<0>(s) == bot->GetMapId())
-                here.push_back(s);
-
-        std::sort(here.begin(), here.end(), [bot](auto const& a, auto const& b)
+        // Group spawn coordinates into fixed map cells, not nearest-to-bot spots.
+        // Cache by quest/map/phase so walking neither rearranges pins nor redoes
+        // terrain queries. Use an actual spawn near each cell centre as the anchor.
+        using Coordinates = std::vector<std::pair<std::string, std::string>>;
+        static std::map<std::tuple<uint32, uint32, uint32>, Coordinates> cache;
+        uint32 const map = bot->GetMapId();
+        uint32 const phase = bot->GetPhaseMask();
+        auto const key = std::make_tuple(questId, map, phase);
+        if (auto it = cache.find(key); it != cache.end())
         {
-            float const ax = std::get<1>(a) - bot->GetPositionX();
-            float const ay = std::get<2>(a) - bot->GetPositionY();
-            float const bx = std::get<1>(b) - bot->GetPositionX();
-            float const by = std::get<2>(b) - bot->GetPositionY();
-            return (ax * ax + ay * ay) < (bx * bx + by * by);
-        });
-
-        for (auto const& s : here)
-        {
-            if (out.size() >= 4)
-                break;
-
-            float x = std::get<1>(s);
-            float y = std::get<2>(s);
-            uint32 const zone = ZoneAtHeight(bot->GetMapId(), bot->GetPhaseMask(), x, y);
-            if (!zone)
-                continue;
-
-            if (!WmaConvert(x, y, int32(zone)) && zone != 12)
-                continue;
-
-            if (x < 0.0f || x > 100.0f || y < 0.0f || y > 100.0f)
-                continue;
-
-            std::string const numbers = "map " + std::to_string(uint32(x)) + ", " + std::to_string(uint32(y));
-            if (numbers.size() <= 5)
-                continue;
-
-            if (std::find_if(out.begin(), out.end(),
-                             [&numbers](std::pair<std::string, std::string> const& s) { return s.first == numbers; }) != out.end())
-                continue;
-
-            out.push_back({ numbers, ZoneName(zone) });
+            out = it->second;
+            return !out.empty();
         }
 
+        struct Area
+        {
+            uint32 count = 0;
+            std::tuple<int32, int32, int32> anchor; // squared distance to centre, x, y
+        };
+        constexpr int32 kCellSize = 8;
+        using CellKey = std::tuple<uint32, int32, int32>;
+        std::map<CellKey, Area> areas;
+        for (auto const& [spawnMap, sx, sy] : spawns->second)
+        {
+            if (spawnMap != map)
+                continue;
+            uint32 const zone = ZoneAtHeight(map, phase, sx, sy);
+            if (!zone)
+                continue;
+            float x = sx, y = sy;
+            if (!WmaConvert(x, y, int32(zone)) && zone != 12)
+                continue;
+            if (!(x >= 0.0f && x <= 100.0f && y >= 0.0f && y <= 100.0f))
+                continue;
+
+            int32 const gx = int32(x), gy = int32(y);
+            int32 const cx = gx / kCellSize, cy = gy / kCellSize;
+            int32 const dx = gx - cx * kCellSize - kCellSize / 2;
+            int32 const dy = gy - cy * kCellSize - kCellSize / 2;
+            auto const candidate = std::make_tuple(dx * dx + dy * dy, gx, gy);
+            Area& area = areas[{ zone, cx, cy }];
+            if (!area.count || candidate < area.anchor)
+                area.anchor = candidate;
+            ++area.count;
+        }
+
+        std::vector<std::pair<CellKey, Area>> ranked(areas.begin(), areas.end());
+        std::sort(ranked.begin(), ranked.end(), [](auto const& a, auto const& b)
+        {
+            if (a.second.count != b.second.count)
+                return a.second.count > b.second.count;
+            return a.first < b.first;
+        });
+        // Cover distinct zones before adding a second hotspot in any one zone.
+        std::map<uint32, uint8> perZone;
+        for (uint8 pass = 0; pass < 2 && out.size() < 4; ++pass)
+        {
+            std::set<uint32> seen;
+            for (auto const& [cell, area] : ranked)
+            {
+                uint32 const zone = std::get<0>(cell);
+                if (pass == 1 && seen.insert(zone).second)
+                    continue; // the first pass already selected this cell
+                if (perZone[zone] != pass)
+                    continue;
+                ++perZone[zone];
+                out.emplace_back("map " + std::to_string(std::get<1>(area.anchor)) + ", " +
+                    std::to_string(std::get<2>(area.anchor)), ZoneName(zone));
+                if (out.size() >= 4)
+                    break;
+            }
+        }
+        cache.emplace(key, out);
         return !out.empty();
     }
 
     bool PoiPins(Player* bot, Quest const* quest, std::vector<std::pair<std::string, std::string>>& out)
     {
-        auto const cached = g_poiPinCache.find(quest->GetQuestId());
+        auto const key = std::make_tuple(quest->GetQuestId(), bot->GetMapId(), bot->GetPhaseMask());
+        auto const cached = g_poiPinCache.find(key);
         if (cached != g_poiPinCache.end())
         {
             out = cached->second;
@@ -1912,7 +1945,7 @@ namespace
                 break;
         }
 
-        g_poiPinCache[quest->GetQuestId()] = out;
+        g_poiPinCache[key] = out;
         return !out.empty();
     }
 
@@ -5827,6 +5860,7 @@ namespace
         };
 
         std::vector<Entry> entries;
+        bool const versioned = g_pinRevisions.contains(owner->GetGUID().GetCounter());
 
         std::vector<uint32> bots;
         if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
@@ -5922,7 +5956,8 @@ namespace
                     std::replace(title.begin(), title.end(), '|', '/');
                     std::replace(title.begin(), title.end(), '=', ':');
 
-                    if (MultiCompanionSpeech(bot))
+                    std::replace(title.begin(), title.end(), '+', '/');
+                    if (versioned || MultiCompanionSpeech(bot))
                         title += "@" + SafePinName(bot->GetName());
 
                     // what this companion still owes, as the quest log counts it -
@@ -5937,7 +5972,7 @@ namespace
                     bool merged = false;
                     for (Entry& existing : entries)
                     {
-                        if (existing.numbers != numbers || existing.zone != zoneName)
+                        if (existing.numbers != numbers || existing.zone != zoneName || (versioned && existing.style != style))
                             continue;
 
                         // Every owner reads on the pin: the client gives the names their
@@ -5955,8 +5990,11 @@ namespace
             }
         }
 
+        std::sort(entries.begin(), entries.end(), [](Entry const& a, Entry const& b)
+        {
+            return std::tie(a.zone, a.numbers, a.style, a.title) < std::tie(b.zone, b.numbers, b.style, b.title);
+        });
         std::string line;
-
         for (Entry const& entry : entries)
         {
             if (!line.empty())
@@ -6036,18 +6074,14 @@ namespace
         last = now;
         SendProtocolLine(owner, "Hello " + std::to_string(g_cfg.intervalSeconds));
 
-        // The heartbeat is a state publish, not just presence: a client that just
-        // /reloaded is an empty renderer, and coalescing would never re-send an
-        // unchanged roster to it. Once a minute the module republishes the full
-        // truth - companions and pins - so the window is never waiting on a change
-        // that never comes.
+        // Keep legacy roster reload recovery. Pins now recover independently on
+        // map open; don't force a whole map through on a presence heartbeat.
 
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] heartbeat -> {}: Hello {}",
                      owner->GetName(), g_cfg.intervalSeconds);
 
         SendCompSync(owner, true);
-        SendPinSync(owner, true);
     }
 
     void SendPinSync(Player* owner, bool force = false)
@@ -6057,8 +6091,6 @@ namespace
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
         std::string const payload = BuildPinLine(owner);
-        SyncReport pinReport;   // only used to resolve a speaker
-
         std::string& last = g_lastPinSync[ownerGuid];
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32 const sentAt = g_pinSyncAt[ownerGuid];
@@ -6066,6 +6098,33 @@ namespace
         if (!force && payload == last && (sentAt && now - sentAt < g_cfg.pinSyncSeconds))
             return;
 
+        if (auto revision = g_pinRevisions.find(ownerGuid); revision != g_pinRevisions.end())
+        {
+            constexpr size_t kChunkBytes = 150;
+            std::vector<std::string_view> chunks;
+            for (size_t start = 0; start < payload.size(); )
+            {
+                size_t end = std::min(start + kChunkBytes, payload.size());
+                // Avoid splitting a UTF-8 character across chat messages.
+                while (end < payload.size() && (uint8(payload[end]) & 0xC0) == 0x80)
+                    --end;
+                chunks.emplace_back(payload.data() + start, end - start);
+                start = end;
+            }
+            if (chunks.empty())
+                chunks.emplace_back("");
+            uint32 const current = ++revision->second;
+            for (size_t i = 0; i < chunks.size(); ++i)
+                SendProtocolLine(owner, fmt::format("Pin set {} {}/{}:{}", current, i + 1, chunks.size(), chunks[i]));
+            last = payload;
+            g_pinSyncAt[ownerGuid] = now;
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] pin v2 -> {}: {} parts, {} bytes, revision {}",
+                    owner->GetName(), chunks.size(), payload.size(), current);
+            return;
+        }
+
+        // Legacy clients still read whole entries joined on '|'.
         // Chunk the payload. A companion carrying more than about five pin-worthy
         // quests overflowed the whisper length limit, and the old fixed cap of four
         // dropped the rest silently - which is how a quest could sit in the companion's
@@ -9500,36 +9559,46 @@ public:
         return true;
     }
 
-    /// .companionsync pins - resend the reconciliation on demand, which is the fix
-    /// for "the map says one thing and the companion another" without a relog.
-    /// .companionsync refresh - push the current state to an addon and say nothing.
-    ///
-    /// The client cannot ask for state, so it only ever knew what the server happened to
-    /// push - which is on change and on a five-minute heartbeat. A panel left open showed a
-    /// companion that had been dismissed ten seconds earlier until the player closed and
-    /// reopened it. This is the cheap, silent answer the panel polls while it is visible.
-    static bool HandleRefreshCommand(ChatHandler* handler, char const* /*args*/)
+    /// .companionsync refresh [roster] - refresh cached addon state silently.
+    static bool HandleRefreshCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player || !g_cfg.enable)
             return false;
 
-        // Not forced: the panel asks every 15 seconds, and a forced send pushed two full
-        // payloads whether or not anything had changed. Left unforced, the server's own
-        // change detection answers "did the roster move" and stays silent when it did not.
-        SendPinSync(player, false);
-        SendCompSync(player, false);
-
+        bool const rosterOnly = TrimArg(args) == "roster";
+        if (!rosterOnly)
+            SendPinSync(player, false); // legacy panel request
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        uint32 const now = uint32(time(nullptr));
+        auto sent = g_lastCompSyncAt.find(ownerGuid);
+        bool const force = rosterOnly && (sent == g_lastCompSyncAt.end() || now - sent->second >= 5);
+        SendCompSync(player, force);
         return true;
     }
 
-    static bool HandlePinsCommand(ChatHandler* handler, char const* /*args*/)
+    /// .companionsync pins [v2] - recover a map snapshot, including an empty one.
+    static bool HandlePinsCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
+
+        if (TrimArg(args) == "v2")
+        {
+            if (!g_cfg.enable || !g_cfg.pinSync)
+                return true;
+            uint32 const ownerGuid = player->GetGUID().GetCounter();
+            uint32& last = g_pinRequestAt[ownerGuid];
+            uint32 const now = uint32(time(nullptr));
+            if (last && now - last < 8)
+                return true;
+            last = now;
+            g_pinRevisions.try_emplace(ownerGuid, 0);
+            SendPinSync(player, true);
+            return true;
+        }
+        MarkCommandBurst(handler);
 
         uint32 botGuid = 0;
         if (!g_cfg.enable || !FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
@@ -10059,6 +10128,8 @@ public:
         g_lastSkillSync.erase(ownerGuid);
         g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
+        g_pinRevisions.erase(ownerGuid);
+        g_pinRequestAt.erase(ownerGuid);
         g_markedNpcs.erase(ownerGuid);
         g_sessionRefused.erase(ownerGuid);
         g_whisperQueue.erase(ownerGuid);
