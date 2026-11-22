@@ -161,6 +161,12 @@ local function NewPin(index)
     local f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
     f:SetSize(26, 26)
 
+    -- Without this the OnEnter/OnLeave/OnClick scripts never fire: hover was silently
+    -- dead since the pin frames existed, and it only became visible when the labels
+    -- went and hover was the sole detail surface.
+    f:EnableMouse(true)
+    f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
     -- a soft offset copy of the glyph, so it holds up over bright parchment without a
     -- plate behind it (the OUTLINE font flag alone thins out at small sizes)
     f.shadow = f:CreateFontString(nil, "BACKGROUND")
