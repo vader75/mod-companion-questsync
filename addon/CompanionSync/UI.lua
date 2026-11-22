@@ -802,12 +802,9 @@ launcher:SetSize(24, 24)
 -- moves or rescales the minimap carries it along, and a drag can never strand it mid-screen.
 -- The old top-left pixel offsets were relative to a minimap of one size in one place, which
 -- is exactly what a suite like Dragon UI rearranges.
-local function MinimapRadius()
-    if anchor ~= Minimap and Minimap then return math.max(Minimap:GetWidth(), Minimap:GetHeight()) / 2 end
-    return (anchor.GetWidth and math.max(anchor:GetWidth() or 140, anchor:GetHeight() or 140) / 2) or 70
-end
 local function RingRadius()
-    return MinimapRadius() + 14
+    local w = Minimap and math.max(Minimap:GetWidth() or 140, Minimap:GetHeight() or 140) or 140
+    return w / 2 + 14
 end
 
 local saved = CompanionSyncDB and CompanionSyncDB.launcher or nil
@@ -880,16 +877,20 @@ end)
 launcher:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
 
-    -- Take the dragged position as an angle around the minimap: measure the button's
-    -- centre against the minimap's, clamp onto the edge ring, and save it
-    -- centre-relative so the button follows the map wherever a suite puts it.
+    -- Take the cursor's angle around the minimap: the cursor position is divided by the
+    -- MINIMAP's effective scale and measured against the minimap's own centre, so both
+    -- numbers live in one coordinate space. The previous version mixed the button's
+    -- GetLeft (parent space) with the minimap's GetCenter (the suite may have reparented
+    -- and rescaled it) - two different scales produced a different anchor every drag.
     local anchor = Minimap or UIParent
-    local left, top = self:GetLeft(), self:GetTop()
-    if not left then return end
-    local bx, by = left + 12, top - 12
-    local mcx, mcy = anchor:GetCenter()
+    if not anchor then return end
 
-    local dx, dy = bx - mcx, by - mcy
+    local scale = anchor:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    cx, cy = cx / scale, cy / scale
+    local mx, my = anchor:GetCenter()
+
+    local dx, dy = cx - mx, cy - my
     local r = RingRadius()
     local d = math.sqrt(dx * dx + dy * dy)
     if d > 0.001 then
