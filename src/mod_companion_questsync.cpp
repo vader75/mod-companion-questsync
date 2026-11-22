@@ -2889,18 +2889,42 @@ namespace
         if (owner->GetMapId() != bot->GetMapId() || !owner->GetZoneId())
             return;
 
-        AreaTableEntry const* area = sAreaTableStore.LookupEntry(owner->GetZoneId());
-        if (!area || area->area_level <= 0)
-            return;
+        // The classic DBCs leave area_level zero for almost every zone (Westfall, the
+        // zone this feature exists for, reports 0), so the level comes from a table of
+        // the zones the realm actually serves, taken from those zones' own design; a
+        // non-zero area_level (a newer zone) still wins.
+        uint32 const zoneId = owner->GetZoneId();
+        uint32 zoneLevel = 0;
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(zoneId);
+        if (area && area->area_level > 0)
+            zoneLevel = uint32(area->area_level);
+        else
+        {
+            static constexpr std::pair<uint32, uint32> kZoneLevels[] = {
+                {1, 8}, {3, 40}, {4, 50}, {8, 35}, {10, 20}, {11, 20}, {12, 5}, {14, 5}, {15, 35},
+                {16, 45}, {17, 10}, {33, 30}, {36, 30}, {38, 10}, {40, 10}, {41, 45}, {44, 15},
+                {45, 30}, {46, 50}, {47, 40}, {51, 45}, {65, 74}, {66, 76}, {67, 77}, {85, 5},
+                {130, 10}, {141, 5}, {148, 15}, {210, 79}, {215, 5}, {267, 20}, {331, 25},
+                {357, 40}, {361, 50}, {394, 74}, {400, 25}, {405, 30}, {406, 20}, {440, 40},
+                {490, 50}, {495, 72}, {618, 55}, {1377, 55}, {2817, 77}, {3430, 5}, {3433, 15},
+                {3483, 60}, {3518, 65}, {3519, 62}, {3520, 67}, {3521, 62}, {3522, 65},
+                {3523, 67}, {3524, 10}, {3525, 15}, {3537, 72}, {3711, 77}, {4080, 70},
+            };
+            for (auto const& [known, level] : kZoneLevels)
+                if (known == zoneId) { zoneLevel = level; break; }
+        }
+
+        if (!zoneLevel)
+            return;                                       // an unknown zone asks nothing new
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32& lastZone = g_lastGatherZone[botGuid];
-        if (lastZone == owner->GetZoneId())
+        if (lastZone == zoneId)
             return;
-        lastZone = owner->GetZoneId();
+        lastZone = zoneId;
 
         auto const pair = ClassProfessionPair(bot->getClass());
-        uint32 const zoneMin = std::min<uint32>(uint32(area->area_level) * 5, 450);
+        uint32 const zoneMin = std::min<uint32>(zoneLevel * 5, 450);
         uint16 const skill = pair.first;
         uint16 const cur = bot->GetSkillValue(skill);
         if (cur >= zoneMin)
