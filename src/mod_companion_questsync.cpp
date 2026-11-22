@@ -5158,6 +5158,14 @@ namespace
         // rides the same slot - what the land asks does not wait for a dirty pass either.
         EnsureProfessionTools(bot);
         CatchUpGatherSkill(owner, bot);
+        // the recipes the current ceiling unlocks, self-healing: a body whose teach
+        // predated the recipe pass, or whose skill rose without a raise, catches up
+        // here rather than waiting for a button - Produce reads its spellbook
+        uint16 const recipeSkills[2] = { ClassProfessionPair(bot->getClass()).first,
+                                         ClassProfessionPair(bot->getClass()).second };
+        uint32 const recipeCap = ProfessionCap(bot->GetLevel());
+        TeachCraftRecipes(bot, recipeSkills[0], recipeCap);
+        TeachCraftRecipes(bot, recipeSkills[1], recipeCap);
         RestockNearVendor(owner, bot);   // near a trade or repair NPC: restock, mend, quietly
 #endif
 
