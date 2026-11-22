@@ -60,6 +60,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
 #ifdef MOD_PLAYERBOTS
 #include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
+#include "PlayerbotFactory.h"      // teach a hand-raised level what a trainer would
 #endif
 #include "QuestDef.h"
 #include "ScriptMgr.h"
@@ -2699,6 +2700,26 @@ namespace
         report.levelFrom = botLevel;
         report.levelTo = ownerLevel;
         bot->GiveLevel(ownerLevel);
+
+#ifdef MOD_PLAYERBOTS
+        // A hand-granted level teaches nothing on its own: GiveLevel raises the level and
+        // grants talent points nobody spends, because playerbots' auto-learn and
+        // auto-pick-talents are gated to random bots and this realm runs none - a
+        // level-raised companion fought on with rank-1 spells and empty talent trees.
+        // So teach it what a trainer would at the new level, and spend the fresh points
+        // along the spec it already has (increment: never reset, never re-roll).
+        {
+            PlayerbotFactory factory(bot, ownerLevel);
+            factory.InitSkills();
+            factory.InitClassSpells();
+            factory.InitAvailableSpells();
+            factory.InitTalentsTree(/*increment=*/true);
+
+            SayToOwner(bot, owner, "Now level " + std::to_string(ownerLevel) +
+                                   " - I know everything a trainer could teach, and I put my new talents to work.",
+                       30);
+        }
+#endif
 
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} -> level {} (owner {} level {})",
