@@ -240,6 +240,7 @@ end
 if ChatFrame_AddMessageEventFilter then
     ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
         if IsProtocolLine(message) then return true end
+        if IsAboutCompanion(message) then return true end
         return false
     end)
 
@@ -253,6 +254,31 @@ if ChatFrame_AddMessageEventFilter then
         "Quest Rewarded: ", "Quest Available: ", "Quest Incompleted: ",
         "Already on ", "Quest completed ", "Cannot talk to quest giver",
     }
+
+    -- The core announces a bot's own milestones - achievements, level-ups, duel wins -
+    -- as ordinary system messages, and with companions in the party they read like
+    -- noise aimed at the player. The roster is known here: a system line that begins
+    -- with a companion's name is the world talking about a bot, not to the player,
+    -- and it already reaches the window through the module's own payloads.
+    local function IsAboutCompanion(message)
+        local text = message or ""
+        if not string.find(text, "has earned the achievement", 1, true) and
+           not string.find(text, "is now level", 1, true) then
+            return false
+        end
+        for _, companion in ipairs(G.companions) do
+            local name = companion.name
+            if name and name ~= "" then
+                -- the core announces a bot's milestones as "[Name] has earned ..." or
+                -- plain "Name ..." - either way the world talking about a bot
+                if string.sub(text, 1, #name + 3) == "[" .. name .. "] " or
+                   string.sub(text, 1, #name + 1) == name .. " " then
+                    return true
+                end
+            end
+        end
+        return false
+    end
     ChatFrame_AddMessageEventFilter("CHAT_MSG_WHISPER", function(_, _, message)
         for _, echo in ipairs(narrationEchoes) do
             if string.sub(message or "", 1, #echo) == echo then return true end
