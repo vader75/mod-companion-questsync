@@ -3010,6 +3010,14 @@ namespace
         uint16 const ceiling = uint16(std::max<uint32>(zoneMin, ProfessionCap(bot->GetLevel())));
         bot->SetSkill(skill, 0, uint16(zoneMin), ceiling);
 
+        // The pair rises together: a gathering skill the zone dragged up is useless to
+        // a production profession that cannot work the materials, so the production
+        // half is caught up to the same level - what it gathers, it can use.
+        uint16 const production = pair.second;
+        uint16 const prodCur = bot->GetSkillValue(production);
+        if (prodCur < zoneMin)
+            bot->SetSkill(production, 0, uint16(zoneMin), ceiling);
+
         SayToOwner(bot, owner,
                    "I caught my " + std::string(ProfessionOf(skill).name) + " up to " +
                    std::to_string(zoneMin) + " - this is what this land asks.", 30);
