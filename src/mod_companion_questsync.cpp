@@ -3012,8 +3012,11 @@ namespace
             return;
         lastZone = zoneId;
 
-        uint32 const zoneMin = nodeReq ? std::min<uint32>(nodeReq, 450)
-                                       : std::min<uint32>(zoneLevel * 5, 450);
+        // clamped to the level's own tier: a sloppy WorldMapArea box (this realm's
+        // Westfall row spans half the eastern kingdoms) can otherwise drag a neighbour's
+        // node in, and no level-12 character should hold a 210 gathering skill
+        uint32 const tierCap = ProfessionCap(bot->GetLevel());
+        uint32 const zoneMin = std::min<uint32>(nodeReq ? nodeReq : zoneLevel * 5, tierCap);
         uint16 const skill = pair.first;
         uint16 const cur = bot->GetSkillValue(skill);
         if (cur >= zoneMin)
