@@ -214,6 +214,13 @@ local function CreateCard(index)
     end, "Bring its level up to yours.")
     card.levelButton:SetPoint("RIGHT", -100, 18)
 
+    -- The companion works its own gathering: smelt its ore, brew its herbs, cut its
+    -- stones. Shop-bought reagents come from the module; gathered ones are waited for.
+    card.produceButton = Button(card, "Produce", 68, function()
+        if card.companion then G.Action("produce", card.companion.name) end
+    end, "Craft what its gathering already paid for - used in play, overflow mailed home.")
+    card.produceButton:SetPoint("BOTTOMRIGHT", -210, -12)
+
     card.mapButton = Button(card, "Map", 44, function()
         G.Run(".companionsync pins")
         ToggleWorldMap()
@@ -573,6 +580,7 @@ function G.Refresh()
             if G.HasFlag(companion, "d") then card.reviveButton:Show() else card.reviveButton:Hide() end
 
             if online then card.mapButton:Show() else card.mapButton:Hide() end
+            if online then card.produceButton:Show() else card.produceButton:Hide() end
 
             card:Show()
         else

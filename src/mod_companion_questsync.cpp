@@ -7503,6 +7503,7 @@ public:
             { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
             { "learn", HandleLearnCommand, SEC_PLAYER, Console::No },
             { "professions", HandleProfessionsCommand, SEC_PLAYER, Console::No },
+            { "produce", HandleProduceCommand, SEC_PLAYER, Console::No },
             { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -8042,6 +8043,213 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
+    /// The items each pair's own gathering can supply - node drops and the hides that
+    /// come straight off corpses. A missing reagent inside this set means "go gather";
+    /// anything else is the shop's part, and the module stands in for the shopping trip.
+    static bool IsGatherableReagent(uint16 skill, uint32 item)
+    {
+        switch (skill)
+        {
+            case SKILL_HERBALISM:
+                return item == 765   // Silverleaf
+                    || item == 2447  // Peacebloom
+                    || item == 2449  // Earthroot
+                    || item == 2450  // Briarthorn
+                    || item == 2452  // Swiftthistle
+                    || item == 2453  // Bruiseweed
+                    || item == 785;  // Mageroyal
+            case SKILL_MINING:
+                return item == 2770  // Copper Ore
+                    || item == 2771  // Tin Ore
+                    || item == 2835  // Rough Stone
+                    || item == 2836; // Coarse Stone
+            case SKILL_SKINNING:
+                return item == 2318  // Light Leather
+                    || item == 2319  // Medium Leather
+                    || item == 2934  // Ruined Leather Scraps
+                    || item == 783;  // Light Hide
+            default:
+                return false;
+        }
+    }
+
+    /// What each pair produces at this band, in order: the smelt first for miners -
+    /// bars from their own ore - then the pieces the craft feeds.
+    static std::vector<uint32> ProductsOf(uint16 skill)
+    {
+        switch (skill)
+        {
+            case SKILL_BLACKSMITHING:  return { 2840, 2862 };  // Copper Bar, Rough Sharpening Stone
+            case SKILL_LEATHERWORKING: return { 2304 };         // Light Armor Kit
+            case SKILL_ALCHEMY:        return { 118 };          // Minor Healing Potion
+            default:                   return {};
+        }
+    }
+
+    /// Item name for the report, or "?" when the template is gone.
+    static std::string ItemNameFor(uint32 item)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+        return proto ? std::string(proto->Name1) : std::string("?");
+    }
+
+    /// Craft what the companion's own gathering already paid for. The recipe is found
+    /// among the bot's OWN known spells by what it creates, its reagents are read from
+    /// the spell itself, and only the shop-bought pieces are granted - gathered reagents
+    /// are waited for, never conjured. Products land in bags, get used in play, and any
+    /// overflow rides MailHome. Returns the lines for the chat report.
+    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner)
+    {
+        auto const pair = ClassProfessionPair(bot->getClass());
+        std::vector<std::string> report;
+        std::string made;
+        std::string waiting;
+
+        for (uint32 const product : ProductsOf(pair.second))
+        {
+            // the recipe: a spell the companion knows that creates this item
+            uint32 spellId = 0;
+            for (auto const& entry : bot->GetSpellMap())
+            {
+                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry.first);
+                if (!info)
+                    continue;
+                for (uint8 e = 0; e < 3; ++e)
+                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
+                        uint32(info->Effects[e].MiscValue) == product)
+                        spellId = entry.first;
+            }
+
+            if (!spellId)
+            {
+                waiting += (waiting.empty() ? "" : ", ") + ItemNameFor(product) + " (recipe not learned)";
+                continue;
+            }
+
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+
+            // reagents: grant the shop-bought pieces a small stack; gathered pieces wait
+            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+            {
+                uint32 const item = uint32(info->Reagent[r]);
+                uint32 const need = info->ReagentCount[r];
+                if (!item || !need || bot->GetItemCount(item) >= need)
+                    continue;
+
+                if (IsGatherableReagent(pair.first, item))
+                {
+                    waiting += (waiting.empty() ? "" : ", ") +
+                               ItemNameFor(item) + " " + std::to_string(bot->GetItemCount(item)) + "/" + std::to_string(need);
+                }
+                else
+                {
+                    uint32 const give = std::min<uint32>(5, need * 2);
+                    ItemPosCountVec dest;
+                    if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
+                        if (Item* bought = bot->StoreNewItem(dest, item, true))
+                            bot->SendNewItem(bought, give, true, false, true);
+                }
+            }
+
+            // up to two batches while the reagents hold out, then verify honestly
+            uint32 const before = bot->GetItemCount(product);
+            for (uint8 batch = 0; batch < 2; ++batch)
+            {
+                bool ready = true;
+                for (uint8 r = 0; r < MAX_SPELL_REAGENTS && ready; ++r)
+                {
+                    uint32 const item = uint32(info->Reagent[r]);
+                    uint32 const need = info->ReagentCount[r];
+                    ready = !item || !need || bot->GetItemCount(item) >= need;
+                }
+                if (!ready)
+                    break;
+
+                bot->CastSpell(bot, spellId, true);
+            }
+
+            uint32 const produced = bot->GetItemCount(product) - before;
+            if (produced)
+            {
+                if (!made.empty())
+                    made += ", ";
+                made += std::to_string(produced) + "x " + ItemNameFor(product);
+            }
+        }
+
+        if (!made.empty())
+        {
+            report.push_back("made " + made);
+            SayToOwner(bot, owner, "I made " + made + " - I will use what fits, the rest goes to your mailbox.", 30);
+        }
+        if (!waiting.empty())
+        {
+            report.push_back("waiting on " + waiting);
+            SayToOwner(bot, owner, "I am waiting on " + waiting + " - I will keep gathering.", 30);
+        }
+        if (report.empty())
+        {
+            report.push_back("nothing to produce");
+            SayToOwner(bot, owner, "I have nothing I can craft just now - I keep an eye on what I gather.", 30);
+        }
+
+        return report;
+    }
+
+    /// .companionsync produce [name] - the card's Produce button.
+    ///
+    /// One click makes the companion work its own gathering: smelt its ore, cut its
+    /// stones, brew what its herbs are for. Shop-bought reagents are granted in small
+    /// stacks (the module standing in for the shopping trip); gathered reagents are
+    /// waited for. Products are used in play and the overflow rides MailHome.
+    static bool HandleProduceCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the module is disabled.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        if (want.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: .companionsync produce <name>");
+            return true;
+        }
+
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        uint32 const botGuid = ResolveCompanion(player, want, bound);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.", want);
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not standing in the world.", CompanionNameFor(botGuid));
+            return true;
+        }
+
+#ifdef MOD_PLAYERBOTS
+        for (std::string const& line : ProduceForCompanion(bot, player))
+            handler->PSendSysMessage("|cffc94d{}|r: {}.", bot->GetName(), line);
+#endif
+
+        return true;
+    }
+
     /// .companionsync learn [name] - the window's Train button.
     ///
     /// One click parses every companion: teach what a trainer would at the level the
