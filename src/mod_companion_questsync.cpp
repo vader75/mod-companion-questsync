@@ -2884,8 +2884,13 @@ namespace
     /// resolves, the caller falls back to the zone level.
     static uint32 ZoneNodeRequirement(std::pair<uint16, uint16> const& pair, uint32 zoneId)
     {
-        static std::map<uint32, uint32> cache;
-        auto const cached = cache.find(zoneId);
+        // keyed by zone AND skill line: the requirement is per line (herbs ask one
+        // thing, veins another) - a zone-only key let the first profession's answer
+        // poison every other one, and the skinning path's silent zero struck the
+        // whole zone blind.
+        uint64 const cacheKey = (uint64(zoneId) << 16) | uint64(pair.first);
+        static std::map<uint64, uint32> cache;
+        auto const cached = cache.find(cacheKey);
         if (cached != cache.end())
             return cached->second;
 
@@ -2896,7 +2901,7 @@ namespace
             wantedIndex = 3;
         else
         {
-            cache[zoneId] = 0;
+            cache[cacheKey] = 0;
             return 0;                                     // skinning walks the mob levels
         }
 
@@ -2941,8 +2946,8 @@ namespace
             }
         }
 
-        cache[zoneId] = best;
-        LOG_INFO("server.loading", "[CompanionQuestSync] zone {} node requirement: {}", zoneId, best);
+        cache[cacheKey] = best;
+        LOG_INFO("server.loading", "[CompanionQuestSync] zone {} node requirement ({}): {}", zoneId, uint32(pair.first), best);
         return best;
     }
 
