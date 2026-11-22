@@ -1182,7 +1182,12 @@ namespace
             // "Finished 'X' - that pin can go." is the message that removes a map pin:
             // dropping it as stale was how a handed-in quest left a blue pin behind
             // until the next full pin sync. It is spoken first and never aged out.
-            bool const vital = text.rfind("Finished '", 0) == 0;
+            // The profession catch-up lines ride the same lane: they are the news the
+            // player is watching for, and a queue full of fresh-login invitations
+            // would otherwise silence them for the better part of twenty minutes.
+            bool const vital = text.rfind("Finished '", 0) == 0 ||
+                               text.rfind("I caught my ", 0) == 0 ||
+                               text.rfind("I took up ", 0) == 0;
 
             if (!dup && (vital || queue.size() < 4))
             {
