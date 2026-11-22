@@ -178,7 +178,12 @@ Everything in this section is autonomous or one click; nothing needs a command t
   makes - and a repairer's hammer mends what the day's work dented, paying the
   usual price. At most once every five minutes per companion, one quiet line either
   way ("I restocked 5x Empty Vial and had my gear repaired.").
-- **Produce** (card button, `.companionsync produce <name>`) - the companion crafts what
+- **Crafting is a habit** (`AutoProduce`, default on) - every three minutes per
+  companion, outside combat, it crafts what its own gathering already paid for,
+  silently: products land in bags, the AI uses them in play, overflow rides MailHome.
+  The shop bits it cannot gather are restocked at vendors, so the habit runs itself.
+- **Produce** (card button, `.companionsync produce <name>`) - the same craft on
+  demand, with the report: what it made, what it is waiting on, and why.
   its own gathering already paid for: the miner smelts its ore into bars and cuts
   sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker
   kits its hides. The recipe is found among the companion's own known spells by what it
@@ -304,6 +309,7 @@ each one. The defaults that matter most:
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
 | `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
 | `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
+| `AutoProduce` | 1 | craft what its gathering paid for every three minutes per companion, outside combat, silently; the Produce button gives the report on demand |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |

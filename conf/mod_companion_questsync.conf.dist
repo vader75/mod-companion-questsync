@@ -274,6 +274,12 @@ CompanionQuestSync.GatherCatchUp = 1
 #    hammer mends its gear at the usual price. At most once every five minutes per
 #    companion, announced with one quiet line. 0 = never restock.
 CompanionQuestSync.VendorRestock = 1
+
+#    Crafting runs on its own every three minutes per companion, outside combat:
+#    it turns what its gathering paid for into its products, silently - bags,
+#    use in play, overflow to your mailbox. The Produce button still gives the
+#    report on demand. 0 = craft only when asked.
+CompanionQuestSync.AutoProduce = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
 CompanionQuestSync.ItemKeepQuality = 2
