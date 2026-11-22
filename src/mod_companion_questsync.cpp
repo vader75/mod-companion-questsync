@@ -385,9 +385,7 @@ namespace
     struct PendingTrade
     {
         uint32 ownerGuid = 0;
-        std::vector<Item*> items;
         uint32 at = 0;
-        bool announce = true;
     };
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
@@ -1011,25 +1009,14 @@ namespace
                 continue;
             }
 
-            uint32 offered = 0;
-            for (uint8 slot = 0; slot < pending.items.size() && slot < 6; ++slot)
-                if (pending.items[slot] && pending.items[slot]->IsInWorld())
-                {
-                    bot->GetTradeData()->SetItem(TradeSlots(slot), pending.items[slot]);
-                    ++offered;
-                }
+            // the hand-over is a gift between companions, not commerce: re-send the
+            // contents now that the window is up, then accept the bot's side up front -
+            // playerbots' trade merchant never prices the window or asks for coin, and
+            // the transfer completes the moment the owner accepts
+            bot->GetSession()->SendUpdateTrade(true);
+            bot->GetTradeData()->SetAccepted(true);
 
-            // the hand-over is a gift between companions, not commerce: the bot's side is
-            // accepted up front, so playerbots' trade merchant never prices the window or
-            // asks for coin - the transfer completes the moment the owner accepts
-            if (offered)
-                bot->GetTradeData()->SetAccepted(true);
-
-            if (offered && pending.announce)
-                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                           " stack(s) in the trade - take them, they are yours.", 30);
-            itr = g_pendingTrade.erase(itr);
-        }
+            itr = g_pendingTrade.erase(itr);        }
     }
 
     /// Bring companions along when the owner teleports.
@@ -3248,17 +3235,31 @@ namespace
             return 0;
         }
 
-        // the items wait: SetItem before the owner's client has opened the window sends
-        // the contents into the void, which is how an opened trade looked empty
+        uint32 offered = 0;
+        for (uint8 slot = 0; slot < offers.size() && slot < 6; ++slot)
+        {
+            td->SetItem(TradeSlots(slot), offers[slot].first);
+            ++offered;
+        }
+
+        if (!offered)
+        {
+            if (announce)
+                SayToOwner(bot, owner, "Nothing would go in the trade - try again in a moment.", 30);
+            return 0;
+        }
+
+        // the client's window takes one bot tick to come up; what was SetItem'd before
+        // that round-trip is lost to the display, so the contents are re-sent - and the
+        // gift-accept applied - on the two-second tick, when the window can see them
         PendingTrade& pending = g_pendingTrade[bot->GetGUID().GetCounter()];
         pending.ownerGuid = owner->GetGUID().GetCounter();
         pending.at = uint32(time(nullptr));
-        pending.announce = announce;
-        pending.items.clear();
-        for (auto const& [item, spare] : offers)
-            pending.items.push_back(item);
 
-        return uint32(offers.size());
+        if (announce)
+            SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                       " stack(s) in the trade - take them, they are yours.", 30);
+        return offered;
     }
 
 
