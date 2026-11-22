@@ -139,12 +139,12 @@ Everything in this section is autonomous or one click; nothing needs a command t
   The gathering ceiling follows the level in the classic tiers - 75 at level 1,
   150 (Journeyman) at 10, 225 (Expert) at 20, 300 (Artisan) at 35 - raised automatically
   on every level raise and by the **Professions** button; gathered progress is never reset.
-  The gathering tools a pair needs (Mining Pick, Skinning Knife) are handed out with it,
-  and the **craft recipes the ceiling unlocks come with the craft**: every create-item
-  spell on the pair's lines whose required rank sits at or under the current cap is
-  learned on every profession teach and every level raise, resolved from the
-  SkillLineAbility DBC - so Produce finds its recipes the way it always promised,
-  instead of reporting them "not learned".
+  The gathering tools a pair needs (Mining Pick, Skinning Knife) are handed out with it.
+  The module teaches its supported recipes at their trainer's minimum **attained skill**,
+  not at the character's skill ceiling. Already-known recipes are not removed.
+  Produce is a utility list, not a complete profession-leveling route. If a
+  supported recipe goes gray before the next one unlocks, the companion needs
+  other recipes for skill-ups or a higher gathering-zone catch-up minimum.
   The playerbots **gather strategy** is armed on every teach: on a timer the companion
   adds only nodes its own skill can work, so it stops at what it can actually use while
   it follows you, and questing carries on normally - the trigger is deliberately
@@ -179,19 +179,16 @@ Everything in this section is autonomous or one click; nothing needs a command t
   usual price. At most once every five minutes per companion, one quiet line either
   way ("I restocked 5x Empty Vial and had my gear repaired.").
 - **Crafting is a habit** (`AutoProduce`, default on) - every three minutes per
-  companion, outside combat, it crafts what its own gathering already paid for,
-  silently: products land in bags, the AI uses them in play, overflow rides MailHome.
-  The shop bits it cannot gather are restocked at vendors, so the habit runs itself.
+  companion, outside combat and while the companion is not trading. Mining and
+  Blacksmithing smelt bars and make sharpening stones; Leatherworking makes armor
+  kits; Alchemy brews healing potions. For each type, the companion picks the best
+  known recipe it has the skill and raw materials for, falling back to a lower one
+  if needed. Reagents are consumed. Only a small stock of explicit vendor supplies
+  such as vials and thread is topped up; raw materials are never granted. Results
+  land in bags without a crafting whisper.
 - **Produce** (card button, `.companionsync produce <name>`) - the same craft on
-  demand, with the report: what it made, what it is waiting on, and why.
-  its own gathering already paid for: the miner smelts its ore into bars and cuts
-  sharpening stones, the alchemist brews its herbs into healing potions, the leatherworker
-  kits its hides. The recipe is found among the companion's own known spells by what it
-  creates, and its reagents are read from the spell itself - nothing hardcoded twice. Only
-  shop-bought pieces (vials and the like) are granted, a small stack standing in for the
-  shopping trip; gathered reagents are waited for, never conjured
-  (*"I am waiting on Bruiseweed 1/1 - I will keep gathering"*). Products land in bags,
-  the AI uses them in play, and the overflow rides MailHome.
+  demand, with one chat report: what was made or what to do next. Finish any open
+  trade and get out of combat before asking.
 - **Trade is a habit too** (`AutoTrade`, default on) - beside you with something spare,
   the companion opens the trade itself every three minutes, the keep-five reserve
   respected; you accept. Mail stays the fallback for what cannot wait for a moment

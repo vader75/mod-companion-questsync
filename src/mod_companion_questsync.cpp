@@ -2976,34 +2976,63 @@ namespace
         return 75;
     }
 
-    /// The craft recipes a trainer would sell at this level's ceiling: every spell on
-    /// the profession's line whose first effect is CREATE_ITEM and whose required
-    /// rank sits at or under the cap is learned. Produce resolves its recipes from
-    /// the spellbook by what they create - this feeds that spellbook, so the pair's
-    /// production half can actually craft what the gathering half pays for. Rides
-    /// every profession teach and every level raise, so the recipe set grows with
-    /// the ceiling instead of trailing behind it.
-    static void TeachCraftRecipes(Player* bot, uint16 skill, uint32 cap)
+    struct CraftRecipe
     {
-        uint32 candidates = 0, learned = 0;
-        auto const& abilities = GetSkillLineAbilitiesBySkillLine(skill);
-        for (SkillLineAbilityEntry const* entry : abilities)
+        uint32 spell;
+        uint32 product;
+        uint16 requiredSkill;
+    };
+
+    struct CraftLane
+    {
+        uint16 skill;
+        std::vector<CraftRecipe> recipes;
+    };
+
+    // Trainer skill floors, not SkillLineAbility.MinSkillLineRank: several advanced
+    // WotLK recipes have a DBC floor of 1. Keep each lane ordered best to starter.
+    static std::vector<CraftLane> const& CraftLanes(uint16 profession)
+    {
+        static std::vector<CraftLane> const smith = {
+            { SKILL_MINING, { { 16153, 12359, 230 }, { 10097, 3860, 175 }, { 3307, 3575, 125 },
+                              { 3304, 3576, 65 }, { 2657, 2840, 1 } } },
+            { SKILL_BLACKSMITHING, { { 16641, 12404, 250 }, { 9918, 7964, 200 }, { 2674, 2871, 125 },
+                                     { 2665, 2863, 65 }, { 2660, 2862, 1 } } },
+        };
+        static std::vector<CraftLane> const leather = {
+            { SKILL_LEATHERWORKING, { { 19058, 15564, 250 }, { 10487, 8173, 200 }, { 3780, 4265, 150 },
+                                      { 2165, 2313, 100 }, { 2152, 2304, 1 } } },
+        };
+        static std::vector<CraftLane> const alchemy = {
+            { SKILL_ALCHEMY, { { 17556, 13446, 275 }, { 11457, 3928, 215 }, { 7181, 1710, 155 },
+                               { 3447, 929, 110 }, { 2337, 858, 55 }, { 2330, 118, 1 } } },
+        };
+        static std::vector<CraftLane> const none;
+        switch (profession)
         {
-            if (entry->MinSkillLineRank > cap)
-                continue;
-            SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
-            if (!info || info->Effects[0].Effect != SPELL_EFFECT_CREATE_ITEM)
-                continue;
-            ++candidates;
-            if (!bot->HasSpell(entry->Spell))
+            case SKILL_BLACKSMITHING: return smith;
+            case SKILL_LEATHERWORKING: return leather;
+            case SKILL_ALCHEMY: return alchemy;
+            default: return none;
+        }
+    }
+
+    static void TeachCraftRecipes(Player* bot, uint16 profession)
+    {
+        for (CraftLane const& lane : CraftLanes(profession))
+        {
+            uint16 const attained = bot->GetPureSkillValue(lane.skill);
+            for (CraftRecipe const& recipe : lane.recipes)
             {
-                bot->learnSpell(entry->Spell);
-                ++learned;
+                if (attained < recipe.requiredSkill || bot->HasSpell(recipe.spell) || !sSpellMgr->GetSpellInfo(recipe.spell))
+                    continue;
+
+                bot->learnSpell(recipe.spell);
+                if (g_cfg.debug >= 2 && bot->HasSpell(recipe.spell))
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} learned craft spell {} at skill {}:{}",
+                             bot->GetName(), recipe.spell, uint32(lane.skill), attained);
             }
         }
-        if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] recipes: line={} abilities={} candidates={} learned={}",
-                     uint32(skill), abilities.size(), candidates, learned);
     }
 
     /// Teach both professions (or re-cap what a level raise un-capped), hand the tools
@@ -3044,10 +3073,8 @@ namespace
             // raise the ceiling only; gathered progress is never reset
             uint16 const cur = bot->GetSkillValue(skill);
             bot->SetSkill(skill, 0, std::min<uint16>(cur, uint16(cap)), uint16(cap));
-
-            // and the recipes the ceiling unlocks - the craft is taught with the craft
-            TeachCraftRecipes(bot, skill, cap);
         }
+        TeachCraftRecipes(bot, pair.second);
 
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             ai->ChangeStrategy("+gather", BOT_STATE_NON_COMBAT);
@@ -3073,9 +3100,8 @@ namespace
         return tookUp;
     }
 
-    /// The gathered mats a pair supplies - node drops and the hides that come straight
-    /// off corpses. A missing produce reagent inside this set means "go gather";
-    /// anything else is the shop's part, and the module stands in for the shopping trip.
+    /// Gathered materials eligible for surplus trade. Crafting checks its actual
+    /// spell reagents separately; this is not a list of what can be bought.
     static std::vector<uint32> GatheredReagentsOf(uint16 skill)
     {
         switch (skill)
@@ -3087,24 +3113,18 @@ namespace
         }
     }
 
-    static bool IsGatherableReagent(uint16 skill, uint32 item)
+    static bool IsCraftVendorReagent(uint32 item)
     {
-        for (uint32 const gathered : GatheredReagentsOf(skill))
-            if (gathered == item)
-                return true;
-        return false;
-    }
-
-    /// What each pair produces at this band, in order: the smelt first for miners -
-    /// bars from their own ore - then the pieces the craft feeds.
-    static std::vector<uint32> ProductsOf(uint16 skill)
-    {
-        switch (skill)
+        // Vials, threads and the existing vendor stock. Never infer that an
+        // unlisted herb, hide, ore or intermediate is vendor stock.
+        switch (item)
         {
-            case SKILL_BLACKSMITHING:  return { 2840, 2862 };  // Copper Bar, Rough Sharpening Stone
-            case SKILL_LEATHERWORKING: return { 2304 };         // Light Armor Kit
-            case SKILL_ALCHEMY:        return { 118 };          // Minor Healing Potion
-            default:                   return {};
+            case 3371: case 3372: case 8925: // vials
+            case 2320: case 2321: case 4291: // thread
+            case 2604: case 3857: case 2605:
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -3115,109 +3135,167 @@ namespace
         return proto ? std::string(proto->Name1) : std::string("?");
     }
 
-    /// Craft what the companion's own gathering already paid for. The recipe is found
-    /// among the bot's OWN known spells by what it creates, its reagents are read from
-    /// the spell itself, and only the shop-bought pieces are granted - gathered reagents
-    /// are waited for, never conjured. Products land in bags, get used in play, and any
-    /// overflow rides MailHome. Returns the lines for the chat report.
-    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner, bool announce = true)
+    struct CraftPlan
     {
-        auto const pair = ClassProfessionPair(bot->getClass());
-        std::vector<std::string> report;
-        std::string made;
-        std::string waiting;
+        CraftRecipe const* recipe;
+        SpellInfo const* spell;
+    };
 
-        for (uint32 const product : ProductsOf(pair.second))
+    // Triggered casts skip the core's CREATE_ITEM space check. Do it before the
+    // spell consumes any reagents, even when the previous batch fitted.
+    static bool CanStoreCraftOutput(Player* bot, CraftPlan const& plan)
+    {
+        ItemTemplate const* item = sObjectMgr->GetItemTemplate(plan.recipe->product);
+        if (!item)
+            return false;
+        for (auto const& effect : plan.spell->Effects)
         {
-            // the recipe: a spell the companion knows that creates this item
-            uint32 spellId = 0;
-            for (auto const& entry : bot->GetSpellMap())
-            {
-                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry.first);
-                if (!info)
-                    continue;
-                for (uint8 e = 0; e < 3; ++e)
-                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
-                        uint32(info->Effects[e].ItemType) == product)
-                        spellId = entry.first;
-            }
+            if (effect.Effect != SPELL_EFFECT_CREATE_ITEM || uint32(effect.ItemType) != plan.recipe->product)
+                continue;
+            uint32 const count = std::clamp<uint32>(effect.CalcValue(), 1u, item->GetMaxStackSize());
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, plan.recipe->product, count) != EQUIP_ERR_OK)
+                return false;
+            return true;
+        }
+        return false;
+    }
 
-            if (!spellId)
+    // Prefer the best eligible recipe with raw materials and bag room. If none
+    // can run, keep the best eligible recipe so a manual request explains why.
+    static std::vector<CraftPlan> PlanCrafts(Player* bot, uint16 profession)
+    {
+        std::vector<CraftPlan> plans;
+        for (CraftLane const& lane : CraftLanes(profession))
+        {
+            uint16 const attained = bot->GetPureSkillValue(lane.skill);
+            CraftPlan chosen = { nullptr, nullptr };
+            for (CraftRecipe const& recipe : lane.recipes)
             {
-                waiting += (waiting.empty() ? "" : ", ") + ItemNameFor(product) + " (recipe not learned)";
+                if (attained < recipe.requiredSkill || !bot->HasSpell(recipe.spell))
+                    continue;
+                SpellInfo const* spell = sSpellMgr->GetSpellInfo(recipe.spell);
+                if (!spell)
+                    continue;
+                CraftPlan const candidate = { &recipe, spell };
+                if (!chosen.recipe)
+                    chosen = candidate;
+
+                bool ready = CanStoreCraftOutput(bot, candidate);
+                for (uint8 r = 0; r < MAX_SPELL_REAGENTS && ready; ++r)
+                {
+                    uint32 const item = uint32(spell->Reagent[r]);
+                    uint32 const need = spell->ReagentCount[r];
+                    if (!item || !need)
+                        continue;
+                    uint32 const have = bot->GetItemCount(item);
+                    if (have >= need)
+                        continue;
+                    ItemPosCountVec dest;
+                    ready = IsCraftVendorReagent(item) &&
+                        bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, need - have) == EQUIP_ERR_OK;
+                }
+                if (ready)
+                {
+                    chosen = candidate;
+                    break;
+                }
+            }
+            if (chosen.recipe)
+                plans.push_back(chosen);
+        }
+        return plans;
+    }
+
+    static std::vector<std::string> ProduceForCompanion(Player* bot)
+    {
+        std::vector<std::string> report;
+        uint16 const profession = ClassProfessionPair(bot->getClass()).second;
+        for (CraftPlan const& plan : PlanCrafts(bot, profession))
+        {
+            uint32 const product = plan.recipe->product;
+            std::string missing;
+            auto noteMissing = [&](uint32 item, uint32 have, uint32 need)
+            {
+                if (!missing.empty())
+                    missing += ", ";
+                missing += ItemNameFor(item) + " " + std::to_string(have) + "/" + std::to_string(need);
+            };
+            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+            {
+                uint32 const item = uint32(plan.spell->Reagent[r]);
+                uint32 const need = plan.spell->ReagentCount[r];
+                if (!item || !need || IsCraftVendorReagent(item))
+                    continue;
+                uint32 const have = bot->GetItemCount(item);
+                if (have < need)
+                    noteMissing(item, have, need);
+            }
+            if (!missing.empty())
+            {
+                report.push_back("I need " + missing + " for " + ItemNameFor(product));
                 continue;
             }
 
-            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
-
-            // reagents: grant the shop-bought pieces a small stack; gathered pieces wait
-            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+            if (!CanStoreCraftOutput(bot, plan))
             {
-                uint32 const item = uint32(info->Reagent[r]);
-                uint32 const need = info->ReagentCount[r];
-                if (!item || !need || bot->GetItemCount(item) >= need)
-                    continue;
-
-                if (IsGatherableReagent(pair.first, item))
-                {
-                    waiting += (waiting.empty() ? "" : ", ") +
-                               ItemNameFor(item) + " " + std::to_string(bot->GetItemCount(item)) + "/" + std::to_string(need);
-                }
-                else
-                {
-                    uint32 const give = std::min<uint32>(5, need * 2);
-                    ItemPosCountVec dest;
-                    if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
-                        if (Item* bought = bot->StoreNewItem(dest, item, true))
-                            bot->SendNewItem(bought, give, true, false, true);
-                }
+                report.push_back("I need bag room for " + ItemNameFor(product));
+                continue;
             }
 
-            // up to two batches while the reagents hold out, then verify honestly
+            // Only the explicit shop supplies may be topped up. The core then
+            // consumes the reagents even though the craft runs immediately.
+            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
+            {
+                uint32 const item = uint32(plan.spell->Reagent[r]);
+                uint32 const need = plan.spell->ReagentCount[r];
+                if (!IsCraftVendorReagent(item))
+                    continue;
+                uint32 const have = bot->GetItemCount(item);
+                if (!need || have >= need)
+                    continue;
+                uint32 const give = need - have;
+                ItemPosCountVec dest;
+                if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
+                    if (Item* bought = bot->StoreNewItem(dest, item, true))
+                        bot->SendNewItem(bought, give, true, false, true);
+                if (bot->GetItemCount(item) < need)
+                    noteMissing(item, bot->GetItemCount(item), need);
+            }
+            if (!missing.empty())
+            {
+                report.push_back("I need bag room for " + missing + " before I can make " + ItemNameFor(product));
+                continue;
+            }
+
             uint32 const before = bot->GetItemCount(product);
             for (uint8 batch = 0; batch < 2; ++batch)
             {
                 bool ready = true;
                 for (uint8 r = 0; r < MAX_SPELL_REAGENTS && ready; ++r)
                 {
-                    uint32 const item = uint32(info->Reagent[r]);
-                    uint32 const need = info->ReagentCount[r];
+                    uint32 const item = uint32(plan.spell->Reagent[r]);
+                    uint32 const need = plan.spell->ReagentCount[r];
                     ready = !item || !need || bot->GetItemCount(item) >= need;
                 }
-                if (!ready)
+                if (!ready || !CanStoreCraftOutput(bot, plan))
                     break;
 
-                bot->CastSpell(bot, spellId, true);
+                uint32 const prior = bot->GetItemCount(product);
+                bot->CastSpell(bot, plan.recipe->spell,
+                    TriggerCastFlags(TRIGGERED_FULL_MASK & ~TRIGGERED_IGNORE_POWER_AND_REAGENT_COST));
+                if (bot->GetItemCount(product) <= prior)
+                    break;
             }
 
-            uint32 const produced = bot->GetItemCount(product) - before;
-            if (produced)
-            {
-                if (!made.empty())
-                    made += ", ";
-                made += std::to_string(produced) + "x " + ItemNameFor(product);
-            }
-        }
-
-        if (!made.empty())
-        {
-            report.push_back("made " + made);
-            if (announce)
-                SayToOwner(bot, owner, "I made " + made + " - I will use what fits, the rest goes to your mailbox.", 30);
-        }
-        if (!waiting.empty())
-        {
-            report.push_back("waiting on " + waiting);
-            if (announce)
-                SayToOwner(bot, owner, "I am waiting on " + waiting + " - I will keep gathering.", 30);
+            uint32 const after = bot->GetItemCount(product);
+            if (after > before)
+                report.push_back("I made " + std::to_string(after - before) + "x " + ItemNameFor(product));
+            else
+                report.push_back("I couldn't make " + ItemNameFor(product) + " just now; check my bag space and crafting station");
         }
         if (report.empty())
-        {
-            report.push_back("nothing to produce");
-            if (announce)
-                SayToOwner(bot, owner, "I have nothing I can craft just now - I keep an eye on what I gather.", 30);
-        }
-
+            report.push_back("I don't know a recipe I can make yet; check my profession skill");
         return report;
     }
 
@@ -3247,8 +3325,9 @@ namespace
         // five of every produced item and gathered mat stays in its own bags - the
         // reserve is consumed across every stack of the same item, not per stack
         std::map<uint32, uint32> keepLeft;
-        for (uint32 const product : ProductsOf(pair.second))
-            keepLeft[product] = 5;
+        for (CraftLane const& lane : CraftLanes(pair.second))
+            for (CraftRecipe const& recipe : lane.recipes)
+                keepLeft[recipe.product] = 5;
         for (uint32 const id : GatheredReagentsOf(pair.first))
             keepLeft[id] = 5;
 
@@ -3360,7 +3439,7 @@ namespace
     /// once every five minutes per companion, so standing at the vendor is quiet.
     void RestockNearVendor(Player* owner, Player* bot)
     {
-        if (!g_cfg.vendorRestock || !bot->IsInWorld() || !bot->IsAlive())
+        if (!g_cfg.vendorRestock || !bot->IsInWorld() || !bot->IsAlive() || bot->GetTradeData())
             return;
 
         Creature* vendor = VendorNearby(bot, 40.0f);
@@ -3373,43 +3452,19 @@ namespace
         if (last && now - last < 300)
             return;
 
-        auto const pair = ClassProfessionPair(bot->getClass());
+        uint16 const profession = ClassProfessionPair(bot->getClass()).second;
         std::set<uint32> reagents;
-        // the BASE products' reagents only - the shop's part of what the companion
-        // actually crafts. The whole recipe book was the mistake: a spellbook of 253
-        // alchemy crafts turned the restock into a free Dragon Scale dispenser.
-        for (uint32 const product : ProductsOf(pair.second))
-        {
-            for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(pair.second))
+        for (CraftPlan const& plan : PlanCrafts(bot, profession))
+            for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
             {
-                SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
-                if (!info || !bot->HasSpell(entry->Spell))
-                    continue;
-                bool makes = false;
-                for (uint8 e = 0; e < 3; ++e)
-                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
-                        uint32(info->Effects[e].ItemType) == product)
-                        makes = true;
-                if (!makes)
-                    continue;
-                for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
-                {
-                    uint32 const item = uint32(info->Reagent[r]);
-                    if (item && !IsGatherableReagent(pair.first, item))
-                        reagents.insert(item);
-                }
+                uint32 const item = uint32(plan.spell->Reagent[r]);
+                if (IsCraftVendorReagent(item))
+                    reagents.insert(item);
             }
-        }
 
         std::string topped;
         for (uint32 const item : reagents)
         {
-            static const uint32 kShopCarried[] = { 3371, 8925, 2320, 2604, 3857, 2605 };
-            bool carried = false;
-            for (uint32 const shopItem : kShopCarried)
-                if (shopItem == item) { carried = true; break; }
-            if (!carried)
-                continue;
             uint32 const want = 5;
             uint32 const have = bot->GetItemCount(item);
             if (have >= want)
@@ -5566,27 +5621,21 @@ namespace
         // rides the same slot - what the land asks does not wait for a dirty pass either.
         EnsureProfessionTools(bot);
         CatchUpGatherSkill(owner, bot);
-        // the recipes the current ceiling unlocks, self-healing: a body whose teach
-        // predated the recipe pass, or whose skill rose without a raise, catches up
-        // here rather than waiting for a button - Produce reads its spellbook
-        uint16 const recipeSkills[2] = { ClassProfessionPair(bot->getClass()).first,
-                                         ClassProfessionPair(bot->getClass()).second };
-        uint32 const recipeCap = ProfessionCap(bot->GetLevel());
-        TeachCraftRecipes(bot, recipeSkills[0], recipeCap);
-        TeachCraftRecipes(bot, recipeSkills[1], recipeCap);
+        // Learn new supported recipes when attained skill rises, without a button.
+        TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);
         RestockNearVendor(owner, bot);   // near a trade or repair NPC: restock, mend, quietly
         // crafting is the companion's own habit, not a request: every few minutes it
         // turns what its gathering paid for into the useful thing, silently - the
         // products land in bags, get used in play, and the overflow rides MailHome.
         // The Produce button stays for the moment the report itself is wanted.
-        if (g_cfg.autoProduce && !inCombat && !bot->GetTradeData())   // a craft could merge
-        {                                                             // a stack in the trade
+        if (g_cfg.autoProduce && !bot->IsInCombat() && !owner->IsInCombat() && !bot->GetTradeData())
+        {
             uint32& lastAuto = g_lastAutoProduce[botGuid];
             uint32 const now = uint32(time(nullptr));
             if (!lastAuto || now - lastAuto >= 180)
             {
                 lastAuto = now;
-                ProduceForCompanion(bot, owner, /*announce=*/false);
+                ProduceForCompanion(bot);
             }
         }
         // and the hand-over happens on its own too: beside you with something spare,
@@ -9022,15 +9071,24 @@ public:
             return true;
         }
 
-        if (bot->IsInCombat())
+        if (bot->IsInCombat() || player->IsInCombat())
         {
-            SayToOwner(bot, player, "I am in the middle of something - ask me when it is calm.", 30);
+            handler->PSendSysMessage("|cffc94d{}|r: Ask me to craft once we're out of combat.", bot->GetName());
+            return true;
+        }
+        if (bot->GetTradeData() || player->GetTradeData())
+        {
+            handler->PSendSysMessage("|cffc94d{}|r: Finish the trade first, then ask me to craft.", bot->GetName());
             return true;
         }
 
 #ifdef MOD_PLAYERBOTS
-        for (std::string const& line : ProduceForCompanion(bot, player))
-            handler->PSendSysMessage("|cffc94d{}|r: {}.", bot->GetName(), line);
+        TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);
+        auto const report = ProduceForCompanion(bot);
+        std::string summary;
+        for (std::string const& line : report)
+            summary += (summary.empty() ? "" : ". ") + line;
+        handler->PSendSysMessage("|cffc94d{}|r: {}.", bot->GetName(), summary);
 #endif
 
         return true;
