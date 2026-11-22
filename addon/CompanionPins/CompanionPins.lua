@@ -534,9 +534,15 @@ function CompanionPins:Redraw()
         shown = shown + 1
     end
 
+    -- Hidden pins never create their frame, so the table can carry holes and the
+    -- length operator reports a border across one: indexing that border was the
+    -- "attempt to index field '?' (a nil value)" a zone switch could throw mid-draw.
     for i = #self.pins + 1, #self.frames do
-        self.frames[i]:Hide()
-        self.frames[i].pin = nil
+        local f = self.frames[i]
+        if f then
+            f:Hide()
+            f.pin = nil
+        end
     end
 
     local lg = BuildLegend()
