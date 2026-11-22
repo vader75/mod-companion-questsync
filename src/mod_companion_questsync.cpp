@@ -373,6 +373,7 @@ namespace
     std::set<uint32> g_deadNoticeAt;                      // bots whose death was announced, one per death
     std::map<uint32, uint32> g_lastGatherZone;            // bot guid -> last zone the gather catch-up ran for
     std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
+    std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -1170,7 +1171,15 @@ namespace
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
 
-        if (last && now - last < minGap)
+        // A command the player just issued is a conversation, not a broadcast: its
+        // answers speak at once, whatever the ambient gap is. Without this a button
+        // press felt dead - the verdicts joined the back of a queue that drains one
+        // line per window, and the player had already clicked again by the time the
+        // first one arrived.
+        auto burst = g_commandBurst.find(ownerGuid);
+        bool const inBurst = burst != g_commandBurst.end() && now - burst->second < 20;
+
+        if (!inBurst && last && now - last < minGap)
         {
             // Hold it, do not lose it. The one-shot "help me finish this quest"
             // request used to be dropped here when the window was busy, so a player
@@ -2472,7 +2481,9 @@ namespace
 
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
-        if (last && now - last < Timing::WhisperGap)
+        auto burst = g_commandBurst.find(ownerGuid);
+        bool const inBurst = burst != g_commandBurst.end() && now - burst->second < 20;
+        if (last && now - last < (inBurst ? 2 : Timing::WhisperGap))
             return;
 
         // Drop what no longer applies before speaking. The queue exists to survive
@@ -2580,6 +2591,12 @@ namespace
         g_lastWhisperByBot[chosen->botGuid] = now;
         speaker->Whisper(spoken, LANG_UNIVERSAL, owner);
         queue.erase(chosen);
+
+        // In a burst the player is mid-conversation: keep speaking while the short
+        // gap allows, so a press's handful of verdicts all arrive together instead
+        // of trickling across the next five windows.
+        if (inBurst && !queue.empty())
+            FlushWhisperQueue(owner, nullptr);
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered (queued): {}", speaker->GetName(), spoken);
@@ -2941,6 +2958,19 @@ namespace
         return false;
     }
 
+    /// What each pair produces at this band, in order: the smelt first for miners -
+    /// bars from their own ore - then the pieces the craft feeds.
+    static std::vector<uint32> ProductsOf(uint16 skill)
+    {
+        switch (skill)
+        {
+            case SKILL_BLACKSMITHING:  return { 2840, 2862 };  // Copper Bar, Rough Sharpening Stone
+            case SKILL_LEATHERWORKING: return { 2304 };         // Light Armor Kit
+            case SKILL_ALCHEMY:        return { 118 };          // Minor Healing Potion
+            default:                   return {};
+        }
+    }
+
     /// Item name for the report, or "?" when the template is gone.
     static std::string ItemNameFor(uint32 item)
     {
@@ -2988,16 +3018,22 @@ namespace
 
         auto const pair = ClassProfessionPair(bot->getClass());
         std::set<uint32> reagents;
-        uint16 const restockSkills[2] = { pair.first, pair.second };
-        for (uint16 const skill : restockSkills)
+        // the BASE products' reagents only - the shop's part of what the companion
+        // actually crafts. The whole recipe book was the mistake: a spellbook of 253
+        // alchemy crafts turned the restock into a free Dragon Scale dispenser.
+        for (uint32 const product : ProductsOf(pair.second))
         {
-            // what its own known recipes ask: the same spells Produce crafts from
-            for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(skill))
+            for (SkillLineAbilityEntry const* entry : GetSkillLineAbilitiesBySkillLine(pair.second))
             {
                 SpellInfo const* info = sSpellMgr->GetSpellInfo(entry->Spell);
                 if (!info || !bot->HasSpell(entry->Spell))
                     continue;
-                if (info->Effects[0].Effect != SPELL_EFFECT_CREATE_ITEM)
+                bool makes = false;
+                for (uint8 e = 0; e < 3; ++e)
+                    if (info->Effects[e].Effect == SPELL_EFFECT_CREATE_ITEM &&
+                        uint32(info->Effects[e].ItemType) == product)
+                        makes = true;
+                if (!makes)
                     continue;
                 for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
                 {
@@ -3011,6 +3047,12 @@ namespace
         std::string topped;
         for (uint32 const item : reagents)
         {
+            static const uint32 kShopCarried[] = { 3371, 8925, 2320, 2604, 3857, 2605 };
+            bool carried = false;
+            for (uint32 const shopItem : kShopCarried)
+                if (shopItem == item) { carried = true; break; }
+            if (!carried)
+                continue;
             uint32 const want = 5;
             uint32 const have = bot->GetItemCount(item);
             if (have >= want)
@@ -8441,19 +8483,6 @@ public:
     /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
     /// follow, so it rejoins on its own. Either way one click, and the companion says
     /// what it is doing.
-    /// What each pair produces at this band, in order: the smelt first for miners -
-    /// bars from their own ore - then the pieces the craft feeds.
-    static std::vector<uint32> ProductsOf(uint16 skill)
-    {
-        switch (skill)
-        {
-            case SKILL_BLACKSMITHING:  return { 2840, 2862 };  // Copper Bar, Rough Sharpening Stone
-            case SKILL_LEATHERWORKING: return { 2304 };         // Light Armor Kit
-            case SKILL_ALCHEMY:        return { 118 };          // Minor Healing Potion
-            default:                   return {};
-        }
-    }
-
     /// Craft what the companion's own gathering already paid for. The recipe is found
     /// among the bot's OWN known spells by what it creates, its reagents are read from
     /// the spell itself, and only the shop-bought pieces are granted - gathered reagents
@@ -9559,7 +9588,7 @@ public:
     CompanionQuestSyncPlayerScript() : PlayerScript("CompanionQuestSyncPlayerScript",
         { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
           PLAYERHOOK_ON_QUEST_ABANDON, PLAYERHOOK_ON_BEFORE_TELEPORT,
-          PLAYERHOOK_ON_LEVEL_CHANGED }) { }
+          PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE }) { }
 
     /// A hearthstone, a portal or a summon is about to move the player: note it, and let the
     /// fast tick bring the companion along once the destination has finished loading.
@@ -9622,6 +9651,18 @@ public:
 
         TeachTrainerContent(player, owner);   // spells, talents - as they unlock
         TeachProfessions(player, owner);      // ceiling, tools, recipes
+    }
+
+    /// Any .companionsync command opens a short conversation window: the answers a
+    /// command generates speak at once instead of joining the ambient rate limit's
+    /// queue. The hook sees every chat line including dot-commands, so one place
+    /// marks the burst for all of the module's verbs.
+    void OnPlayerBeforeSendChatMessage(Player* player, uint32& /*type*/, uint32& /*lang*/, std::string& msg) override
+    {
+        if (!player || !player->GetSession() || player->GetSession()->IsBot())
+            return;
+        if (msg.rfind(".companionsync", 0) == 0 || msg.rfind(".companionadmin", 0) == 0)
+            g_commandBurst[player->GetGUID().GetCounter()] = uint32(time(nullptr));
     }
 
     void OnPlayerLogin(Player* player) override
