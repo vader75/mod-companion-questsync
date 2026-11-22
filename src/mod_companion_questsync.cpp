@@ -2851,11 +2851,50 @@ namespace
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             ai->ChangeStrategy("+gather", BOT_STATE_NON_COMBAT);
 
+        // A body taught before the pairs existed can carry a stale gathered skill outside
+        // its own pair - a shaman-smith picking herbs. With a negligible value it is
+        // unlearned rather than left as a third profession the body should not have.
+        for (uint16 const other : { uint16(SKILL_HERBALISM), uint16(SKILL_MINING), uint16(SKILL_SKINNING) })
+        {
+            if (other == pair.first || other == pair.second)
+                continue;
+            if (bot->GetSkillValue(other) > 5)
+                continue;
+
+            bot->removeSpell(ProfessionOf(other).learnSpell, 0, false);
+            bot->SetSkill(other, 0, 0, 0);
+        }
+
         if (!tookUp.empty())
             SayToOwner(bot, owner, "I took up " + tookUp +
                        " - I will gather what I pass from now on.", 30);
 
         return tookUp;
+    }
+
+    /// A gathering profession is only as good as its tool: skinning needs the knife,
+    /// mining the pick. The grant at teach time can lose to a full bag, so the upkeep
+    /// keeps trying every pass until the tool is in the pack - then it stays silent.
+    static void EnsureProfessionTools(Player* bot)
+    {
+        if (!bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+            return;
+
+        auto const pair = ClassProfessionPair(bot->getClass());
+        uint16 const skills[2] = { pair.first, pair.second };
+        for (uint16 const skill : skills)
+        {
+            ProfessionEntry const entry = ProfessionOf(skill);
+            if (!entry.tool || bot->GetItemCount(entry.tool))
+                continue;
+
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry.tool, 1) != EQUIP_ERR_OK)
+                continue;                                   // bags full - try the next pass
+
+            if (Item* tool = bot->StoreNewItem(dest, entry.tool, true))
+                bot->SendNewItem(tool, 1, true, false, true);
+        }
     }
 #endif
 
@@ -4781,6 +4820,10 @@ namespace
         // once a companion's logs settled the digest short-circuit returned above them, so a
         // body created from the pool stayed naked forever while every pass reported "in sync".
         EnsureBags(owner, bot);
+
+#ifdef MOD_PLAYERBOTS
+        EnsureProfessionTools(bot);
+#endif
         EnsureStartingGear(owner, bot);
 
         if (g_cfg.requireGrouped && !report.grouped)
