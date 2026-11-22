@@ -386,10 +386,12 @@ namespace
     {
         uint32 ownerGuid = 0;
         uint32 at = 0;
+        std::vector<std::pair<uint32, uint32>> offer;   // {item entry, count} - values, not pointers
     };
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
                     uint32 validWhileMissing = 0, bool handIn = false);
+    static uint16 FindFreeBagPos(Player* bot);
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -1009,12 +1011,55 @@ namespace
                 continue;
             }
 
-            // the hand-over is a gift between companions, not commerce: re-send the
-            // contents now that the window is up, then accept the bot's side up front -
-            // playerbots' trade merchant never prices the window or asks for coin, and
-            // the transfer completes the moment the owner accepts
-            bot->GetSession()->SendUpdateTrade(true);
-            bot->GetTradeData()->SetAccepted(true);
+            // the hand-over is a gift between companions, not commerce: the window is up
+            // now, so find the items by value and fill it - every pointer is found and
+            // used inside this one call, nothing survives it
+            uint32 offered = 0;
+            for (uint8 slot = 0; slot < pending.offer.size() && slot < 6; ++slot)
+            {
+                uint32 const entry = pending.offer[slot].first;
+                uint32 const want = pending.offer[slot].second;
+
+                // the biggest stack of this entry in the bot's own bags
+                Item* best = nullptr;
+                for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END && !best; ++i)
+                    if (Item* it = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+                        if (it->GetTemplate()->ItemId == entry && it->CanBeTraded())
+                            best = it;
+                for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END && !best; ++i)
+                    if (Bag* bag = bot->GetBagByPos(i))
+                        for (uint8 j = 0; j < bag->GetBagSize() && !best; ++j)
+                            if (Item* it = bot->GetItemByPos(i, j))
+                                if (it->GetTemplate()->ItemId == entry && it->CanBeTraded())
+                                    best = it;
+                if (!best)
+                    continue;
+
+                Item* tradeItem = best;
+                if (best->GetCount() > want)
+                {
+                    // the reserve sits inside this stack: split the spare out first
+                    uint16 const dstPos = FindFreeBagPos(bot);
+                    if (!dstPos)
+                        continue;
+                    bot->SplitItem(best->GetPos(), dstPos, want);
+                    tradeItem = bot->GetItemByPos(dstPos);
+                    if (!tradeItem)
+                        continue;
+                }
+
+                bot->GetTradeData()->SetItem(TradeSlots(slot), tradeItem);
+                ++offered;
+            }
+
+            // gift-accept: playerbots' merchant never prices the window or asks for coin,
+            // and the transfer completes the moment the owner accepts
+            if (offered)
+            {
+                bot->GetTradeData()->SetAccepted(true);
+                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                           " stack(s) in the trade - take them, they are yours.", 30);
+            }
 
             itr = g_pendingTrade.erase(itr);        }
     }
@@ -3235,31 +3280,19 @@ namespace
             return 0;
         }
 
-        uint32 offered = 0;
-        for (uint8 slot = 0; slot < offers.size() && slot < 6; ++slot)
-        {
-            td->SetItem(TradeSlots(slot), offers[slot].first);
-            ++offered;
-        }
-
-        if (!offered)
-        {
-            if (announce)
-                SayToOwner(bot, owner, "Nothing would go in the trade - try again in a moment.", 30);
-            return 0;
-        }
-
-        // the client's window takes one bot tick to come up; what was SetItem'd before
-        // that round-trip is lost to the display, so the contents are re-sent - and the
-        // gift-accept applied - on the two-second tick, when the window can see them
+        // the offer is a WISH for now: the window takes one bot tick to come up, and
+        // what is SetItem'd before that round-trip is lost to the display. The applier
+        // finds the items by value two seconds later, fills the window, and only then
+        // speaks - no pointers cross the tick, and nothing is split until a window
+        // exists to put the split in.
         PendingTrade& pending = g_pendingTrade[bot->GetGUID().GetCounter()];
         pending.ownerGuid = owner->GetGUID().GetCounter();
         pending.at = uint32(time(nullptr));
+        pending.offer.clear();
+        for (auto const& [item, spare] : offers)
+            pending.offer.push_back({ item->GetTemplate()->ItemId, spare });
 
-        if (announce)
-            SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                       " stack(s) in the trade - take them, they are yours.", 30);
-        return offered;
+        return uint32(offers.size());
     }
 
 
