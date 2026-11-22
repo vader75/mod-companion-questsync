@@ -7347,6 +7347,7 @@ public:
             { "pool",   HandlePoolCommand,   SEC_PLAYER, Console::No },
             { "release", HandleReleaseCommand, SEC_PLAYER, Console::No },
             { "summon", HandleSummonCommand, SEC_PLAYER, Console::No },
+            { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
             { "unbind", HandleUnbindCommand, SEC_PLAYER, Console::No },
@@ -7878,6 +7879,87 @@ public:
 
     /// .companionsync dismiss [name] - send a companion away, or all of them. A dismissed
     /// companion stays bound: its quest log keeps following the player's.
+    /// .companionsync revive <name> - the window's button for a fallen companion.
+    ///
+    /// Beside the owner the body simply rises (at the half-strength a real resurrection
+    /// would carry). Beyond reach the companion releases its spirit at the graveyard
+    /// instead: its ghost makes its own way back, and the resurrect hook re-arms the
+    /// follow, so it rejoins on its own. Either way one click, and the companion says
+    /// what it is doing.
+    static bool HandleReviveCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        if (!g_cfg.enable)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: the module is disabled.");
+            return true;
+        }
+
+        std::string const want = TrimArg(args);
+        if (want.empty())
+        {
+            handler->PSendSysMessage("|cffff8000usage|r: .companionsync revive <name>");
+            return true;
+        }
+
+        std::vector<uint32> bound;
+        if (!FindCompanions(player->GetGUID().GetCounter(), bound))
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: no companions bound.");
+            return true;
+        }
+
+        uint32 const botGuid = ResolveCompanion(player, want, bound);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: |cffffff00{}|r is not one of your companions.", want);
+            return true;
+        }
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not in the world.", CompanionNameFor(botGuid));
+            return true;
+        }
+
+        if (bot->IsAlive())
+        {
+            SayToOwner(bot, player, "I am still standing - we go on.", 30);
+            return true;
+        }
+
+        bool const isGhost = bot->HasAuraType(SPELL_AURA_GHOST);
+
+        if (!isGhost && bot->GetDistance(player) <= 40.0f)
+        {
+            bot->ResurrectPlayer(0.5f);
+            SayToOwner(bot, player, "Back on my feet - we go on.", 30);
+            handler->PSendSysMessage("|cff20ff20Companion quest sync|r: {} rises beside you.", bot->GetName());
+        }
+        else if (!isGhost)
+        {
+            // Beyond reach: release the spirit exactly the way the client's own Release
+            // button does (BuildPlayerRepop -> graveyard), and let the ghost make its
+            // own way home - the resurrect hook re-arms the follow, so it rejoins alone.
+            bot->RemovePet(nullptr, PET_SAVE_NOT_IN_SLOT, true);
+            bot->BuildPlayerRepop();
+            bot->RepopAtGraveyard();
+            SayToOwner(bot, player, "I could not rise here - I will make my way back from the graveyard.", 30);
+            handler->PSendSysMessage("|cffffc94dCompanion quest sync|r: {} was too far - its spirit released at the graveyard.", bot->GetName());
+        }
+        else
+        {
+            SayToOwner(bot, player, "I make my way back from the graveyard - I will join you when I rise.", 30);
+            handler->PSendSysMessage("|cffffc94dCompanion quest sync|r: {} is already a ghost on its way back.", bot->GetName());
+        }
+
+        return true;
+    }
+
     static bool HandleDismissCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;

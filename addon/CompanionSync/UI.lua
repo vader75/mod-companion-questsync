@@ -118,7 +118,7 @@ local function StatusText(companion)
     -- a dead companion used to read like a healthy one: same card, same buttons, the
     -- truth discoverable only from a refusal line. The flag dominates everything else.
     if G.HasFlag(companion, "d") then
-        return COL_BAD .. "dead - revive it, or release and re-summon once you are safe" .. COL_RESET
+        return COL_BAD .. "dead - Revive raises it beside you, or its spirit walks back from the graveyard" .. COL_RESET
     end
 
     if not G.HasFlag(companion, "o") then
@@ -193,6 +193,15 @@ local function CreateCard(index)
     card:EnableMouse(true)
     card:SetScript("OnEnter", function(self) self.bg:SetTexture(1, 1, 1, 0.075) end)
     card:SetScript("OnLeave", function(self) self.bg:SetTexture(1, 1, 1, 0.045) end)
+
+    -- The dead companion's one action: near, the body rises at the usual
+    -- resurrection penalty; far, its spirit releases at the graveyard and the ghost
+    -- walks home on its own, rejoining when it rises.
+    card.reviveButton = Button(card, "Revive", 62, function()
+        if card.companion then G.Action("revive", card.companion.name) end
+    end, "Raise it beside you - or, if you are too far away, release it to the graveyard and let it walk home.")
+    card.reviveButton:GetFontString():SetTextColor(0.5, 1, 0.6)
+    card.reviveButton:Hide()
 
     card.primary = Button(card, "Summon", 84, function()
         if not card.companion then return end
@@ -558,6 +567,10 @@ function G.Refresh()
 
             if companion.level > 0 and not G.HasFlag(companion, "s") then card.levelButton:Show()
             else card.levelButton:Hide() end
+
+            -- the revive button exists only while the body is down; it sits where the
+            -- level button would, which a dead companion has no use for
+            if G.HasFlag(companion, "d") then card.reviveButton:Show() else card.reviveButton:Hide() end
 
             if online then card.mapButton:Show() else card.mapButton:Hide() end
 
