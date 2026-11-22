@@ -124,6 +124,7 @@ namespace
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
         bool autoProduce       = true;      // crafting is its own habit; the button is for the report
+        bool autoTrade         = true;      // beside you with something spare: the trade opens itself
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
         uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
@@ -376,6 +377,7 @@ namespace
     std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
     std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
     std::map<uint32, uint32> g_lastAutoProduce;           // bot guid -> unix time of the last quiet craft
+    std::map<uint32, uint32> g_lastAutoTrade;             // bot guid -> unix time of the last self-trade
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
@@ -548,6 +550,7 @@ namespace
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
         g_cfg.autoProduce        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoProduce", true);
+        g_cfg.autoTrade          = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoTrade", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
         g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
@@ -3088,6 +3091,124 @@ namespace
     }
 
 
+    /// A free bag position for a split stack, packed the way SplitItem wants it.
+    static uint16 FindFreeBagPos(Player* bot)
+    {
+        for (uint16 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+                return uint16((INVENTORY_SLOT_BAG_0 << 8) | i);
+        for (uint16 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+            if (Bag* bag = bot->GetBagByPos(i))
+                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                    if (!bot->GetItemByPos(i, j))
+                        return uint16((i << 8) | j);
+        return 0;
+    }
+
+    /// Open a trade with the owner and fill it with the surplus above the keep-five
+    /// reserve: every gathered mat and produced item, biggest stacks first, six slots.
+    /// Returns the stacks offered (0 = nothing spare, or the trade would not open).
+    /// With announce it says its lines - the self-trade stays quiet about nothing.
+    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce)
+    {
+        auto const pair = ClassProfessionPair(bot->getClass());
+
+        // five of every produced item and gathered mat stays in its own bags - the
+        // reserve is consumed across every stack of the same item, not per stack
+        std::map<uint32, uint32> keepLeft;
+        for (uint32 const product : ProductsOf(pair.second))
+            keepLeft[product] = 5;
+        for (uint32 const id : GatheredReagentsOf(pair.first))
+            keepLeft[id] = 5;
+
+        std::vector<std::pair<Item*, uint32>> offers;
+        auto consider = [&](Item* item)
+        {
+            if (!item || !item->CanBeTraded())
+                return;
+
+            auto const kept = keepLeft.find(item->GetEntry());
+            if (kept == keepLeft.end())
+                return;                                       // never its gear, quest items or food
+
+            uint32 const count = item->GetCount();
+            uint32 const spare = count > kept->second ? count - kept->second : 0;
+            kept->second -= std::min(count, kept->second);
+            if (!spare)
+                return;
+
+            // SetItem trades the WHOLE stack: the reserve sits inside this stack, so the
+            // spare is split into its own stack first and that stack goes in the trade
+            Item* tradeItem = item;
+            if (spare < count)
+            {
+                uint16 const dstPos = FindFreeBagPos(bot);
+                if (!dstPos)
+                    return;            // no room to keep the reserve whole - the stack waits
+
+                bot->SplitItem(item->GetPos(), dstPos, spare);
+                tradeItem = bot->GetItemByPos(dstPos);
+                if (!tradeItem)
+                    return;
+            }
+            offers.push_back({ tradeItem, spare });
+        };
+
+        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+
+        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+            if (Bag* bag = bot->GetBagByPos(i))
+                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
+                    consider(bot->GetItemByPos(i, j));
+
+        std::sort(offers.begin(), offers.end(),
+                  [](auto const& a, auto const& b) { return a.second > b.second; });
+
+        if (offers.empty())
+        {
+            if (announce)
+                SayToOwner(bot, owner, "I have nothing spare to hand you - I keep what I gather for the road.", 30);
+            return 0;
+        }
+
+        // the trade window holds six stacks; the rest waits for another press
+        if (offers.size() > 6)
+            offers.resize(6);
+
+        WorldPacket pInit(CMSG_INITIATE_TRADE);
+        pInit << owner->GetGUID();
+        bot->GetSession()->HandleInitiateTradeOpcode(pInit);
+
+        TradeData* td = bot->GetTradeData();
+        if (!td)
+        {
+            if (announce)
+                SayToOwner(bot, owner, "The trade did not open - try again in a moment.", 30);
+            return 0;
+        }
+
+        uint32 offered = 0;
+        for (uint8 slot = 0; slot < offers.size(); ++slot)
+        {
+            td->SetItem(TradeSlots(slot), offers[slot].first);
+            ++offered;
+        }
+
+        if (!offered)
+        {
+            if (announce)
+                SayToOwner(bot, owner, "Nothing would go in the trade - try again in a moment.", 30);
+            return 0;
+        }
+
+        if (announce)
+            SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                       " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
+        return offered;
+    }
+
+
     /// A vendor the companion could be standing at: any live creature with the vendor
     /// or repair flag within range, found the way the core searches its own cells.
     static Creature* VendorNearby(Player* bot, float range)
@@ -5340,6 +5461,21 @@ namespace
             {
                 lastAuto = now;
                 ProduceForCompanion(bot, owner, /*announce=*/false);
+            }
+        }
+        // and the hand-over happens on its own too: beside you with something spare,
+        // the companion opens the trade itself - mail stays the fallback for what
+        // cannot wait for a moment together
+        if (g_cfg.autoTrade && !inCombat)
+        {
+            uint32& lastAutoTrade = g_lastAutoTrade[botGuid];
+            uint32 const now2 = uint32(time(nullptr));
+            if ((!lastAutoTrade || now2 - lastAutoTrade >= 180) &&
+                bot->GetDistance(owner) <= 11.0f && !bot->GetTrader() && !owner->GetTradeData())
+            {
+                lastAutoTrade = now2;
+                if (!OpenTradeSurplus(bot, owner, /*announce=*/true))
+                    lastAutoTrade = 0;      // nothing spare: re-check next pass, silently
             }
         }
 #endif
@@ -8692,113 +8828,10 @@ public:
             return true;
         }
 
-        auto const pair = ClassProfessionPair(bot->getClass());
-
-        // five of every produced item and gathered mat stays in its own bags - the
-        // reserve is consumed across every stack of the same item, not per stack
-        std::map<uint32, uint32> keepLeft;
-        for (uint32 const product : ProductsOf(pair.second))
-            keepLeft[product] = 5;
-        for (uint32 const id : GatheredReagentsOf(pair.first))
-            keepLeft[id] = 5;
-
-        std::vector<std::pair<Item*, uint32>> offers;
-        auto consider = [&](Item* item)
-        {
-            if (!item || !item->CanBeTraded())
-                return;
-
-            auto const kept = keepLeft.find(item->GetEntry());
-            if (kept == keepLeft.end())
-                return;                                       // never its gear, quest items or food
-
-            uint32 const count = item->GetCount();
-            uint32 const spare = count > kept->second ? count - kept->second : 0;
-            kept->second -= std::min(count, kept->second);
-            if (!spare)
-                return;
-
-            // SetItem trades the WHOLE stack: the reserve sits inside this stack, so the
-            // spare is split into its own stack first and that stack goes in the trade
-            Item* tradeItem = item;
-            if (spare < count)
-            {
-                uint16 const dstPos = FindFreeBagPos(bot);
-                if (!dstPos)
-                    return;            // no room to keep the reserve whole - the stack waits
-
-                bot->SplitItem(item->GetPos(), dstPos, spare);
-                tradeItem = bot->GetItemByPos(dstPos);
-                if (!tradeItem)
-                    return;
-            }
-            offers.push_back({ tradeItem, spare });
-        };
-
-        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-
-        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i))
-                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                    consider(bot->GetItemByPos(i, j));
-
-        std::sort(offers.begin(), offers.end(),
-                  [](auto const& a, auto const& b) { return a.second > b.second; });
-
-        if (offers.empty())
-        {
-            SayToOwner(bot, player, "I have nothing spare to hand you - I keep what I gather for the road.", 30);
-            return true;
-        }
-
-        // the trade window holds six stacks; the rest waits for another press
-        if (offers.size() > 6)
-            offers.resize(6);
-
-        WorldPacket pInit(CMSG_INITIATE_TRADE);
-        pInit << player->GetGUID();
-        bot->GetSession()->HandleInitiateTradeOpcode(pInit);
-
-        TradeData* td = bot->GetTradeData();
-        if (!td)
-        {
-            SayToOwner(bot, player, "The trade did not open - try again in a moment.", 30);
-            return true;
-        }
-
-        uint32 offered = 0;
-        for (uint8 slot = 0; slot < offers.size(); ++slot)
-        {
-            td->SetItem(TradeSlots(slot), offers[slot].first);
-            ++offered;
-        }
-
-        if (!offered)
-        {
-            SayToOwner(bot, player, "Nothing would go in the trade - try again in a moment.", 30);
-            return true;
-        }
-
-        SayToOwner(bot, player, "I put " + std::to_string(offered) +
-                   " stack(s) in the trade - the rest stays for the road. Accept when you are ready.", 30);
+        OpenTradeSurplus(bot, player, /*announce=*/true);
 #endif
 
         return true;
-    }
-
-    /// A free bag position for a split stack, packed the way SplitItem wants it.
-    static uint16 FindFreeBagPos(Player* bot)
-    {
-        for (uint16 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-            if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
-                return uint16((INVENTORY_SLOT_BAG_0 << 8) | i);
-        for (uint16 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i))
-                for (uint16 j = 0; j < bag->GetBagSize(); ++j)
-                    if (!bot->GetItemByPos(i, j))
-                        return uint16((i << 8) | j);
-        return 0;
     }
 
     /// .companionsync produce [name] - the card's Produce button.
