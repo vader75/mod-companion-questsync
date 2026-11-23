@@ -1,16 +1,13 @@
 -- CompanionSync/UI.lua
 --
--- The window. Two regions: a roster of cards (one per companion) and an overlay panel for
--- minting a new one. Every action is a button; nothing here expects typing except the name.
---
--- Cards keep role, status and skill rows on the left; actions stay on the right.
+-- The roster picks one companion. Its card groups quests, professions and supplies.
 
 local addonName, G = ...
 
 local WIDTH = 680
 local PAD = 16
-local CARD_HEIGHT = 100
-local CARD_GAP = 8
+local CARD_HEIGHT = 174
+local ROSTER_HEIGHT = 32
 local HEADER_HEIGHT = 62
 local FOOTER_HEIGHT = 68          -- buttons, roster hint and the server's answer
 local EMPTY_HEIGHT = 108         -- the "no companions yet" copy needs room of its own
@@ -24,7 +21,7 @@ local COL_WARN  = "|cffffd200"
 local COL_BAD   = "|cffff6a6a"
 local COL_RESET = "|r"
 
-local frame, cards, addPanel
+local frame, cards, roster, addPanel, selectedName
 local raceDropdown, classDropdown, nameBox, stockLabel, serverLine, createButton
 local pick = { race = 1, class = 5 }
 
@@ -126,10 +123,10 @@ function G.CardState(companion)
     return state
 end
 
-local function SkillTrack(parent, x)
+local function SkillTrack(parent, x, y)
     local track = CreateFrame("Frame", nil, parent)
     track:SetSize(SKILL_WIDTH, 22)
-    track:SetPoint("TOPLEFT", x, -51)
+    track:SetPoint("TOPLEFT", x, y)
     track.text = track:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     track.text:SetPoint("TOPLEFT", 0, 0)
     track.background = track:CreateTexture(nil, "BACKGROUND")
@@ -160,7 +157,7 @@ local function UpdateSkill(track, skill, fallback, r, g, b)
     end
 end
 
-local function CreateCard(index)
+local function CreateCard()
     local card = CreateFrame("Frame", nil, frame)
     card:SetSize(WIDTH - 2 * PAD, CARD_HEIGHT)
 
@@ -190,9 +187,13 @@ local function CreateCard(index)
     card.subtitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     card.subtitle:SetPoint("TOPLEFT", 16, -29)
 
-    card.gatherTrack = SkillTrack(card, 16)
-    card.craftTrack = SkillTrack(card, 218)
-    card.facts = Label(card, "", 16, -78, 405)
+    card.questsTitle = Label(card, "QUESTS", 16, -57)
+    card.professionsTitle = Label(card, "PROFESSIONS", 224, -57)
+    card.suppliesTitle = Label(card, "SUPPLIES", 440, -57)
+    card.gatherTrack = SkillTrack(card, 224, -77)
+    card.craftTrack = SkillTrack(card, 224, -104)
+    card.quests = Label(card, "", 16, -77, 192)
+    card.bags = Label(card, "", 440, -77, 192)
 
     -- the whole card responds to the cursor, so the row under it is obviously the one the
     -- buttons belong to
@@ -219,7 +220,7 @@ local function CreateCard(index)
     card.reviveButton = Button(card, "Revive", 62, function()
         if card.companion then G.Action("revive", card.companion.name) end
     end, "Raise it beside you - or, if you are too far away, release it to the graveyard and let it walk home.")
-    card.reviveButton:SetPoint("RIGHT", -12, 18)
+    card.reviveButton:SetPoint("TOPRIGHT", -16, -14)
     card.reviveButton:GetFontString():SetTextColor(0.5, 1, 0.6)
     card.reviveButton:Hide()
 
@@ -227,19 +228,37 @@ local function CreateCard(index)
         if not card.companion then return end
         G.Action(G.HasFlag(card.companion, "o") and "dismiss" or "summon", card.companion.name)
     end, "Call this companion out, or send it away. It stays bound either way.")
-    card.primary:SetPoint("RIGHT", -12, 18)
+    card.primary:SetPoint("TOPRIGHT", -16, -14)
 
     card.levelButton = Button(card, "Level", 56, function()
         if card.companion then G.Action("level", card.companion.name) end
     end, "Bring its level up to yours.")
-    card.levelButton:SetPoint("RIGHT", -100, 18)
+    card.levelButton:SetPoint("TOPRIGHT", -106, -14)
 
-    -- Crafting and trading are the companion's own habits now, so their buttons are
-    -- gone: a card reads state and carries the actions only a player can decide.
     card.mapButton = Button(card, "Map", 44, function()
         ToggleWorldMap()
         if CompanionPins_Request then CompanionPins_Request() end
     end, "Show companion quest markers on the world map.")
+    card.mapButton:SetPoint("TOPLEFT", 16, -100)
+
+    card.trainButton = Button(card, "Train", 60, function()
+        if card.companion then G.Action("learn", card.companion.name) end
+    end, "Teach this companion missing class spells and spend its unspent talents.")
+    card.trainButton:SetPoint("TOPLEFT", 224, -132)
+    card.professionsButton = Button(card, "Teach skills", 92, function()
+        if card.companion then G.Action("professions", card.companion.name) end
+    end, "Teach or update this companion's gathering and crafting professions.")
+    card.professionsButton:SetPoint("LEFT", card.trainButton, "RIGHT", 6, 0)
+
+    card.collectButton = Button(card, "Collect delivery", 112, function()
+        local companion = card.companion
+        if not companion then return end
+        local state = G.CardState(companion)
+        if state.online and not state.dead and not state.releasing then
+            G.Action("delivery collect", companion.name)
+        end
+    end, "Stand nearby and out of combat to collect what this companion has ready. You still accept the trade.")
+    card.collectButton:SetPoint("TOPLEFT", 440, -100)
 
     -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
     -- discover is a control that does not get used: the release never reached the server at all.
@@ -255,46 +274,24 @@ local function CreateCard(index)
     card.releaseButton:SetPoint("BOTTOMRIGHT", -78, -12)
     card.releaseButton:GetFontString():SetTextColor(1, 0.6, 0.6)
 
-    card.mapButton:SetPoint("BOTTOMRIGHT", -144, -12)
-
     return card
 end
 
--- The window is exactly as tall as the roster it is showing.
---
--- A fixed height meant a four-slot frame around one companion (mostly empty) and a second
--- thing to remember every time a row changed. Rows are placed from the same arithmetic that
--- sets the frame height, so the two cannot disagree.
 local function LayoutWindow(count)
     if not frame then return end
 
-    local rows = math.max(1, math.min(count or 0, MAX_CARDS))
-    local height = HEADER_HEIGHT + rows * CARD_HEIGHT + (rows - 1) * CARD_GAP + FOOTER_HEIGHT
-
-    if count == 0 then
-        height = height + EMPTY_HEIGHT
-    end
-
-    if addPanel and addPanel:IsShown() then
-        height = math.max(height, HEADER_HEIGHT + ADD_PANEL_HEIGHT + FOOTER_HEIGHT + 6)
-    end
-
-    frame:SetHeight(height)
-
-    -- With the Add panel open the cards sit behind it; showing both means reading two layouts
-    -- through each other, which is what "overlapping buttons" looked like.
     local panelOpen = addPanel and addPanel:IsShown()
+    local body = panelOpen and (ADD_PANEL_HEIGHT + 6)
+        or count > 0 and (ROSTER_HEIGHT + CARD_HEIGHT + 8) or EMPTY_HEIGHT
+    frame:SetHeight(HEADER_HEIGHT + body + FOOTER_HEIGHT)
 
-    for index, card in ipairs(cards or {}) do
-        card:ClearAllPoints()
-        card:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + (index - 1) * (CARD_HEIGHT + CARD_GAP)))
-        card:SetSize(WIDTH - 2 * PAD, CARD_HEIGHT)
-
-        if panelOpen or not card.companion then
-            card:Hide()
-        else
+    for index, card in ipairs(cards) do
+        local tab = roster[index]
+        local companion = index <= count and G.companions[index]
+        if not panelOpen and companion then tab:Show() else tab:Hide() end
+        if not panelOpen and companion and companion.name == selectedName then
             card:Show()
-        end
+        else card:Hide() end
     end
 
     if frame.hint then
@@ -497,6 +494,7 @@ function G.ShowAddPanel()
     nameBox:SetText(G.SuggestName())
     serverLine:SetText(COL_MUTED .. "the server's answer appears here" .. COL_RESET)
 
+    addPanel.rosterCount = #G.companions
     addPanel:Show()
     RefreshAddPanel()
     G.Run(".companionsync pool")
@@ -552,12 +550,28 @@ function G.Refresh()
             or (COL_MUTED .. count .. (count == 1 and " companion · " or " companions · ") .. COL_RESET) .. state)
     end
 
+    local selected
+    for _, entry in ipairs(G.companions) do
+        if entry.name == selectedName then selected = entry break end
+    end
+    selected = selected or G.companions[1]
+    selectedName = selected and selected.name or nil
+
     for i = 1, MAX_CARDS do
-        local card = cards[i]
+        local card, tab = cards[i], roster[i]
         local companion = G.companions[i]
+        tab.companion = companion
 
         if companion then
             card.companion = companion
+            tab:SetText(companion.name)
+            if companion.name == selectedName then
+                tab:LockHighlight()
+                tab:GetFontString():SetTextColor(1, 0.82, 0.4)
+            else
+                tab:UnlockHighlight()
+                tab:GetFontString():SetTextColor(0.76, 0.76, 0.78)
+            end
 
             local r, g, b = G.ClassColor(companion.classId)
             local online = G.HasFlag(companion, "o")
@@ -584,20 +598,34 @@ function G.Refresh()
                 card.craftTrack:Show()
                 local free = state.free
                 local bags = free == 0 and "Bags full" or ("%d bag slots free"):format(free)
-                local questText = ("%d quest%s"):format(state.quests, state.quests == 1 and "" or "s")
-                card.facts:SetText(COL_MUTED .. questText .. "  ·  " .. COL_RESET ..
-                    (free <= 4 and COL_WARN or COL_MUTED) .. bags .. COL_RESET)
-                card.facts:Show()
+                card.quests:SetText(COL_MUTED .. ("%d active quest%s"):format(state.quests, state.quests == 1 and "" or "s") .. COL_RESET)
+                card.bags:SetText((free <= 4 and COL_WARN or COL_MUTED) .. bags .. COL_RESET)
+                card.quests:Show()
+                card.bags:Show()
             else
                 card.gatherTrack:Hide()
                 card.craftTrack:Hide()
-                card.facts:Hide()
+                card.quests:SetText(COL_MUTED .. (state.releasing and "Returning to the pool…" or "Summon to see quests.") .. COL_RESET)
+                card.quests:Show()
+                card.bags:SetText(COL_MUTED .. (state.releasing and "Unavailable" or "Summon to collect.") .. COL_RESET)
+                card.bags:Show()
+            end
+            if online and not state.dead and not state.releasing then
+                card.collectButton:Enable()
+                card.collectButton:GetFontString():SetTextColor(1, 0.82, 0.4)
+                card.trainButton:Show()
+                card.professionsButton:Show()
+            else
+                card.collectButton:Disable()
+                card.collectButton:GetFontString():SetTextColor(0.53, 0.53, 0.55)
+                card.trainButton:Hide()
+                card.professionsButton:Hide()
             end
 
             card.primary:SetText(online and "Dismiss" or "Summon")
             card.primary:GetFontString():SetTextColor(online and 1 or 0.35, online and 0.82 or 1, 0.35)
             card.primary:ClearAllPoints()
-            card.primary:SetPoint("RIGHT", state.dead and -104 or -12, 18)
+            card.primary:SetPoint("TOPRIGHT", state.dead and -84 or -16, -14)
             if state.releasing then card.primary:Hide() else card.primary:Show() end
             if online and not state.dead and not state.releasing and companion.level > 0 and not G.HasFlag(companion, "s") then
                 card.levelButton:Show()
@@ -612,10 +640,8 @@ function G.Refresh()
                 card.untrackButton:Show()
             end
 
-            card:Show()
         else
             card.companion = nil
-            card:Hide()
         end
     end
 
@@ -635,10 +661,8 @@ function G.Refresh()
         end
     end
 
+    if addPanel and addPanel:IsShown() and count > addPanel.rosterCount then addPanel:Hide() end
     LayoutWindow(count)
-
-    if count == 0 then frame.empty:Show() else frame.empty:Hide() end
-    if addPanel and addPanel:IsShown() and count > 0 then addPanel:Hide() end
 end
 
 local function CreateWindow()
@@ -737,8 +761,19 @@ local function CreateWindow()
     frame.close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     frame.close:SetPoint("TOPRIGHT", -6, -6)
 
-    cards = {}
-    for i = 1, MAX_CARDS do cards[i] = CreateCard(i) end
+    cards, roster = {}, {}
+    for i = 1, MAX_CARDS do
+        cards[i] = CreateCard()
+        cards[i]:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + ROSTER_HEIGHT))
+        local tab = Button(frame, "", 150, function(self)
+            if not self.companion then return end
+            selectedName = self.companion.name
+            frame.notice:Hide()
+            G.Refresh()
+        end)
+        tab:SetPoint("TOPLEFT", PAD + (i - 1) * 156, -HEADER_HEIGHT - 4)
+        roster[i] = tab
+    end
 
     -- Both pinned to the bottom, above the footer, so they travel with the frame's height.
     frame.notice = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -792,33 +827,16 @@ local function CreateWindow()
     end, "Refresh companion cards without reloading the map or pool.")
     refresh:SetPoint("LEFT", dismissAll, "RIGHT", 6, 0)
 
-    local quests = Button(footer, "Quest log", 76, function() Ack() G.Run(".companionsync quests") end,
+    local quests = Button(footer, "Group quests", 90, function() Ack() G.Run(".companionsync quests") end,
         "Print what each companion is carrying to chat.")
     quests:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
 
-    -- The fallback for a quest that cannot be gathered: items that lie on the ground (oats in
-    -- a field, cloth in a crate). The companion tries on its own, and this is for when the
-    -- world will not co-operate - the object was taken, or it never respawned.
-    -- Professions are taught alongside spells on every raise; this button parses each
-    -- companion for the pair it is missing, re-caps what a level un-capped, hands the
-    -- gathering tools, and arms the gather strategy so nodes are actively worked.
-    local professions = Button(footer, "Professions", 88, function() Ack() G.Action("professions") end,
-        "Teach each companion its class professions, raise the gathering ceiling, and turn gathering on.")
-    professions:SetPoint("LEFT", quests, "RIGHT", 6, 0)
-
     local catchUp = Button(footer, "Ground quests", 96, function() G.Run(".companionsync catchup") end,
         "Finish a quest the companion cannot gather for itself. Collects only items that lie on the ground.")
-    catchUp:SetPoint("LEFT", professions, "RIGHT", 6, 0)
-
-    -- One click parses every companion for anything a trainer would have taught and
-    -- its unspent talents; companions raised before the teaching fix are caught up here.
-    -- (An earlier version anchored this to a button declared two lines later - the nil
-    -- reference threw in game and the button silently never existed.)
-    local train = Button(footer, "Train all", 72, function() Ack() G.Action("learn") end,
-        "Teach every companion its missing spells and spend its unspent talents.")
-    train:SetPoint("LEFT", catchUp, "RIGHT", 6, 0)
+    catchUp:SetPoint("LEFT", quests, "RIGHT", 6, 0)
 
     LayoutWindow(0)
+    frame:Hide()
 
     return frame
 end

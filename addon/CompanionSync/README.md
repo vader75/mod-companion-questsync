@@ -12,31 +12,25 @@ cannot break the client beyond the payload it already understands.
 Requires `mod-companion-questsync` on the server. If nothing arrives 20 seconds after
 login, the addon says so in one line rather than showing an empty window.
 
-The window is as tall as its roster: one companion is a short panel, four is a full one.
-The height is derived from the same arithmetic that places the cards, so a new row cannot
-quietly overflow the frame, and the footer band always has room for the buttons, the slot
-count and the server's last answer.
-
 ## What it shows
 
-One card per companion, up to four (a party of five with you):
+Pick a name from the roster to open that companion's card. The selection stays on the
+same name when the roster refreshes. The window stays compact even with four companions.
 
-| Part | Meaning |
-|---|---|
-| **name** | class colour, greyed when the body is not in the world |
-| **subtitle** | race · class · level, in muted text |
-| **status** | quest count, free bag slots, and what is wrong: not in your party, level differs, waiting on you, releasing… |
-| **buttons** | `Summon` / `Dismiss` (one, depending on state), `Level`, `Map`, `Untrack`, `Release` |
+- **Quests:** active quest count and a shortcut to the shared CompanionPins map.
+- **Professions:** gathering and crafting progress, with **Train** and **Teach skills**
+  scoped to the selected companion.
+- **Supplies:** free bag slots and **Collect delivery**. Stand near the selected
+  companion with both of you out of combat. If a curated delivery is ready, the
+  companion prepares the normal trade; you still click **Accept**. This does not
+  order a new craft or pick an individual item.
 
-The button colours say which is which: `Dismiss` is gold text, `Summon` is green, and
-`Release` is red. One sends the companion away, one calls it back, and the last returns
-the body to the pool for good. `waiting on you` is the flag the quest log cannot give
-you — you carry a quest this companion has not been given yet.
+Summon, dismiss, revive and level stay beside the companion's name. **Untrack** and
+**Release** are separate and still ask for confirmation.
 
-Footer: **Summon missing**, **Dismiss all**, **Refresh**, **Quest log**, **Ground quests**.
-While the window
-is open it asks the server for its state every 8 seconds, so a companion dismissed a
-moment ago stops showing as present without closing and reopening the panel.
+The footer is for the whole roster: **Summon missing**, **Dismiss all**, **Refresh**,
+**Group quests**, and **Ground quests**. Roster updates are pushed by the server; the
+addon asks again if its view goes stale.
 
 **Ground quests** is the fallback for a collection quest whose items lie on the ground — oats
 in a field, cloth in a crate. The companion hops to those objects and takes them by itself
