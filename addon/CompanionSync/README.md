@@ -20,10 +20,13 @@ same name when the roster refreshes. The window stays compact even with four com
 - **Quests:** active quest count and a shortcut to the shared CompanionPins map.
 - **Professions:** gathering and crafting progress, with **Train** and **Teach skills**
   scoped to the selected companion.
-- **Supplies:** free bag slots and **Collect delivery**. Stand near the selected
-  companion with both of you out of combat. If a curated delivery is ready, the
-  companion prepares the normal trade; you still click **Accept**. This does not
-  order a new craft or pick an individual item.
+- **Supplies:** use **Collect delivery** for the usual curated handoff, or open the
+  item picker for the selected companion. **In bags** shows the amount they can
+  spare; **Can craft** means they know a supported recipe and have its materials
+  and crafting station. Unready recipes cannot be ordered. An order makes one batch
+  using the companion's carried materials and prepares a trade for that item only.
+  Stand nearby, both out of combat, and click **Accept** in the normal trade window.
+  These one-off requests never cost trade gold and are not sent by mail.
 
 Summon, dismiss, revive and level stay beside the companion's name. **Untrack** and
 **Release** are separate and still ask for confirmation.

@@ -223,6 +223,9 @@ Everything in this section is autonomous or one click; nothing needs a command t
 
 ## Commands
 
+In normal play, use the CompanionSync addon's **Supplies** section to see what the
+selected companion can spare or craft, then collect or request that item. The
+commands below remain available for troubleshooting and manual use.
 
 Player commands are `SEC_PLAYER`: no RBAC row, no database change. They are not
 available over SOAP, for the same reason `.companion` is not.

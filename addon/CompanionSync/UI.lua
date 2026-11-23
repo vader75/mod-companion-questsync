@@ -6,7 +6,7 @@ local addonName, G = ...
 
 local WIDTH = 680
 local PAD = 16
-local CARD_HEIGHT = 174
+local CARD_HEIGHT = 246
 local ROSTER_HEIGHT = 32
 local HEADER_HEIGHT = 62
 local FOOTER_HEIGHT = 68          -- buttons, roster hint and the server's answer
@@ -24,6 +24,8 @@ local COL_RESET = "|r"
 local frame, cards, roster, addPanel, selectedName
 local raceDropdown, classDropdown, nameBox, stockLabel, serverLine, createButton
 local pick = { race = 1, class = 5 }
+local supplyPopup, supplyScope, supplyChoice, supplyOpen, supplyOffset
+local SUPPLY_VISIBLE = 8
 
 local function InitDB()
     -- an install from before the rename keeps its window position
@@ -100,6 +102,140 @@ end
 -- ---------------------------------------------------------------------------
 -- cards
 -- ---------------------------------------------------------------------------
+
+local function CanSupply(companion)
+    return companion and G.HasFlag(companion, "o") and not G.HasFlag(companion, "d")
+        and not G.releasing[companion.name]
+end
+
+local function SupplyLabel(row)
+    return row.name .. (row.kind == "bag" and ("  ·  %.0f ready"):format(row.quantity)
+        or row.kind == "craft" and "  ·  Can craft" or "  ·  Not ready")
+end
+
+local function EnableButton(button, enabled)
+    if enabled then button:Enable() else button:Disable() end
+end
+
+local function RefreshSupply()
+    local supply = G.supply
+    if supplyScope ~= supply then
+        supplyScope, supplyChoice, supplyOpen, supplyOffset = supply, nil, false, 0
+    end
+    local rows, pending = supply and supply.rows, supply and supply.pending
+    if not (rows and supplyChoice and rows[supplyChoice.index] == supplyChoice) then supplyChoice = nil end
+    if not (rows and #rows > 0) and not pending then supplyOpen = false end
+
+    local anchor
+    for i, card in ipairs(cards) do
+        local companion = G.companions[i]
+        local active = supply and companion and supply.name == companion.name
+        EnableButton(card.supplyPicker, active and not pending)
+        EnableButton(card.supplyRefresh, active and not pending)
+        EnableButton(card.supplyAction, active and supplyChoice)
+        card.supplyPicker:SetText(active and supplyChoice and SupplyLabel(supplyChoice) or "Choose supply  ▾")
+        card.supplyAction:SetText(active and supplyChoice and (supplyChoice.kind == "bag" and "Take supply" or "Craft supply")
+            or "Take / Craft")
+        local message = "Summon this companion to see supplies."
+        if companion and G.releasing[companion.name] then
+            message = "Supplies are unavailable while this companion is being released."
+        elseif G.HasFlag(companion, "d") then
+            message = "Revive this companion to see supplies."
+        end
+        if active then
+            anchor = card.supplyPicker
+            message = supply.message or (pending and (pending.kind == "catalog" and "Loading supplies…" or "Preparing trade…"))
+                or (rows and (#rows == 0 and "No offerable supplies or supported recipes."
+                    or "Stand nearby and out of combat. You still accept the trade."))
+                or "Choose a supply to check what this companion can offer or craft."
+        end
+        card.supplyStatus:SetText(COL_MUTED .. message .. COL_RESET)
+    end
+
+    if not (anchor and supplyOpen and rows and #rows > 0) then
+        supplyPopup:Hide()
+        return
+    end
+    local visible = math.min(#rows, SUPPLY_VISIBLE)
+    supplyOffset = math.min(supplyOffset, #rows - visible)
+    for i, button in ipairs(supplyPopup.rows) do
+        local row = i <= visible and rows[supplyOffset + i] or nil
+        button.row = row
+        if row then
+            button:SetText(SupplyLabel(row))
+            EnableButton(button, row.kind ~= "missing")
+            if supplyChoice == row then button:LockHighlight() else button:UnlockHighlight() end
+            button:Show()
+        else button:Hide() end
+    end
+    local paged = #rows > visible
+    if paged then
+        supplyPopup.up:Show()
+        supplyPopup.down:Show()
+        supplyPopup.range:SetText(("%d–%d of %d"):format(supplyOffset + 1, supplyOffset + visible, #rows))
+        EnableButton(supplyPopup.up, supplyOffset > 0)
+        EnableButton(supplyPopup.down, supplyOffset + visible < #rows)
+    else
+        supplyPopup.up:Hide()
+        supplyPopup.down:Hide()
+        supplyPopup.range:SetText("")
+    end
+    supplyPopup:SetHeight(visible * 24 + (paged and 36 or 12))
+    supplyPopup:ClearAllPoints()
+    supplyPopup:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    supplyPopup:Show()
+end
+
+local function CreateSupplyPopup()
+    supplyPopup = CreateFrame("Frame", nil, frame)
+    supplyPopup:SetFrameStrata("FULLSCREEN_DIALOG")
+    supplyPopup:SetClampedToScreen(true)
+    supplyPopup:SetWidth(392)
+    supplyPopup:EnableMouse(true)
+    supplyPopup:EnableMouseWheel(true)
+    supplyPopup:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 10,
+    })
+    supplyPopup:SetBackdropColor(0.07, 0.07, 0.08, 1)
+
+    local function Scroll(delta)
+        supplyOffset = math.max(0, supplyOffset + delta)
+        RefreshSupply()
+    end
+    supplyPopup:SetScript("OnMouseWheel", function(_, delta) Scroll(-delta) end)
+    supplyPopup.rows = {}
+    for i = 1, SUPPLY_VISIBLE do
+        local rowButton = Button(supplyPopup, "", 380, function(self)
+            local row = self.row
+            if row and row.kind ~= "missing" then
+                supplyChoice, supplyOpen = row, false
+                RefreshSupply()
+            end
+        end)
+        local text = rowButton:GetFontString()
+        text:SetJustifyH("LEFT")
+        text:SetWidth(364)
+        text:SetHeight(14)
+        rowButton:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 24)
+        supplyPopup.rows[i] = rowButton
+    end
+    supplyPopup.up = Button(supplyPopup, "Previous", 76, function() Scroll(-SUPPLY_VISIBLE) end)
+    supplyPopup.up:SetPoint("BOTTOMLEFT", 6, 6)
+    supplyPopup.down = Button(supplyPopup, "Next", 76, function() Scroll(SUPPLY_VISIBLE) end)
+    supplyPopup.down:SetPoint("BOTTOMRIGHT", -6, 6)
+    supplyPopup.range = supplyPopup:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    supplyPopup.range:SetPoint("BOTTOM", 0, 11)
+    supplyPopup:Hide()
+end
+
+local function SyncSupplyScope(companion)
+    G.SetSupplyCompanion(frame:IsShown() and not (addPanel and addPanel:IsShown())
+        and CanSupply(companion) and companion.name or nil)
+    RefreshSupply()
+end
+
+G.OnSupplyChanged = function() if supplyPopup then RefreshSupply() end end
 
 function G.CardState(companion)
     local online = G.HasFlag(companion, "o")
@@ -260,6 +396,34 @@ local function CreateCard()
     end, "Stand nearby and out of combat to collect what this companion has ready. You still accept the trade.")
     card.collectButton:SetPoint("TOPLEFT", 440, -100)
 
+    card.supplyPicker = Button(card, "Choose supply  ▾", 300, function()
+        local supply = G.supply
+        if not (supply and CanSupply(card.companion) and supply.name == card.companion.name) then return end
+        if not supply.rows or #supply.rows == 0 then
+            supplyOpen, supplyOffset = true, 0
+            G.RequestSupplyCatalog()
+        else
+            supplyOpen = not supplyOpen
+            RefreshSupply()
+        end
+    end, "See this companion's spare items and supported recipes.")
+    card.supplyPicker:SetPoint("TOPLEFT", 16, -162)
+    card.supplyPicker:GetFontString():SetWidth(284)
+    card.supplyPicker:GetFontString():SetHeight(14)
+    card.supplyAction = Button(card, "Take / Craft", 118, function()
+        if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
+        G.RequestSupplyItem(supplyChoice)
+    end, "Ask for the selected item. Crafting uses carried materials and makes one batch. You accept the trade.")
+    card.supplyAction:SetPoint("TOPLEFT", 322, -162)
+    card.supplyRefresh = Button(card, "Refresh supplies", 126, function()
+        if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
+        supplyOpen, supplyOffset = false, 0
+        G.RequestSupplyCatalog()
+    end, "Check this companion's current supplies and crafting availability.")
+    card.supplyRefresh:SetPoint("TOPLEFT", 446, -162)
+    card.supplyStatus = Label(card, "", 16, -189, WIDTH - 4 * PAD)
+    card.supplyStatus:SetHeight(22)
+
     -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
     -- discover is a control that does not get used: the release never reached the server at all.
     -- They are plain buttons now, release in warning colour because it cannot be undone.
@@ -363,8 +527,8 @@ local function CreateAddPanel()
     -- The panel has fixed content, so it must not be sized by what is left of the window:
     -- anchored to the bottom it got 74 px inside a one-companion frame and every row of
     -- controls landed on top of the next. It keeps its own height and the window grows.
-    addPanel:SetScript("OnShow", function() LayoutWindow(#G.companions) end)
-    addPanel:SetScript("OnHide", function() LayoutWindow(#G.companions) end)
+    addPanel:SetScript("OnShow", G.Refresh)
+    addPanel:SetScript("OnHide", G.Refresh)
     addPanel:Hide()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
@@ -663,6 +827,7 @@ function G.Refresh()
 
     if addPanel and addPanel:IsShown() and count > addPanel.rosterCount then addPanel:Hide() end
     LayoutWindow(count)
+    SyncSupplyScope(selected)
 end
 
 local function CreateWindow()
@@ -673,6 +838,10 @@ local function CreateWindow()
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnHide", function()
+        G.SetSupplyCompanion(nil)
+        RefreshSupply()
+    end)
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
@@ -729,6 +898,7 @@ local function CreateWindow()
     frame.elapsed = 0
     frame:SetScript("OnUpdate", function(self, delta)
         self.elapsed = self.elapsed + delta
+        G.ExpireSupply()
 
         if frame.notice and frame.notice:IsShown() and frame.noticeExpires > 0 and time() > frame.noticeExpires then
             frame.notice:Hide()
@@ -774,6 +944,7 @@ local function CreateWindow()
         tab:SetPoint("TOPLEFT", PAD + (i - 1) * 156, -HEADER_HEIGHT - 4)
         roster[i] = tab
     end
+    CreateSupplyPopup()
 
     -- Both pinned to the bottom, above the footer, so they travel with the frame's height.
     frame.notice = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")

@@ -1,7 +1,6 @@
 -- CompanionSync/Core.lua
 --
--- Data, names and commands. Everything the server tells us arrives on the whisper
--- channel, because a 3.3.5 client cannot ask the server anything.
+-- Data, names and commands. Addon replies arrive on the CSYNC system channel.
 --
 --   Comp sync 2: Healy,5,1,32,4,ogs,110|Soak,9,2,32,2,o,105|Nia,7,3,12,1,og,8,y=Skinning 50/150
 --                name,class,race,level,quests,flags,free slots[,y=gather cur/max]
@@ -263,9 +262,81 @@ listener:RegisterEvent("CHAT_MSG_SYSTEM")
         return (time() - G.lastServerLineAt) <= patience
     end
 
--- Payloads arrive as system messages prefixed CSYNC, not as whispers: a whisper needs a
--- companion to speak it, and the roster matters most when nobody is out. They are hidden
--- from the chat frame here so the player only ever sees the window.
+local SUPPLY_CAP = 64
+local UINT32_MAX = 4294967295
+local SUPPLY_TIMEOUT = 8
+local SUPPLY_CATALOG_COOLDOWN, SUPPLY_ACTION_COOLDOWN = 2, 1
+local lastSupplyNonce, lastSupplyCatalog, lastSupplyAction
+
+local function SupplyChanged()
+    if G.OnSupplyChanged then G.OnSupplyChanged() end
+end
+
+function G.SetSupplyCompanion(name)
+    if (G.supply and G.supply.name) ~= name then
+        G.supply = name and { name = name } or nil
+    end
+end
+
+function G.ExpireSupply()
+    local supply = G.supply
+    if supply and supply.pending and GetTime() >= supply.pending.deadline then
+        local catalog = supply.pending.kind == "catalog"
+        supply.pending = nil
+        supply.message = catalog and "No supply catalog reply. The server may not support it; try refreshing."
+            or "No delivery reply. Check for an open trade before trying again."
+        SupplyChanged()
+    end
+end
+
+local function HandleSupplyLine(text)
+    G.ExpireSupply()
+    local supply = G.supply
+    local pending = supply and supply.pending
+    if not pending then return end
+
+    local nonce, result = text:match("^Supply result (%d+):(.+)$")
+    if nonce then
+        if tonumber(nonce) == pending.nonce then
+            supply.pending, supply.message = nil, result
+            SupplyChanged()
+        end
+        return
+    end
+    if pending.kind ~= "catalog" then return end
+
+    local count
+    nonce, count = text:match("^Supply end (%d+) (%d+)$")
+    if nonce then
+        if tonumber(nonce) ~= pending.nonce then return end
+        count = tonumber(count)
+        supply.pending = nil
+        -- Only a contiguous, 1-based set publishes, including the empty set.
+        if count <= SUPPLY_CAP and count == pending.count then
+            for i = 1, count do
+                if not pending.rows[i] then count = nil break end
+            end
+            if count then supply.rows = pending.rows end
+        end
+        if not supply.rows then supply.message = "Incomplete supply catalog. Try refreshing." end
+        SupplyChanged()
+        return
+    end
+
+    local index, itemId, kind, quantity, name
+    nonce, index, itemId, kind, quantity, name = text:match("^Supply row (%d+) (%d+) (%d+) (%a+) (%d+):(.+)$")
+    if tonumber(nonce) ~= pending.nonce then return end
+    index, itemId, quantity = tonumber(index), tonumber(itemId), tonumber(quantity)
+    if index < 1 or index > SUPPLY_CAP or pending.rows[index] or itemId < 1 or itemId > UINT32_MAX then return end
+    if not (kind == "bag" and quantity > 0 and quantity <= UINT32_MAX
+        or (kind == "craft" or kind == "missing") and quantity == 0) then return end
+
+    pending.rows[index] = { index = index, itemId = itemId, kind = kind, quantity = quantity, name = name }
+    pending.count = pending.count + 1
+end
+
+-- CSYNC uses system messages so it works even with no summoned companion, and
+-- is hidden from the chat frame so the player only sees it in the window.
 local function IsProtocolLine(text)
     return type(text) == "string" and string.sub(text, 1, 6) == "CSYNC|"
 end
@@ -308,6 +379,10 @@ if ChatFrame_AddMessageEventFilter then
     end
     ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
         if IsProtocolLine(message) then return true end
+        -- Pre-picker servers print usage instead of sending a catalog reply. Hide
+        -- that exact legacy fallback only while a picker command could have caused it.
+        if lastSupplyCatalog and GetTime() - lastSupplyCatalog < SUPPLY_TIMEOUT
+            and message == "Usage: .companionsync delivery [preview|collect <name>|request <item ID>|clear]" then return true end
         if IsAboutCompanion(message) then return true end
         return false
     end)
@@ -368,6 +443,11 @@ listener:SetScript("OnEvent", function(_, event, message)
             return
         end
         text = StripColors(string.sub(message, 7))   -- drop "CSYNC|"
+
+        if text:sub(1, 7) == "Supply " then
+            HandleSupplyLine(text)
+            return
+        end
 
         -- the module says hello at login and tells us how often it passes; the panel's
         -- patience scales with this instead of a hard-coded guess
@@ -462,6 +542,52 @@ function G.Action(verb, name)
     else
         G.Run(".companionsync " .. verb)
     end
+end
+
+local function RequestSupply(kind, row)
+    local supply = G.supply
+    if not supply or supply.pending then return false end
+
+    if not G.ServerAlive() then
+        supply.message = "The server isn't answering."
+        SupplyChanged()
+        return false
+    end
+    local now = GetTime()
+    -- Match the separate server buckets: opening a catalog must not delay
+    -- the first item action, but switching cards must not bypass either limit.
+    local catalog = kind == "catalog"
+    local last, gap = lastSupplyAction, SUPPLY_ACTION_COOLDOWN
+    if catalog then last, gap = lastSupplyCatalog, SUPPLY_CATALOG_COOLDOWN end
+    if last and now - last < gap then
+        supply.message = "Wait a moment, then try again."
+        SupplyChanged()
+        return false
+    end
+
+    -- Lua doubles hold all uint32 values exactly. Use decimal text for the wire.
+    lastSupplyNonce = (lastSupplyNonce or time() % 2147483647) % UINT32_MAX + 1
+    if catalog then lastSupplyCatalog = now else lastSupplyAction = now end
+    local pending = { nonce = lastSupplyNonce, kind = kind, deadline = now + SUPPLY_TIMEOUT }
+    if catalog then pending.rows, pending.count = {}, 0 end
+    supply.rows, supply.message, supply.pending = nil, nil, pending
+    local args = kind .. (" %.0f"):format(pending.nonce)
+    if row then args = args .. (" %.0f"):format(row.itemId) end
+    G.Action("delivery " .. args, supply.name)
+    SupplyChanged()
+    return true
+end
+
+function G.RequestSupplyCatalog()
+    return RequestSupply("catalog")
+end
+
+function G.RequestSupplyItem(row)
+    local supply = G.supply
+    if not (row and supply and supply.rows and supply.rows[row.index] == row) then return false end
+    if row.kind == "bag" then return RequestSupply("take", row) end
+    if row.kind == "craft" then return RequestSupply("make", row) end
+    return false
 end
 
 --- Ask the server for a companion.
