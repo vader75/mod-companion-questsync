@@ -8,7 +8,7 @@ SOURCE = (Path(__file__).resolve().parents[1] / "src/mod_companion_questsync.cpp
 class TradeNoticeContract(unittest.TestCase):
     def test_offer_notice_is_tied_to_one_trade(self):
         apply = SOURCE.split('void ApplyPendingTrades()', 1)[1].split('/// Bring companions', 1)[0]
-        start_notice = apply.split('if (offered)', 1)[1]
+        start_notice = apply.split('if (offered &&', 1)[1]
         self.assertRegex(start_notice, r'SayToOwner\([^;]+pending\.noticeId\);')
         self.assertLess(start_notice.index('pending.applied = true'), start_notice.index('SayToOwner'))
         self.assertIn('pending.noticeId = ++g_nextTradeNoticeId;', SOURCE)

@@ -65,6 +65,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
 #ifdef MOD_PLAYERBOTS
+#include "PlayerbotMgr.h"
 #include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
 #include "PlayerbotFactory.h"      // teach a hand-raised level what a trainer would
 #include "RandomPlayerbotMgr.h"    // the per-bot value store keeps the profession choice
@@ -72,6 +73,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "QuestDef.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
+#include "SkillExtraItems.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 
@@ -320,6 +322,8 @@ namespace
     std::map<uint32, uint32> g_ownerDeliveryMailAt;
     std::map<uint32, uint32> g_ownerMailPolicyAt;
     std::map<uint32, std::set<uint32>> g_requestedSupplies;
+    std::map<uint32, uint32> g_supplyCatalogAt;
+    std::map<uint32, uint32> g_supplyActionAt;
 
     /// (bot guid, quest id) -> when the copy first became ready to hand in.
     ///
@@ -392,6 +396,14 @@ namespace
     /// the bot's own AI tick, and items SetItem'd before it are lost to the client -
     /// the owner saw an empty trade window while the companion insisted it had put
     /// four stacks in. The offer is applied two seconds later, once the window is up.
+    struct SupplyOrder
+    {
+        uint32 entry = 0;   // zero means the normal multi-item delivery
+        uint32 keep = 0;    // the product already held before a requested craft
+        uint32 fresh = 0;   // only newly crafted units are eligible for that trade
+        uint16 sourcePos = 0; // preflighted inventory position for the crafted batch
+    };
+
     struct PendingTrade
     {
         uint32 ownerGuid = 0;
@@ -401,6 +413,7 @@ namespace
         bool announceFailure = false;                  // automatic probes do not report routine deferrals
         bool curated = false;
         bool automatic = false;
+        SupplyOrder supply;
 
         uint64 noticeId = 0;                            // identifies this offer, not a later window
         struct OfferedItem { TradeSlots slot; ObjectGuid guid; uint32 count; };
@@ -409,8 +422,10 @@ namespace
     constexpr uint32 TradeReserveCount = 5;
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
-    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery(Player* bot, Player* owner, bool curated, bool mail = false);
+    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery(Player* bot, Player* owner, bool curated,
+        bool mail = false, SupplyOrder supply = {});
     static bool DeliveryStillValid(Player* bot, Player* owner, PendingTrade const& pending);
+    static bool HasSupplyAuthority(Player* bot, Player* owner, bool authoritative);
     static bool IsTownDeliveryStop(Player* owner, Player* bot);
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
                     uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0);
@@ -1052,6 +1067,20 @@ namespace
             SayToOwner(bot, owner, reason, 30);
     }
 
+    static void CancelBoundDelivery(uint32 botGuid, Player* owner)
+    {
+#ifdef AC_TRADE_OFFER_GUARD
+        auto const it = g_pendingTrade.find(botGuid);
+        if (!owner || it == g_pendingTrade.end() || it->second.ownerGuid != owner->GetGUID().GetCounter())
+            return;
+        if (Player* bot = FindCompanionPlayer(botGuid))
+            if (TradeData const* trade = bot->GetTradeData(); trade && trade->GetTrader() == owner &&
+                trade->GetOfferToken() == it->second.noticeId)
+                CancelSurplusTrade(bot, owner, nullptr);
+        g_pendingTrade.erase(it);
+#endif
+    }
+
     /// Fill after the bot has had time to answer the begin-trade round trip.
     void ApplyPendingTrades()
     {
@@ -1075,7 +1104,7 @@ namespace
                 continue;
             }
 
-            if (!CanTradeSurplusNow(bot, owner) || (pending.automatic &&
+            if (!CanTradeSurplusNow(bot, owner) || (pending.supply.entry && !HasSupplyAuthority(bot, owner, false)) || (pending.automatic &&
                 (!IsTownDeliveryStop(owner, bot) || uint32(time(nullptr)) - pending.at >= Timing::TownOfferTimeout)))
             {
                 CancelSurplusTrade(bot, owner, nullptr);
@@ -1117,9 +1146,10 @@ namespace
 
             // Recalculate the reserve before touching bags. Never substitute a stack
             // with the same item entry: it may already be offered or held in reserve.
-            if (PlanDelivery(bot, owner, pending.curated) != pending.offer)
+            if (PlanDelivery(bot, owner, pending.curated, false, pending.supply) != pending.offer)
             {
-                CancelSurplusTrade(bot, owner, nullptr);
+                CancelSurplusTrade(bot, owner, pending.supply.entry
+                    ? "My supplies changed before the trade. Refresh my list and try again." : nullptr);
                 itr = g_pendingTrade.erase(itr);
                 continue;
             }
@@ -1152,11 +1182,11 @@ namespace
 
             // gift-accept: playerbots' merchant never prices the window or asks for coin,
             // and the transfer completes the moment the owner accepts
-            if (offered)
+            if (offered && (!pending.supply.entry || offered == pending.offer.size()))
             {
                 pending.applied = true;
                 trade->SetAccepted(true);
-                if (pending.announceFailure)
+                if (pending.announceFailure && !pending.supply.entry)
                     SayToOwner(bot, owner, "I put " + std::to_string(offered) +
                                " stack(s) in the trade - take them, they are yours.", 30, 0, false, pending.noticeId);
                 ++itr;                            // the record stays: the guard is live now
@@ -3330,48 +3360,74 @@ namespace
 
 
     /// A free bag position for a split stack, packed the way SplitItem wants it.
-    static uint16 FindFreeBagPos(Player* bot, Item const* item)
+    static uint16 FindFreeBagPos(Player* bot, ItemTemplate const* item, ItemPosCountVec const* occupied)
     {
+        auto freeAfterCraft = [&](uint8 bag, uint8 slot)
+        {
+            uint16 const pos = uint16((bag << 8) | slot);
+            return !bot->GetItemByPos(bag, slot) && (!occupied || std::none_of(occupied->begin(), occupied->end(),
+                [pos](ItemPosCount const& destination) { return destination.pos == pos; }));
+        };
         for (uint16 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-            if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+            if (freeAfterCraft(INVENTORY_SLOT_BAG_0, uint8(i)))
                 return uint16((INVENTORY_SLOT_BAG_0 << 8) | i);
         for (uint16 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i); bag && ItemCanGoIntoBag(item->GetTemplate(), bag->GetTemplate()))
+            if (Bag* bag = bot->GetBagByPos(i); bag && ItemCanGoIntoBag(item, bag->GetTemplate()))
                 for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                    if (!bot->GetItemByPos(i, j))
+                    if (freeAfterCraft(uint8(i), j))
                         return uint16((i << 8) | j);
         return 0;
     }
 
+    static uint16 FindFreeBagPos(Player* bot, Item const* item)
+    {
+        return FindFreeBagPos(bot, item->GetTemplate(), nullptr);
+    }
+
 #include "CuratedDelivery.inc"
 
-    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce, bool curated)
+    static TradeData* InitiateDeliveryTrade(Player* bot, Player* owner)
+    {
+        WorldPacket packet(CMSG_INITIATE_TRADE);
+        packet << owner->GetGUID();
+        bot->GetSession()->HandleInitiateTradeOpcode(packet);
+        return bot->GetTradeData();
+    }
+
+    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce, bool curated, SupplyOrder supply = {},
+        TradeData* opened = nullptr)
     {
 #ifndef AC_TRADE_OFFER_GUARD
         if (announce)
             SayToOwner(bot, owner, "I can't prepare a safe trade on this realm. Check with the realm administrator.");
         return 0;
 #else
-        if (!CanTradeSurplusNow(bot, owner) || bot->GetTradeData() || owner->GetTradeData())
+        if (!CanTradeSurplusNow(bot, owner) || bot->GetTradeData() != opened ||
+            (opened ? (opened->GetTrader() != owner || opened->GetOfferToken() || !owner->GetTradeData() ||
+                owner->GetTradeData()->GetTrader() != bot) : owner->GetTradeData() != nullptr))
             return 0;
 
-        auto offers = PlanDelivery(bot, owner, curated);
+        auto offers = PlanDelivery(bot, owner, curated, false, supply);
+        if (supply.fresh)
+        {
+            uint32 count = 0;
+            for (auto const& offer : offers)
+                count += offer.second;
+            if (count != supply.fresh)
+                return 0;  // don't present part of a freshly crafted batch as the whole order
+        }
 
         if (offers.empty())
         {
-            if (announce)
+            if (announce && !supply.entry)
                 SayToOwner(bot, owner, "I have nothing spare to hand you - I keep what I gather for the road.", 30);
             return 0;
         }
 
-        WorldPacket pInit(CMSG_INITIATE_TRADE);
-        pInit << owner->GetGUID();
-        bot->GetSession()->HandleInitiateTradeOpcode(pInit);
-
-        TradeData* td = bot->GetTradeData();
+        TradeData* td = opened ? opened : InitiateDeliveryTrade(bot, owner);
         if (!td)
         {
-            if (announce)
+            if (announce && !supply.entry)
                 SayToOwner(bot, owner, "The trade did not open - try again in a moment.", 30);
             return 0;
         }
@@ -3389,6 +3445,7 @@ namespace
         pending.announceFailure = announce;
         pending.curated = curated;
         pending.automatic = !announce;
+        pending.supply = supply;
         pending.offer = std::move(offers);
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
@@ -3400,6 +3457,7 @@ namespace
                    source->GetGUID().GetCounter() == botGuid &&
                    target->GetGUID().GetCounter() == it->second.ownerGuid &&
                    CanTradeSurplusNow(source, target) &&
+                   (!it->second.supply.entry || HasSupplyAuthority(source, target, true)) &&
                    (!it->second.automatic || (IsTownDeliveryStop(target, source) &&
                     uint32(time(nullptr)) - it->second.at < Timing::TownOfferTimeout)) &&
                    MatchesTradeOffer(source, trade, it->second);
@@ -7018,6 +7076,45 @@ namespace
 
     std::vector<PendingRelease> g_pendingRelease;
 
+    static bool IsControlledCompanion(Player* bot, Player* owner)
+    {
+#ifdef MOD_PLAYERBOTS
+        if (!bot || !owner || bot == owner || !bot->IsInWorld() || !bot->GetSession() || !bot->GetSession()->IsBot())
+            return false;
+        // The personal manager is assigned at bot login. Group leadership and
+        // the AI's current follow target do not establish control of the body.
+        PlayerbotMgr* manager = PlayerbotsMgr::instance().GetPlayerbotMgr(owner);
+        return manager && manager->GetPlayerBot(bot->GetGUID()) == bot;
+#else
+        return false;
+#endif
+    }
+
+    static bool HasSupplyAuthority(Player* bot, Player* owner, bool authoritative)
+    {
+        if (!IsControlledCompanion(bot, owner))
+            return false;
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        if (std::any_of(g_pendingRelease.begin(), g_pendingRelease.end(), [botGuid](PendingRelease const& pending)
+            { return pending.botGuid == botGuid; }))
+            return false;
+        if (!authoritative)
+        {
+            std::vector<uint32> bound;
+            return FindCompanions(ownerGuid, bound) && std::find(bound.begin(), bound.end(), botGuid) != bound.end();
+        }
+        QueryResult row = CharacterDatabase.Query("SELECT owner_guid FROM {} WHERE bot_guid = {}", g_cfg.bindingTable, botGuid);
+        if (!row)
+            return false;
+        do
+        {
+            if (row->Fetch()[0].Get<uint32>() != ownerGuid)
+                return false;
+        } while (row->NextRow());
+        return true;
+    }
+
     /// Tell the owner what happened to a release, once it is really done.
     void ReportRelease(PendingRelease const& pending, bool ok, std::string const& why)
     {
@@ -7189,6 +7286,7 @@ namespace
         {
             LOG_INFO("server.loading",
                      "[CompanionQuestSync] release step 3: body is out, dismissing it now");
+            CancelBoundDelivery(botGuid, owner);
 
             // Inline, from the command handler: that is exactly how mod-wowlegends' own
             // `.companion forget` dismisses, and it is the one place playerbots' synchronous
@@ -8376,10 +8474,10 @@ public:
             return true;
         }
 
-        if (bot == player || !bot->GetSession() || !bot->GetSession()->IsBot())
+        if (!IsControlledCompanion(bot, player))
         {
-            handler->PSendSysMessage("|cffff8000Companion quest sync|r: {} is not a bot character, so it cannot "
-                                     "be a companion.", bot->GetName());
+            handler->PSendSysMessage("|cffff8000Companion quest sync|r: you can only bind a bot you control. "
+                                     "Summon one of your own companions first.");
             return true;
         }
 
@@ -8494,8 +8592,9 @@ public:
             return true;
         }
 
-        CharacterDatabase.Execute("DELETE FROM {} WHERE owner_guid = {} AND bot_guid = {}",
-                                  g_cfg.bindingTable, ownerGuid, botGuid);
+        CancelBoundDelivery(botGuid, player);
+        CharacterDatabase.DirectExecute("DELETE FROM {} WHERE owner_guid = {} AND bot_guid = {}",
+                                        g_cfg.bindingTable, ownerGuid, botGuid);
         PurgeCompanionState(botGuid);
         InvalidateCompanionGuid(ownerGuid);
 
@@ -8860,11 +8959,16 @@ public:
     /// first, six slots (the trade window's own limit). The owner accepts; the bot's
     /// accept-trade trigger answers on its side. Nothing else in its bags - gear, quest
     /// items, food - is ever offered.
+#include "SupplyPicker.inc"
+
     static bool HandleDeliveryCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player || !g_cfg.enable)
             return false;
+        std::string const text = TrimArg(args);
+        if (HandleNamedSupply(player, text))
+            return true;
         uint32 const ownerGuid = player->GetGUID().GetCounter();
         std::vector<uint32> bound;
         if (!FindCompanions(ownerGuid, bound))
@@ -8872,7 +8976,6 @@ public:
             handler->SendSysMessage("No companions bound.");
             return true;
         }
-        std::string const text = TrimArg(args);
         if (text == "clear")
         {
             g_requestedSupplies.erase(ownerGuid);
@@ -10021,6 +10124,8 @@ public:
         g_pinRevisions.erase(ownerGuid);
         g_pinRequestAt.erase(ownerGuid);
         g_requestedSupplies.erase(ownerGuid);
+        g_supplyCatalogAt.erase(ownerGuid);
+        g_supplyActionAt.erase(ownerGuid);
         g_ownerDeliveryMailAt.erase(ownerGuid);
         g_ownerMailPolicyAt.erase(ownerGuid);
         g_lastAutoTrade.erase(ownerGuid);

@@ -42,7 +42,8 @@ class TradeSafetyContract(unittest.TestCase):
         self.assertIn('bot->GetItemCount(entry, false) < count + rule.reserve', POLICY)
 
     def test_split_checks_bag_compatibility_and_failure_retains_cooldown(self):
-        self.assertIn('ItemCanGoIntoBag(item->GetTemplate(), bag->GetTemplate())', SOURCE)
+        self.assertIn('ItemCanGoIntoBag(item, bag->GetTemplate())', SOURCE)
+        self.assertIn('FindFreeBagPos(bot, item->GetTemplate(), nullptr)', SOURCE)
         cancel = SOURCE.split('static void CancelSurplusTrade(', 1)[1].split('void ApplyPendingTrades()', 1)[0]
         self.assertNotIn('g_lastAutoTrade.erase', cancel)
 

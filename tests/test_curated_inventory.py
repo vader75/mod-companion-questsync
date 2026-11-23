@@ -19,7 +19,7 @@ class ManagedInventory(unittest.TestCase):
         self.assertIn('HandleSellItemOpcode(request)', sell)
 
     def test_automatic_and_manual_trade_revalidate_the_same_delivery_plan(self):
-        self.assertIn('PlanDelivery(bot, owner, pending.curated)', SOURCE)
+        self.assertIn('PlanDelivery(bot, owner, pending.curated, false, pending.supply)', SOURCE)
         self.assertIn('DeliveryStillValid(bot, trade->GetTrader(), pending)', SOURCE)
         self.assertIn('CanOfferTownDelivery(owner, bot)', SOURCE)
 

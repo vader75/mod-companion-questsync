@@ -30,12 +30,16 @@
         return false;
     }
 
-    bool CanReleaseItem(Player* bot, Player* owner, Item const* item)
+    bool CanReleaseTemplate(Player* bot, Player* owner, ItemTemplate const* proto)
     {
-        ItemTemplate const* proto = item->GetTemplate();
         return proto && !proto->StartQuest && proto->Class != ITEM_CLASS_QUEST &&
                proto->Class != ITEM_CLASS_CONTAINER && proto->Class != ITEM_CLASS_QUIVER &&
                !QuestNeedsItem(bot, proto->ItemId) && !QuestNeedsItem(owner, proto->ItemId);
+    }
+
+    bool CanReleaseItem(Player* bot, Player* owner, Item const* item)
+    {
+        return CanReleaseTemplate(bot, owner, item->GetTemplate());
     }
 
     bool IsCraftedSupply(uint16 profession, uint32 entry)
@@ -151,10 +155,22 @@
     static_assert(DeliveryQuantity(20, 8, {5, 5}, 0, false) == 3);    // trade can split, retain reserve
     static_assert(DeliveryQuantity(3, 23, {5, 5}, 4, false) == 1);    // cap applies across stacks
 
-    DeliveryRule DeliveryRuleFor(Player* bot, Player* owner, Item* item, bool curated)
+    constexpr DeliveryRule SupplyCraftRule(uint32 keep, uint32 fresh)
+    {
+        return { keep, fresh };
+    }
+
+    static_assert(DeliveryQuantity(5, 5, SupplyCraftRule(3, 2), 0, false) == 2);
+    static_assert(DeliveryQuantity(4, 4, SupplyCraftRule(3, 2), 0, false) == 1);
+
+    DeliveryRule DeliveryRuleFor(Player* bot, Player* owner, Item* item, bool curated, SupplyOrder supply = {})
     {
         if (!CanReleaseItem(bot, owner, item))
             return {};
+        if (supply.entry && item->GetEntry() != supply.entry)
+            return {};
+        if (supply.fresh)
+            return SupplyCraftRule(supply.keep, supply.fresh);
         if (uint8 const slot = OwnerUpgradeSlot(bot, owner, item); slot != NULL_SLOT)
             return { 0, 1, slot };
 
@@ -176,7 +192,7 @@
         return product ? DeliveryRule{ CraftingReserve(pair.second, entry, bot), UINT32_MAX } : DeliveryRule{};
     }
 
-    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery(Player* bot, Player* owner, bool curated, bool mail)
+    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery(Player* bot, Player* owner, bool curated, bool mail, SupplyOrder supply)
     {
         std::vector<std::pair<ObjectGuid, uint32>> offers;
         std::map<uint32, uint32> planned;
@@ -185,10 +201,12 @@
         bool splitSelected = false;
         VisitCarriedItems(bot, [&](Item* item)
         {
+            if (supply.sourcePos && item->GetPos() != supply.sourcePos)
+                return;
             if (splitSelected || offers.size() >= (mail ? 3 : TRADE_SLOT_TRADED_COUNT) || item->IsInTrade() ||
                 !item->CanBeTraded(mail) || item->IsSoulBound() || item->IsRefundable())
                 return;
-            DeliveryRule const rule = DeliveryRuleFor(bot, owner, item, curated);
+            DeliveryRule const rule = DeliveryRuleFor(bot, owner, item, curated, supply);
             if (!rule.limit || gearSlots.count(rule.gearSlot))
                 return;
             uint32 const entry = item->GetEntry();
@@ -229,9 +247,9 @@
         for (auto const& offered : pending.offeredItems)
         {
             Item* item = bot->GetItemByGuid(offered.guid);
-            if (!item || !item->CanBeTraded() || item->IsRefundable())
+            if (!item || !item->CanBeTraded() || item->IsSoulBound() || item->IsRefundable())
                 return false;
-            DeliveryRule const rule = DeliveryRuleFor(bot, owner, item, pending.curated);
+            DeliveryRule const rule = DeliveryRuleFor(bot, owner, item, pending.curated, pending.supply);
             uint32 const entry = item->GetEntry();
             uint32 const count = (totals[entry] += offered.count);
             if (count > rule.limit || bot->GetItemCount(entry, false) < count + rule.reserve ||
