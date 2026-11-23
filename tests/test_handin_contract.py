@@ -34,6 +34,12 @@ class HandInContract(unittest.TestCase):
         self.assertIn('HandleQuestgiverChooseRewardOpcode(request)', turnin)
         self.assertNotIn('HandleCommand(CHAT_MSG_WHISPER, "r", owner)', turnin)
 
+    def test_conditional_object_ender_uses_native_quest_activation(self):
+        finder = SOURCE.split('WorldObject* FindInteractableQuestEnder(', 1)[1].split('std::list<Creature*>', 1)[0]
+        self.assertRegex(finder, r'!object->HasGameObjectFlag\(GO_FLAG_INTERACT_COND\)\s*\|\|\s*object->ActivateToQuest\(bot\)')
+        for gate in ('object->isSpawned()', 'GO_FLAG_NOT_SELECTABLE', 'hasInvolvedQuest(questId)', 'CanInteractWithQuestGiver(candidate)'):
+            self.assertIn(gate, finder)
+
     def test_companion_does_not_send_native_questgiver_status(self):
         self.assertNotIn('->SendQuestGiverStatus(', SOURCE)
 

@@ -4240,11 +4240,13 @@ namespace
         float constexpr radius = 20.0f;
         auto valid = [bot, questId](WorldObject* candidate)
         {
-            if (GameObject* object = candidate->ToGameObject(); object &&
-                (!object->isSpawned() || object->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE) ||
-                 object->HasGameObjectFlag(GO_FLAG_INTERACT_COND)))
+            GameObject* object = candidate->ToGameObject();
+            if (object && (!object->isSpawned() || object->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE)))
                 return false;
-            return candidate->hasInvolvedQuest(questId) && bot->CanInteractWithQuestGiver(candidate);
+            if (!candidate->hasInvolvedQuest(questId) || !bot->CanInteractWithQuestGiver(candidate))
+                return false;
+            // The client uses per-player quest activation for conditional questgivers.
+            return !object || !object->HasGameObjectFlag(GO_FLAG_INTERACT_COND) || object->ActivateToQuest(bot);
         };
         std::list<Creature*> creatures;
         Acore::CreatureListSearcher<decltype(valid)> creatureSearcher(bot, creatures, valid);
