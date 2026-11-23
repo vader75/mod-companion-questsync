@@ -2,8 +2,9 @@
 ## Title: |cffffc94dCompanion|r Sync
 ## Notes: Manage every companion bound to you - their state, their quests, and a button for each action. Fed by the server's Comp sync line; needs mod-companion-questsync.
 ## Author: Hermes
-## Version: 2.5.0
+## Version: 2.5.1
 ## SavedVariables: CompanionSyncDB
+## OptionalDeps: DragonUI
 
 Core.lua
 UI.lua

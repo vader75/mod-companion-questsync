@@ -4,6 +4,13 @@
 
 local addonName, G = ...
 
+-- DragonUI is optional. Borrow its chrome helpers, never its saved variables or layout.
+local function Chrome(method)
+    local dragon = type(DragonUI) == "table" and DragonUI.ForeverUI
+    return type(dragon) == "table" and type(dragon[method]) == "function" and dragon[method] or nil
+end
+local panelTone, buttonIdle, buttonHover
+
 local WIDTH = 680
 local PAD = 16
 local CARD_HEIGHT = 246
@@ -37,7 +44,7 @@ local function InitDB()
     CompanionSyncDB.pos = CompanionSyncDB.pos or { point = "CENTER", x = 0, y = 60 }
 end
 
-local function Button(parent, label, width, onClick, tooltip)
+local function Button(parent, label, width, onClick, tooltip, primary)
     local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     button:SetSize(width or 64, 22)
     button:SetText(label)
@@ -46,23 +53,27 @@ local function Button(parent, label, width, onClick, tooltip)
     text:SetFontObject(GameFontNormalSmall)
     text:SetTextColor(0.88, 0.88, 0.9)
 
-    -- Flat plate rather than the stock bevels: a 2008 button sitting on a dark panel reads as
-    -- a different program. The template's own textures are hidden and one quiet plate drawn,
-    -- so every button in the window changes together.
-    for _, getter in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture" }) do
-        local tex = button[getter] and button[getter](button)
-        if tex and tex.SetAlpha then tex:SetAlpha(0) end
+    local skin = primary and Chrome("SkinButton")
+    local plate
+    if skin then
+        skin(button)
+    else
+        -- Leave navigation, list rows and secondary actions quiet next to red buttons.
+        for _, getter in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture" }) do
+            local tex = button[getter] and button[getter](button)
+            if tex and tex.SetAlpha then tex:SetAlpha(0) end
+        end
+
+        local highlight = button.GetHighlightTexture and button:GetHighlightTexture()
+        if highlight then highlight:SetTexture(1, 1, 1, 0.05) end
+
+        plate = button:CreateTexture(nil, "BACKGROUND")
+        plate:SetAllPoints()
+        plate:SetTexture(unpack(buttonIdle))
     end
 
-    local highlight = button.GetHighlightTexture and button:GetHighlightTexture()
-    if highlight then highlight:SetTexture(1, 1, 1, 0.05) end
-
-    button.plate = button:CreateTexture(nil, "BACKGROUND")
-    button.plate:SetAllPoints()
-    button.plate:SetTexture(1, 1, 1, 0.07)
-
     button:SetScript("OnEnter", function(self)
-        self.plate:SetTexture(1, 1, 1, 0.16)
+        if plate then plate:SetTexture(unpack(buttonHover)) end
 
         if tooltip then
             GameTooltip:SetOwner(self, "ANCHOR_TOP")
@@ -71,8 +82,8 @@ local function Button(parent, label, width, onClick, tooltip)
         end
     end)
 
-    button:SetScript("OnLeave", function(self)
-        self.plate:SetTexture(1, 1, 1, 0.07)
+    button:SetScript("OnLeave", function()
+        if plate then plate:SetTexture(unpack(buttonIdle)) end
         GameTooltip:Hide()
     end)
 
@@ -193,11 +204,16 @@ local function CreateSupplyPopup()
     supplyPopup:SetWidth(392)
     supplyPopup:EnableMouse(true)
     supplyPopup:EnableMouseWheel(true)
-    supplyPopup:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8X8",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 10,
-    })
-    supplyPopup:SetBackdropColor(0.07, 0.07, 0.08, 1)
+    local menuSkin = Chrome("SkinMenuBackground")
+    if menuSkin then
+        menuSkin(supplyPopup, "bg")
+    else
+        supplyPopup:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 10,
+        })
+        supplyPopup:SetBackdropColor(0.07, 0.07, 0.08, 1)
+    end
 
     local function Scroll(delta)
         supplyOffset = math.max(0, supplyOffset + delta)
@@ -413,7 +429,7 @@ local function CreateCard()
     card.supplyAction = Button(card, "Take / Craft", 118, function()
         if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
         G.RequestSupplyItem(supplyChoice)
-    end, "Ask for the selected item. Crafting uses carried materials and makes one batch. You accept the trade.")
+    end, "Ask for the selected item. Crafting uses carried materials and makes one batch. You accept the trade.", true)
     card.supplyAction:SetPoint("TOPLEFT", 322, -162)
     card.supplyRefresh = Button(card, "Refresh supplies", 126, function()
         if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
@@ -533,7 +549,7 @@ local function CreateAddPanel()
 
     addPanel.bg = addPanel:CreateTexture(nil, "BACKGROUND")
     addPanel.bg:SetAllPoints()
-    addPanel.bg:SetTexture(0.03, 0.03, 0.04, 0.97)
+    addPanel.bg:SetTexture(unpack(panelTone))
 
     addPanel.edge = CreateFrame("Frame", nil, addPanel)
     addPanel.edge:SetAllPoints()
@@ -831,6 +847,10 @@ function G.Refresh()
 end
 
 local function CreateWindow()
+    local dragonWindow = Chrome("ApplyNineSlice")
+    panelTone = dragonWindow and { 0.1216, 0.1176, 0.1294, 0.98 } or { 0.05, 0.05, 0.06, 0.95 }
+    buttonIdle = dragonWindow and { 0.80, 0.72, 0.60, 0.10 } or { 1, 1, 1, 0.07 }
+    buttonHover = dragonWindow and { 1.00, 0.85, 0.59, 0.18 } or { 1, 1, 1, 0.16 }
     frame = CreateFrame("Frame", "CompanionSyncFrame", UIParent)
     frame:SetSize(WIDTH, HEADER_HEIGHT + CARD_HEIGHT + FOOTER_HEIGHT)
     frame:SetFrameStrata("DIALOG")
@@ -858,20 +878,24 @@ local function CreateWindow()
 
     frame.bg = frame:CreateTexture(nil, "BACKGROUND")
     frame.bg:SetAllPoints()
-    frame.bg:SetTexture(0.05, 0.05, 0.06, 0.95)
+    frame.bg:SetTexture(unpack(panelTone))
 
-    frame.border = CreateFrame("Frame", nil, frame)
-    frame.border:SetAllPoints()
-    frame.border:SetBackdrop({
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 12,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    frame.border:SetBackdropBorderColor(1, 1, 1, 0.10)
+    if dragonWindow then
+        dragonWindow(frame, "metalframe", "BORDER")
+    else
+        frame.border = CreateFrame("Frame", nil, frame)
+        frame.border:SetAllPoints()
+        frame.border:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        frame.border:SetBackdropBorderColor(1, 1, 1, 0.10)
+    end
 
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     frame.title:SetPoint("TOPLEFT", PAD, -12)
-    frame.title:SetText("|cffffc94dCompanions|r")
+    frame.title:SetText((dragonWindow and "|cffffd100" or "|cffffc94d") .. "Companions|r")
 
     frame.count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.count:SetPoint("TOPLEFT", PAD, -34)
@@ -890,7 +914,7 @@ local function CreateWindow()
 
     local add = Button(frame, "+ Add companion", 124, function()
         if addPanel and addPanel:IsShown() then addPanel:Hide() else G.ShowAddPanel() end
-    end, "Mint a new companion from the pool.")
+    end, "Create a companion from the pool.", true)
     -- clear of the close button: UIPanelCloseButton is 32 px wide at -6, so anything ending
     -- before -44 leaves the two controls their own space
     add:SetPoint("TOPRIGHT", -46, -14)
@@ -928,7 +952,9 @@ local function CreateWindow()
         end
     end)
 
-    frame.close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+    local closeSkin = Chrome("CreateCloseButton")
+    frame.close = closeSkin and closeSkin(frame, { size = 24 })
+        or CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     frame.close:SetPoint("TOPRIGHT", -6, -6)
 
     cards, roster = {}, {}

@@ -12,6 +12,11 @@ cannot break the client beyond the payload it already understands.
 Requires `mod-companion-questsync` on the server. If nothing arrives 20 seconds after
 login, the addon says so in one line rather than showing an empty window.
 
+When DragonUI 3.0 is enabled, CompanionSync borrows its metal frame, gold title,
+red primary buttons and supply-menu artwork. It keeps its own layout and settings.
+Without the DragonUI skin helpers it uses its standalone appearance. This is a
+client-only skin; no server or CompanionPins update is needed.
+
 ## What it shows
 
 Pick a name from the roster to open that companion's card. The selection stays on the
