@@ -237,13 +237,6 @@ CompanionQuestSync.KeepFreeSlots = 2
 # Try an eligible merchant sale when a quest pickup needs bag space.
 CompanionQuestSync.BagMargin = 8
 CompanionQuestSync.SellJunk = 1
-#    CompanionQuestSync.VendorErrand (experimental, requires TidyInventory and SellJunk)
-#        A settled, grouped follower with fewer than 8 free slots may walk to a
-#        reachable merchant within 12 yards of its stopped owner. One at a time
-#        per owner; cancels on movement, combat, trade or interruption. No fallback.
-#        After cancellation, ordinary QuestSync sales wait for normal follow at a new stop.
-#        Default: 0. Keep off pending disposable-realm verification with the follow AI.
-CompanionQuestSync.VendorErrand = 0
 CompanionQuestSync.MapPins = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
