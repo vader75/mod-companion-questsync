@@ -2,14 +2,12 @@
 
 Keeps a player's **companions** on the same quest log — and at a level that can take
 those quests — so they can always quest together. Up to four companions per owner,
-each one a real bot character bound, dressed, named and released by this module.
-
-A companion is a body this module bound to an owner in **its own table**,
-`cq_bindings`. It does not need `mod-wowlegends` to exist: it claims bodies from the
-`mod-playerbots` AddClass pool itself, wipes them, names them, dresses them and
-returns them when released. The only thing it can borrow from `mod-wowlegends` is a
-read of that module's binding table, so two modules never level the same body — and
-that is switchable off (`RespectLegacyBindings = 0`).
+each one a bot character reserved to its owner. Tracking in `cq_bindings` is not
+proof that a character is disposable stock. Claims and retirement use reviewed
+reservations in `cq_companion_custody`. Release retires the companion without
+resetting the character or returning its name to stock. See the
+[custody migration](docs/companion-custody.md) before upgrading, especially on a realm
+also running the legacy `mod-wowlegends` companion system.
 
 > [!NOTE]
 > **Companion surplus trading requires an AzerothCore patch.** The
@@ -19,11 +17,13 @@ that is switchable off (`RespectLegacyBindings = 0`).
 > and the companion's reserve at acceptance, rejects duplicate items before transfer,
 > and prevents bot trades from being accepted during combat.
 >
-> Apply it before building worldserver using the command under [Build](#build).
-> The module installer does not apply it automatically. Without the patch,
-> companion surplus offers are disabled; ordinary trades and the rest of the
-> module still work. The supply picker uses this same patch unchanged; it does not
-> require a new AzerothCore, `mod-playerbots`, or `mod-wowlegends` patch.
+> Apply the guard first, then the [trade commit receipt](patches/azerothcore-trade-offer-commit.patch).
+> The receipt lets CompanionSync distinguish a filled offer from an inventory transfer
+> confirmed by the character database. Without the guard, surplus offers are disabled.
+> Without the receipt, modern nonce-based requests are disabled. Ordinary trades do
+> not require either patch. No Playerbots source change is required. Realms sharing
+> legacy companion stock must also apply the [legacy custody guard](patches/mod-wowlegends-companion-custody.patch)
+> (verified base `523563e`) and build both modules before enabling claims.
 
 Test plan: [`docs/companion-test-plan.md`](docs/companion-test-plan.md) — a 40-minute
 in-game checklist covering every command in this file.
@@ -92,15 +92,11 @@ Per pass, for each owner with bindings:
    goes too (3 s later, once the destination has loaded). Hooked on the teleport itself:
    walking away never teleports anything, and a companion is never dragged into a
    battleground or arena. `FollowThroughTeleport = 0` turns it off.
-7. **Hand-ins happen in reach of the giver** (`HandInMode = 2`, the default) — a finished
-   quest rewards itself when the companion is within `HandInNearDistance` (40 yards) of the
-   giver: the same core call the gossip window would make, no giver object required, the
-   companion still stepping up to the NPC so the turn-in is seen. On a choice of rewards it
-   picks the highest item level and says which it kept. Beyond that range nothing is
-   rewarded and nothing blinks - the companion whispers to be led closer, and the gold pin
-   on the giver's map points the way. `1` rewards from any distance; `0` returns to the
-   bot-AI path, which needs the giver in the companion's sight - the shape that produced
-   "I cannot talk to the quest giver".
+7. **Hand-ins happen in reach of the giver** (`HandInMode = 1`, the default) — a finished
+   quest can be handed in once the companion can interact with its live NPC or object
+   ender. The native handler runs the ender's scripts and rewards. If the ender is
+   unavailable, the quest stays ready. Mode `2` adds a lead-to-giver reminder; mode
+   `0` disables module hand-ins. Stored spawn coordinates never move the companion.
 8. **Pins and whispers** — the open quests of companions the owner cannot see are
    pushed to the owner's map (`MapPins`, `PinSyncSeconds`), and anything worth saying
    is said once, in words, naming the next action. The roster line is only re-sent when
@@ -262,8 +258,8 @@ available over SOAP, for the same reason `.companion` is not.
 | `.companionsync create <race> <class> <name>` | claim a free body and bind it |
 | `.companionsync summon <name>` | call a companion to your side |
 | `.companionsync dismiss <name>` | send it away, keep the binding |
-| `.companionsync release <name>` | wipe it, return it to the pool, forget it |
-| `.companionsync bind <bot>` | track an online bot you already control through Playerbots |
+| `.companionsync release <name>` | request retirement; keep the body and name reserved |
+| `.companionsync bind <bot>` | resume tracking a verified companion you already own |
 | `.companionsync unbind <name>` | stop tracking it without releasing it |
 
 Administrator commands are `SEC_ADMINISTRATOR` and work from the console and over
@@ -336,7 +332,6 @@ each one. The defaults that matter most:
 | `SkipTimedQuests` | 1 | never copy timed quests |
 | `BindingTable` | `cq_bindings` | bindings this module owns (identifier only) |
 | `PoolTable` | `cq_pool` | its own release ledger (identifier only) |
-| `RespectLegacyBindings` | 1 | also honour `mod-wowlegends`' table; 0 = never look at it |
 | `ExtraArmourSlots` | 1 | belt, bracers, gloves and cloak in the class's armour type |
 | `PoolAccountType` | 2 | `playerbots_account_type` value that marks an AddClass body |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 all refusals |
@@ -349,9 +344,9 @@ each one. The defaults that matter most:
 | `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
 | `AutoProduce` | 1 | craft what its gathering paid for every three minutes per companion, outside combat, silently; the Produce button gives the report on demand |
 | `AutoTrade` | 1 | open a curated trade in a rested area when stationary and out of combat; you accept |
-| `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
+| `CatchUpGroundItems` / `CatchUpIdleSeconds` | 0 / 120 | opt in to synthetic catch-up for ground items after the owner has been rewarded; native chest loot is used by default |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
-| `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |
+| `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 1 / 20 / 40 | 2 = native interaction plus a lead-to-giver reminder; 1 = native interaction only; 0 = disable module hand-ins |
 | `AnnounceAtStartup` / `AnnounceOnLogin` | 1 / 1 | one line, so players know the module is running |
 | `Debug` / `HeartbeatSeconds` | 0 / 300 | log detail, and the heartbeat window for `Debug = 2` |
 
@@ -419,9 +414,8 @@ released while nobody was looking — and repairs the ones that are safe to repa
 - **Playerbots control**: manual binding and specific-item supplies use the existing
   personal `PlayerbotMgr` to verify that the player controls the live bot. A binding
   row or shared party alone is not enough. No Playerbots source change is needed.
-- **One optional read**: by default it reads `mod-wowlegends`' binding table so two
-  modules never level and quest the same body. `RespectLegacyBindings = 0` removes
-  even that, and the module runs on a server where that module is not installed.
+- **Shared custody**: where the legacy module is installed, both modules must honor
+  the same reservation table. QuestSync also works without `mod-wowlegends` installed.
 - **Bodies come from the AddClass pool** that `mod-playerbots` maintains
   (`PoolAccountType`, excluding the AuctionHouseBot). That is a data convention, not
   an API call; `integrity` reports it when a body stops matching.
@@ -443,17 +437,23 @@ released while nobody was looking — and repairs the ones that are safe to repa
 - **Removals run inline from the command handler**, never from the update tick and
   never within 20 seconds of a summon. This is not a preference: playerbots tears a
   body down in place, and doing it from the tick is what used to kill the process.
-- **Hand-in is untouched** — the module only sets `COMPLETE`; rewards and turn-in stay
-  with the bot AI.
+- **Hand-in uses the native reward handler** and waits for a live, interactable NPC or
+  game-object quest ender. The companion must meet its own objectives.
 
 ## Build
 
-On a compatible, unpatched AzerothCore source tree, apply the core patch once before
-building. Run this from the module repository root:
+On a compatible AzerothCore source tree, apply the guard and then the receipt before
+building. Skip the guard command if it is already applied. Run from the module root:
 
 ```sh
 git -C "/path/to/server-src" apply "$(git rev-parse --show-toplevel)/patches/azerothcore-trade-offer-guard.patch"
+git -C "/path/to/server-src" apply "$(git rev-parse --show-toplevel)/patches/azerothcore-trade-offer-commit.patch"
 ```
+
+Apply the receipt to the guard-only baseline, not over an earlier receipt candidate.
+If a prior candidate is present, restore the verified guard-only versions of
+`TradeData.h` and `TradeHandler.cpp` or reverse that exact earlier patch first.
+Use `git apply --check` before applying the final patch.
 
 Part of the worldserver build (AzerothCore static modules):
 
@@ -468,8 +468,12 @@ you give it a client path:
 
 ```
 scripts/install-to-server.sh <server-src> [<client>/Interface/AddOns]
-mysql -u <user> -p wl_characters < sql/companion-questsync.sql    # first install only
+mysql -u <user> -p wl_characters < sql/companion-questsync.sql
+mysql -u <user> -p wl_characters < sql/companion-custody.sql
 ```
+
+For an existing realm, follow the [acceptance and rollout checklist](docs/companion-audit-acceptance.md)
+before enabling either allocator or importing custody rows.
 
 Adding the module requires a CMake **re-run** (the module config list is baked in at
 configure time), and on an existing install the `.conf.dist` must be copied to

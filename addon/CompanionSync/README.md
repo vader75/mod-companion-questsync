@@ -33,11 +33,18 @@ same name when the roster refreshes. The window stays compact even with four com
   trade contains only the selected item. Use **Refresh supplies** to check again.
   Stand nearby, both out of combat, and click **Accept** in the normal trade window.
   These one-off requests never cost trade gold and are not sent by mail.
-  The picker requires the matching server module and its existing
-  [AzerothCore trade guard](../../README.md#build).
+  The picker requires a compatible server module. With the
+  [AzerothCore receipt patch](../../README.md#build), the addon tracks the trade from
+  request to receipt. The game can report an in-memory transfer before the save
+  finishes; the addon reports completion only after all offered items are accounted
+  for and the save is confirmed. If an outcome is incomplete or unconfirmed, check
+  your bags before retrying: part of the offer may already have moved.
+  Without receipt support, Collect uses the original command and leaves the result
+  to chat and the trade window.
 
-Summon, dismiss, revive and level stay beside the companion's name. **Untrack** and
-**Release** are separate and still ask for confirmation.
+Summon, dismiss, revive and level stay beside the companion's name. **Untrack**
+preserves ownership. **Release** requests retirement; it does not wipe the body or
+return its name to stock. Both ask for confirmation.
 
 The footer is for the whole roster: **Summon missing**, **Dismiss all**, **Refresh**,
 **Group quests**, and **Ground quests**. Roster updates are pushed by the server; the
@@ -103,6 +110,9 @@ Dismissed companions do not show live quest, bag, or profession data.
 
 Two other payloads share the channel: `Pool stock N: race-class=count|…` for the
 create panel, and `Pin sync N: x,y,h|g=Name|…` for the world map.
+
+The system line `Delivery receipts 1` enables delivery progress and receipts. It
+is independent of `Sync capabilities 1`, which covers snapshots and heartbeat.
 
 ## Why a separate addon
 

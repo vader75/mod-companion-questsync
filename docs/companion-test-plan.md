@@ -131,18 +131,17 @@ with its own Summon/Dismiss/Level/Map buttons; the status lines differ per compa
 
 ---
 
-## T7 — Release back to the pool
+## T7 — Retire without recycling
 
-1. Pick one companion and open the `...` menu on its card → **Release**.
-2. Confirm.
-3. Watch the ladder in the log: `releasing <Name>`, `step 5: finalising`, `6: body reset`,
-   `7: renamed, unbinding`, `8: ledger written`, `release <Name> (<guid>) complete`.
+On a disposable realm, use a verified companion whose inventory, quest state, name
+and custody row you have recorded. Choose **Release** and confirm. The card should
+leave the active roster and the body should remain reserved in `retiring`, with its
+name and progress intact. Restart the test world and verify that it is still reserved.
+Try an unreviewed binding separately: it must not enter retirement or change the body.
 
-**Expected**: the card disappears, the body returns to the pool (its name becomes
-`Zz<guid>`), the name is free to use again, and **the server stays up**. Now create a
-companion with the *same name* — it should succeed.
-
-**Fails if**: the server dies, the name stays taken, or the pool count does not recover.
+**Fails if**: the realm crashes, the body is wiped, the name becomes available, or
+either module advertises the retired body as stock. See the
+[custody migration](companion-custody.md) for offline finalization.
 
 ---
 
