@@ -465,8 +465,10 @@ namespace
     static bool IsControlledCompanion(Player* bot, Player* owner);
     static bool HasSupplyAuthority(Player* bot, Player* owner, bool authoritative);
     static bool IsTownDeliveryStop(Player* owner, Player* bot);
+    WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest);
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
-                    uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0);
+                    uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0,
+                    ObjectGuid readyGiver = ObjectGuid::Empty);
     static uint16 FindFreeBagPos(Player* bot, Item const* item);
     std::map<uint32, std::set<uint32>> g_repairing;       // bot guid -> quests being re-collected
     std::unordered_map<uint32, uint32> g_positionNoticeAt;  // bot guid -> unix time
@@ -497,6 +499,7 @@ namespace
                                  // through the rate limit could outlive its hand-in
                                  // and arrive claiming what already happened.
         uint64 tradeNoticeId = 0;
+        ObjectGuid readyGiver = ObjectGuid::Empty;
     };
 
     struct PendingNotice
@@ -1426,7 +1429,7 @@ namespace
     /// player can act on. Unthrottled per-quest whispering is what makes a rough
     /// levelling session feel like an error console.
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap,
-                    uint32 validWhileMissing, bool handIn, uint64 tradeNoticeId)
+                    uint32 validWhileMissing, bool handIn, uint64 tradeNoticeId, ObjectGuid readyGiver)
     {
         if (!owner || !owner->GetSession())
             return false;
@@ -1464,7 +1467,8 @@ namespace
             auto& queue = g_whisperQueue[ownerGuid];
             bool dup = false;
             for (auto const& entry : queue)
-                if (entry.botGuid == botGuid && entry.text == text && entry.tradeNoticeId == tradeNoticeId)
+                if (entry.botGuid == botGuid && entry.text == text && entry.tradeNoticeId == tradeNoticeId &&
+                    entry.readyGiver == readyGiver)
                     dup = true;
 
             // "Finished 'X' - that pin can go." is the message that removes a map pin:
@@ -1482,7 +1486,7 @@ namespace
                 if (vital)
                     queue.insert(queue.begin(), { text, botGuid, validWhileMissing, now, true, handIn });
                 else
-                    queue.push_back({ text, botGuid, validWhileMissing, now, false, handIn, tradeNoticeId });
+                    queue.push_back({ text, botGuid, validWhileMissing, now, false, handIn, tradeNoticeId, readyGiver });
             }
 
             if (g_cfg.debug >= 2)
@@ -2363,6 +2367,8 @@ namespace
         bot->NearTeleportTo(tx, ty, tz, bot->GetOrientation());
     }
 
+    EnderSpot DescribeQuestEnder(WorldObject* giver);
+
     /// Position is the other half of a desync: the two logs can match while the
     /// companion is a zone away, and nothing used to say so. Reports three cases -
     /// separated, too far from the giver, or actually standing on it - in the same
@@ -2405,7 +2411,8 @@ namespace
             if (!DescribeMissingItems(bot, quest).empty())
                 continue;
 
-            EnderSpot const spot = FindQuestEnder(bot, questId);
+            WorldObject* giver = FindReadyQuestEnder(bot, quest);
+            EnderSpot const spot = giver ? DescribeQuestEnder(giver) : FindQuestEnder(bot, questId);
             if (!spot.found)
                 continue;
 
@@ -2427,10 +2434,8 @@ namespace
 
             float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
 
-            // Interaction range is 5 yards, not 25: claiming "I am at the giver" from
-            // across the square is what made the module say it was handing a quest in
-            // while nothing on the bot side had even opened the gossip window.
-            if (dist <= 6.0f)
+            // Spawn coordinates are directions, not evidence that the giver is usable.
+            if (giver)
             {
                 last = now;
                 hintAt = nowTs;
@@ -2439,7 +2444,7 @@ namespace
                 SayToOwner(bot, owner, "I am at " + spot.name + " with '" + quest->GetTitle() +
                                       "' ready to turn in" +
                                       (here.empty() ? "." : " (" + here + ")."),
-                           45, questId, true);
+                           45, questId, true, 0, giver->GetGUID());
                 return;
             }
 
@@ -2641,6 +2646,12 @@ namespace
                     // "close to the giver" line would arrive describing a past event.
                     // Truth wins over age here - no expiry window can save a lie.
                     stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_COMPLETE;
+                    if (!stale && entry->readyGiver)
+                    {
+                        Quest const* quest = sObjectMgr->GetQuestTemplate(entry->questId);
+                        WorldObject* giver = FindReadyQuestEnder(speaker, quest);
+                        stale = !giver || giver->GetGUID() != entry->readyGiver;
+                    }
                 }
                 else if (entry->questId)
                     stale = speaker->GetQuestStatus(entry->questId) != QUEST_STATUS_NONE ||
@@ -4274,6 +4285,16 @@ namespace
                  giver->GetPositionZ(), giver->GetMapId(), giver->GetZoneId(), giver->GetPhaseMask(), giver->IsGameObject() };
     }
 
+    WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)
+    {
+        if (!quest || bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_COMPLETE)
+            return nullptr;
+        WorldObject* giver = FindInteractableQuestEnder(bot, quest->GetQuestId());
+        if (!giver || !bot->CanRewardQuest(quest, ChooseRewardIndex(bot, quest), false))
+            return nullptr;
+        return giver;
+    }
+
     void DeliverHandIns(Player* owner, Player* bot)
     {
         if (!IsControlledCompanion(bot, owner) || !bot->IsAlive() || bot->IsInCombat() || bot->IsInFlight() ||
@@ -4288,7 +4309,7 @@ namespace
         // Newly-ready invitations, staged and flushed at the end of the pass: the
         // closest quest on the companion's own map speaks first, not whichever quest
         // happened to sit in the first log slot.
-        struct Invite { uint32 dist; bool sameZone; EnderSpot spot; Quest const* quest; };
+        struct Invite { uint32 dist; bool sameZone; Quest const* quest; };
         std::vector<Invite> invites;
 
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
@@ -4317,8 +4338,7 @@ namespace
             {
                 // The companion can finish the hand-in itself, but only where a player
                 // could too: in reach of the giver, not across half the map. Beyond the
-                // range it asks to be led - the gold pin on the giver's map is already
-                // pointing there - and nothing is rewarded and nothing blinks.
+                // range it asks to be led; nothing is rewarded and nothing blinks.
                 uint64 const leadKey = (uint64(botGuid) << 32) | questId;
                 uint32& nudgedAt = g_leadNudgeAt[leadKey];
                 if (!nudgedAt || nowTs - nudgedAt >= 180)
@@ -4373,7 +4393,7 @@ namespace
                     // The pin is the state, the whisper is the invitation: the delay
                     // would otherwise show the player a gold pin they never notice.
                     // Staged - the flush after the loop sorts by proximity and map.
-                    invites.push_back({ uint32(dist), spot.zone == bot->GetZoneId(), spot, quest });
+                    invites.push_back({ uint32(dist), spot.zone == bot->GetZoneId(), quest });
 
                     continue;
                 }
@@ -4440,11 +4460,14 @@ namespace
 
         for (Invite const& invite : invites)
         {
+            WorldObject* giver = FindReadyQuestEnder(bot, invite.quest);
+            if (!giver)
+                continue;
             SayToOwner(bot, owner,
                        "I am ready to hand in '" + invite.quest->GetTitle() + "' at " +
-                       invite.spot.name + " - about " +
-                       std::to_string(invite.dist) + " yards from me. Want to come?", 45,
-                       invite.quest->GetQuestId(), true);
+                       giver->GetName() + " - about " +
+                       std::to_string(uint32(bot->GetDistance(giver))) + " yards from me. Want to come?", 45,
+                       invite.quest->GetQuestId(), true, 0, giver->GetGUID());
         }
     }
 
@@ -5598,10 +5621,9 @@ namespace
                                    DescribeMissingItemsUncached(bot, quest).empty();
                 if (ready)
                 {
-                    WorldObject* giver = FindInteractableQuestEnder(bot, questId);
-                    EnderSpot const spot = giver ? DescribeQuestEnder(giver) : FindQuestEnder(bot, questId);
-                    if (spot.found)
+                    if (WorldObject* giver = FindReadyQuestEnder(bot, quest))
                     {
+                        EnderSpot const spot = DescribeQuestEnder(giver);
                         uint32 const zone = spot.zone ? spot.zone : ZoneAtHeight(spot.map, spot.phase, spot.x, spot.y);
                         int32 const useZone = int32(zone);
 

@@ -57,4 +57,18 @@ class HandInContract(unittest.TestCase):
     def test_queued_arrival_whisper_does_not_claim_reward_and_expires_with_quest(self):
         report = SOURCE.split('void ReportPosition(', 1)[1].split('if (dist > 60.0f)', 1)[0]
         self.assertNotIn('handing it in now', report)
-        self.assertIn('questId, true);', report)
+        self.assertIn('questId, true, 0, giver->GetGUID());', report)
+
+    def test_ready_pin_never_falls_back_to_static_ender(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        self.assertIn('FindReadyQuestEnder(bot, quest)', pins)
+        self.assertNotIn('FindQuestEnder(bot, questId)', pins)
+        gate = SOURCE.split('WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)\n', 1)[1].split('void DeliverHandIns(', 1)[0]
+        for check in ('QUEST_STATUS_COMPLETE', 'FindInteractableQuestEnder(', 'CanRewardQuest('):
+            self.assertIn(check, gate)
+
+    def test_arrival_and_delayed_whisper_require_the_same_live_giver(self):
+        report = SOURCE.split('void ReportPosition(', 1)[1].split('if (dist > 60.0f)', 1)[0]
+        self.assertIn('FindReadyQuestEnder(bot, quest)', report)
+        self.assertIn('giver->GetGUID()', report)
+        self.assertIn('giver->GetGUID() != entry->readyGiver', SOURCE)
