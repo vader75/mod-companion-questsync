@@ -1,0 +1,232 @@
+// Standalone engine-boundary doubles; @@...@@ inserts the real module functions.
+#include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <compare>
+#include <cstdint>
+#include <future>
+#include <map>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+using uint32 = std::uint32_t;
+using uint64 = std::uint64_t;
+using uint16 = std::uint16_t;
+using uint8 = std::uint8_t;
+enum class HighGuid { Player };
+struct ObjectGuid
+{
+    using LowType = uint32;
+    uint32 value = 0;
+    constexpr ObjectGuid(uint32 v = 0) : value(v) {}
+    template <HighGuid> static ObjectGuid Create(uint32 value) { return {value}; }
+    auto operator<=>(ObjectGuid const&) const = default;
+};
+constexpr uint8 NULL_SLOT = 255, NULL_BAG = 255;
+constexpr int TRADE_SLOT_TRADED_COUNT = 6, EQUIP_ERR_OK = 0;
+constexpr int MAIL_STATE_DELETED = 1, MAIL_NORMAL = 0;
+constexpr int MAX_SPELL_REAGENTS = 8, MAX_QUEST_LOG_SIZE = 3;
+constexpr int ITEM_CLASS_QUEST = 1, ITEM_CLASS_CONTAINER = 2, ITEM_CLASS_QUIVER = 3;
+using ItemPosCountVec = std::vector<int>;
+struct SupplyOrder { uint32 entry = 0, keep = 0, fresh = 0; uint16 sourcePos = 0; };
+struct SpellInfo { int Reagent[MAX_SPELL_REAGENTS]; uint32 ReagentCount[MAX_SPELL_REAGENTS]; };
+struct ItemTemplate { uint32 ItemId; uint32 StartQuest = 0, Class = 0; };
+struct Quest
+{
+    uint32 source = 0;
+    std::vector<uint32> RequiredItemId, ItemDrop;
+    uint32 GetSrcItemId() const { return source; }
+};
+struct Objects
+{
+    std::map<uint32, ItemTemplate> templates;
+    std::map<uint32, Quest> quests;
+    auto GetQuestTemplate(uint32 id) const -> Quest const* { return &quests.at(id); }
+    auto GetItemTemplate(uint32 id) const -> ItemTemplate const* { return &templates.at(id); }
+} objects;
+Objects* sObjectMgr = &objects;
+struct Item
+{
+    ObjectGuid guid;
+    uint32 count;
+    uint32 entry = 10;
+    uint16 pos = 0;
+    ObjectGuid GetGUID() const { return guid; }
+    uint32 GetCount() const { return count; }
+    uint32 GetEntry() const { return entry; }
+    uint16 GetPos() const { return pos; }
+    bool IsInTrade() const { return false; }
+    bool CanBeTraded(bool) const { return true; }
+    bool IsSoulBound() const { return false; }
+    bool IsRefundable() const { return false; }
+};
+struct Mail
+{
+    int state = 0, messageType = MAIL_NORMAL;
+    uint32 sender = 7, receiver = 7;
+    std::string subject = "Companion delivery: Test";
+    int expire_time = 100;
+    bool gm = false, payment = false, returned = false;
+    struct Attachment { uint32 item_template, item_guid; };
+    std::vector<Attachment> items;
+    bool IsSentByGM() const { return gm; }
+    bool IsCODPayment() const { return payment; }
+    bool IsReturnedMail() const { return returned; }
+};
+struct WorldSession
+{
+    bool bot = false;
+    bool IsBot() const { return bot; }
+};
+struct Player
+{
+    std::vector<Item*> bag;
+    std::vector<Mail*> mails;
+    std::map<uint32, Item*> attachments;
+    uint32 space = 100;
+    uint32 quest = 0;
+    WorldSession* session = nullptr;
+    WorldSession* GetSession() const { return session; }
+    uint32 GetQuestSlotQuestId(uint16 slot) const { return slot == 0 ? quest : 0; }
+    struct Guid { uint32 GetCounter() const { return 7; } };
+    Guid GetGUID() const { return {}; }
+    auto const& GetMails() const { return mails; }
+    Item* GetMItem(uint32 guid) { return attachments.count(guid) ? attachments[guid] : nullptr; }
+    uint32 GetItemCount(uint32 entry, bool = false) const
+    {
+        uint32 total = 0;
+        for (auto item : bag)
+            if (item->GetEntry() == entry)
+                total += item->GetCount();
+        return total;
+    }
+    int CanStoreItem(uint8, uint8, ItemPosCountVec&, uint32, uint32 count) const { return count > space; }
+    int CanStoreItems(Item* const* items, int slots, uint32*) const
+    {
+        uint32 total = 0;
+        for (int i = 0; i < slots; ++i)
+            if (items[i]) total += items[i]->GetCount();
+        return total > space;
+    }
+};
+struct GameTime { static std::chrono::seconds GetGameTime() { return std::chrono::seconds(100); } };
+template <class Visit> void VisitCarriedItems(Player* player, Visit visit)
+{
+    for (auto item : player->bag) visit(item);
+}
+bool FindFreeBagPos(Player*, Item*) { return true; }
+
+@@QUEST@@
+@@REAGENTS@@
+@@MAIL@@
+@@QUANTITY@@
+DeliveryRule DeliveryRuleFor(Player*, Player*, Item* item, bool, SupplyOrder supply)
+{
+    return supply.entry && item->GetEntry() != supply.entry ? DeliveryRule{} : DeliveryRule{5, 6};
+}
+@@PLAN@@
+@@RECEIPT_TYPE@@
+struct ObjectAccessor
+{
+    static inline std::map<uint32, Player*> connected;
+    static Player* FindConnectedPlayer(ObjectGuid guid)
+    {
+        auto it = connected.find(guid.value);
+        return it != connected.end() ? it->second : nullptr;
+    }
+};
+std::vector<std::string> outcomes;
+Player* expectedRecipient = nullptr;
+void SendDeliveryProgress(Player* target, uint32, char const* state, char const*)
+{
+    if (!target) return; // SendProtocolLine drops null targets in the world server
+    assert(target == expectedRecipient);
+    outcomes.emplace_back(state);
+}
+@@LOOKUP@@
+@@RECEIPT@@
+struct PendingTrade { uint32 ownerGuid; uint32 nonce; };
+@@CANCELLATION@@
+
+int main()
+{
+    Player bot, owner;
+    Item big{1, 9}, small{2, 2}, other{3, 4};
+    std::vector<Item*> stacks{&big, &small, &other};
+    auto order = [](Item* a, Item* b) { return a->guid < b->guid; };
+    using Offer = std::vector<std::pair<ObjectGuid, uint32>>;
+    do
+    {
+        bot.bag = stacks;
+        assert((PlanDelivery(&bot, &owner, false, false, {10}) == Offer{{3, 4}, {2, 2}}));
+        assert((PlanDelivery(&bot, &owner, false, true, {}) == Offer{{3, 4}, {2, 2}}));
+        owner.space = 3;
+        assert((PlanDelivery(&bot, &owner, false, false, {10}) == Offer{{2, 2}}));
+        owner.space = 100;
+    } while (std::next_permutation(stacks.begin(), stacks.end(), order));
+    bot.bag = {&big, &small};
+    assert((PlanDelivery(&bot, &owner, false, false, {10}) == Offer{{1, 6}}));
+
+    SpellInfo spell{{10, 10, -1}, {1, 2, 9}};
+    assert((CraftReagentRequirements(&spell) == std::map<uint32, uint32>{{10, 3}}));
+    objects.templates[10] = {10};
+    objects.quests[1] = {0, {10}, {}};
+    assert(UsableCraftReagentCount(&bot, &owner, 10) == 11);
+    owner.quest = 1;
+    assert(UsableCraftReagentCount(&bot, &owner, 10) == 0);
+    owner.quest = 0;
+    bot.quest = 1;
+    assert(UsableCraftReagentCount(&bot, &owner, 10) == 0);
+
+    Mail original, returned, otherSender, deleted, unexpired;
+    for (auto mail : {&original, &returned, &otherSender, &deleted, &unexpired})
+    {
+        mail->expire_time = 99;
+        mail->items.push_back({10, 2});
+    }
+    original.items.push_back({10, 999}); // absent loaded attachment contributes nothing
+    returned.returned = true;
+    otherSender.sender = 8;
+    deleted.state = MAIL_STATE_DELETED;
+    unexpired.expire_time = 100;
+    unexpired.returned = true; // recoverable now, but not after its second expiry
+    unexpired.items.push_back({10, 3});
+    owner.attachments[2] = &small;
+    owner.attachments[3] = &other;
+    owner.mails = {&original, &returned, &otherSender, &deleted, &unexpired};
+    assert(OwnerStock(&owner, 10) == 6); // the duplicate reference to GUID 2 counts only once
+    assert(!IsDeliveryMail(&deleted, 7));
+    assert(RecoverableDeliveryMail(&original, 7));
+    assert(!RecoverableDeliveryMail(&returned, 7));
+
+    using namespace std::chrono;
+    WorldSession human, automated{true};
+    owner.session = &human;
+    bot.session = &automated;
+    ObjectAccessor::connected = {{7, &owner}, {8, &bot}};
+    expectedRecipient = &owner;
+    std::promise<bool> committed, partial, failed, slow, wrongRecipient;
+    auto const deadline = steady_clock::now() + seconds(10);
+    g_deliveryReceipts.emplace(1, DeliveryReceipt{7, 11, deadline, true, committed.get_future().share()});
+    g_deliveryReceipts.emplace(2, DeliveryReceipt{7, 12, deadline, false, partial.get_future().share()});
+    g_deliveryReceipts.emplace(3, DeliveryReceipt{7, 13, deadline, true, failed.get_future().share()});
+    g_deliveryReceipts.emplace(4, DeliveryReceipt{7, 14, steady_clock::now() - seconds(1), true, slow.get_future().share()});
+    wrongRecipient.set_value(true);
+    g_deliveryReceipts.emplace(5, DeliveryReceipt{8, 15, deadline, true, wrongRecipient.get_future().share()});
+    ApplyDeliveryReceipts();
+    assert((outcomes == std::vector<std::string>{"unconfirmed"})); // only the owner's expired receipt
+    committed.set_value(true);
+    partial.set_value(true);
+    failed.set_value(false);
+    ApplyDeliveryReceipts();
+    assert((outcomes == std::vector<std::string>{"unconfirmed", "completed", "failed", "unconfirmed"}));
+    assert(g_deliveryReceipts.empty());
+
+    outcomes.clear();
+    CancelPendingDelivery(8, PendingTrade{7, 16}, "Cancelled");
+    CancelPendingDelivery(8, PendingTrade{8, 17}, "Not a human recipient");
+    CancelPendingDelivery(8, PendingTrade{9, 18}, "No connected recipient");
+    assert((outcomes == std::vector<std::string>{"cancelled"}));
+}

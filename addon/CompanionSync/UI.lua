@@ -16,7 +16,7 @@ local PAD = 16
 local CARD_HEIGHT = 246
 local ROSTER_HEIGHT = 32
 local HEADER_HEIGHT = 62
-local FOOTER_HEIGHT = 68          -- buttons, roster hint and the server's answer
+local FOOTER_HEIGHT = 90          -- buttons, roster hint, notices and delivery result
 local EMPTY_HEIGHT = 108         -- the "no companions yet" copy needs room of its own
 local ADD_PANEL_HEIGHT = 278      -- race/class, name, pool stock, answer, Create/Cancel
 local MAX_CARDS = 4
@@ -115,7 +115,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function CanSupply(companion)
-    return companion and G.HasFlag(companion, "o") and not G.HasFlag(companion, "d")
+    return G.SnapshotState("roster") == "ready" and companion and G.HasFlag(companion, "o") and not G.HasFlag(companion, "d")
         and not G.releasing[companion.name]
 end
 
@@ -143,7 +143,7 @@ local function RefreshSupply()
         local active = supply and companion and supply.name == companion.name
         EnableButton(card.supplyPicker, active and not pending)
         EnableButton(card.supplyRefresh, active and not pending)
-        EnableButton(card.supplyAction, active and supplyChoice)
+        EnableButton(card.supplyAction, active and supplyChoice and not G.DeliveryPending())
         card.supplyPicker:SetText(active and supplyChoice and SupplyLabel(supplyChoice) or "Choose supply  ▾")
         card.supplyAction:SetText(active and supplyChoice and (supplyChoice.kind == "bag" and "Take supply" or "Craft supply")
             or "Take / Craft")
@@ -404,11 +404,7 @@ local function CreateCard()
 
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
-        if not companion then return end
-        local state = G.CardState(companion)
-        if state.online and not state.dead and not state.releasing then
-            G.Action("delivery collect", companion.name)
-        end
+        if CanSupply(companion) then G.CollectDelivery(companion.name) end
     end, "Stand nearby and out of combat to collect what this companion has ready. You still accept the trade.")
     card.collectButton:SetPoint("TOPLEFT", 440, -100)
 
@@ -442,7 +438,7 @@ local function CreateCard()
 
     -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
     -- discover is a control that does not get used: the release never reached the server at all.
-    -- They are plain buttons now, release in warning colour because it cannot be undone.
+    -- They are plain buttons now; release is a request for offline retirement.
     card.untrackButton = Button(card, "Untrack", 62, function()
         if card.companion then G.ConfirmUnbind(card.companion.name) end
     end, "Stop following this companion's quests. The bot stays yours.")
@@ -450,7 +446,7 @@ local function CreateCard()
 
     card.releaseButton = Button(card, "Release", 62, function()
         if card.companion then G.ConfirmRelease(card.companion.name) end
-    end, "Wipe it and give the body back to the pool. This cannot be undone.")
+    end, "Quarantine it for staff review. The body and name stay reserved.")
     card.releaseButton:SetPoint("BOTTOMRIGHT", -78, -12)
     card.releaseButton:GetFontString():SetTextColor(1, 0.6, 0.6)
 
@@ -515,6 +511,8 @@ local function ClassList(raceId)
     return list
 end
 
+local function PoolState() return G.SnapshotState("pool") end
+
 local function RefreshAddPanel()
     if not addPanel or not addPanel:IsShown() then return end
 
@@ -524,10 +522,20 @@ local function RefreshAddPanel()
     UIDropDownMenu_SetText(classDropdown, G.ClassName(pick.class))
     createButton:SetText("Create " .. G.RaceName(pick.race) .. " " .. G.ClassName(pick.class))
 
-    if stock > 0 then
+    local state = PoolState()
+    EnableButton(createButton, G.ServerAlive() and state ~= "disabled")
+    if state == "disabled" then
+        stockLabel:SetText(COL_WARN .. "Pool creation is disabled on this server." .. COL_RESET)
+    elseif not G.ServerAlive() then
+        stockLabel:SetText(COL_BAD .. "Pool stock unavailable: server not answering." .. COL_RESET)
+    elseif state == "missing" then
+        stockLabel:SetText(COL_MUTED .. "Waiting for pool stock…" .. COL_RESET)
+    elseif state == "stale" then
+        stockLabel:SetText(COL_WARN .. "Pool stock is stale; the server checks availability on Create." .. COL_RESET)
+    elseif state == "empty" then
+        stockLabel:SetText(COL_WARN .. "The pool is empty right now." .. COL_RESET)
+    elseif stock > 0 then
         stockLabel:SetText(("%s%d free in the pool%s"):format(COL_GOOD, stock, COL_RESET))
-    elseif not next(G.stock) then
-        stockLabel:SetText(COL_MUTED .. "asking the server what the pool holds..." .. COL_RESET)
     else
         stockLabel:SetText(COL_BAD .. "none free - the server will refuse this combination" .. COL_RESET)
     end
@@ -568,7 +576,7 @@ local function CreateAddPanel()
     addPanel.hint:SetPoint("TOPLEFT", 18, -34)
     Wrap(addPanel.hint, WIDTH - 64)
     addPanel.hint:SetText(COL_MUTED ..
-        "A free body is taken from the pool, wiped to level 1, named and called to your side." .. COL_RESET)
+        "A reviewed level-1 body is claimed, named and called to your side." .. COL_RESET)
 
     -- row 1: race and class
     Label(addPanel, "Race", 20, -62)
@@ -578,10 +586,11 @@ local function CreateAddPanel()
     raceDropdown:SetPoint("TOPLEFT", 4, -74)
     UIDropDownMenu_SetWidth(raceDropdown, 150)
     UIDropDownMenu_Initialize(raceDropdown, function()
+        local known = PoolState() == "ready" or PoolState() == "empty"
         for _, race in ipairs(RaceList()) do
             UIDropDownMenu_AddButton({
-                text = race.text .. (race.stock > 0 and ("   " .. COL_MUTED .. race.stock .. COL_RESET)
-                                                       or ("   " .. COL_BAD .. "none" .. COL_RESET)),
+                text = race.text .. (not known and "" or race.stock > 0 and ("   " .. COL_MUTED .. race.stock .. COL_RESET)
+                    or ("   " .. COL_BAD .. "none" .. COL_RESET)),
                 value = race.id,
                 checked = (pick.race == race.id),
                 func = function()
@@ -596,13 +605,14 @@ local function CreateAddPanel()
     classDropdown:SetPoint("TOPLEFT", 200, -74)
     UIDropDownMenu_SetWidth(classDropdown, 150)
     UIDropDownMenu_Initialize(classDropdown, function()
+        local known = PoolState() == "ready" or PoolState() == "empty"
         for _, class in ipairs(ClassList(pick.race)) do
             UIDropDownMenu_AddButton({
-                text = class.stock > 0 and (class.text .. "   " .. COL_MUTED .. class.stock .. COL_RESET)
-                                       or ("|cff5a5a5a" .. class.text .. COL_RESET),
+                text = not known and class.text or class.stock > 0 and (class.text .. "   " .. COL_MUTED .. class.stock .. COL_RESET)
+                    or ("|cff5a5a5a" .. class.text .. COL_RESET),
                 value = class.id,
                 checked = (pick.class == class.id),
-                disabled = class.stock <= 0,
+                disabled = known and class.stock <= 0,
                 func = function()
                     pick.class = class.id
                     RefreshAddPanel()
@@ -666,6 +676,16 @@ local function CreateAddPanel()
     return addPanel
 end
 
+local POLL_SECONDS = 15
+local lastPoolRequest, lastRosterRequest
+
+local function RequestPool()
+    if not G.ServerAlive() or PoolState() == "disabled" then return end
+    local now = time()
+    if lastPoolRequest and now - lastPoolRequest < POLL_SECONDS then return end
+    if G.Run(".companionsync pool") then lastPoolRequest = now end
+end
+
 function G.ShowAddPanel()
     if not addPanel then CreateAddPanel() end
 
@@ -677,21 +697,22 @@ function G.ShowAddPanel()
     addPanel.rosterCount = #G.companions
     addPanel:Show()
     RefreshAddPanel()
-    G.Run(".companionsync pool")
+    RequestPool()
 end
 
 function G.OnStockChanged() RefreshAddPanel() end
 
 -- Poll local freshness, not the realm. Normally the roster is pushed on change.
-local POLL_SECONDS = 15
-local lastRosterRequest
-
 function G.PollState(force)
+    if not G.ServerAlive() then return end
+    if addPanel and addPanel:IsShown() and (force or PoolState() == "missing" or PoolState() == "stale") then
+        RequestPool()
+    end
     local now = time()
-    if not force and (not G.ServerAlive() or (G.lastRosterAt and now - G.lastRosterAt < 90)) then return end
-    if lastRosterRequest and now - lastRosterRequest < 15 then return end
-    lastRosterRequest = now
-    G.Run(".companionsync refresh roster")
+    local state = G.SnapshotState("roster")
+    if not force and (state == "ready" or state == "empty") then return end
+    if lastRosterRequest and now - lastRosterRequest < POLL_SECONDS then return end
+    if G.Run(".companionsync refresh roster") then lastRosterRequest = now end
 end
 
 function G.OnServerMessage(text)
@@ -714,20 +735,60 @@ end
 -- window
 -- ---------------------------------------------------------------------------
 
+local function RefreshDelivery()
+    if not frame or not frame.delivery then return end
+    local order = G.delivery
+    local color = order and (order.state == "completed" and COL_GOOD
+        or order.state == "failed" and COL_BAD or order.state == "cancelled" and COL_WARN
+        or order.state == "unconfirmed" and COL_WARN or COL_MUTED)
+    frame.delivery:SetText(order and (color .. order.name .. ": " .. order.message .. COL_RESET) or "")
+end
+
+G.OnDeliveryChanged = function()
+    if frame and frame:IsShown() then
+        G.Refresh()
+    elseif G.delivery and G.delivery.wireNonce and not G.DeliveryPending() then
+        G.Warn(G.delivery.name .. ": " .. G.delivery.message)
+    end
+end
+
+local emptyRosterText = "No companions yet.\n\nPress + Add companion, pick a race and a class, then Create.\nFour is the most: a party of five, counting you."
+local readinessKey
+local function Readiness()
+    local live, state = G.ServerAlive(), G.SnapshotState("roster")
+    local presence = live and "live" or (G.lastServerLineAt or G.presenceProbeExpired) and "lost" or "waiting"
+    return presence, state, presence .. ":" .. state .. ":" .. PoolState()
+end
+
+G.OnReadinessChanged = function()
+    local _, _, key = Readiness()
+    if key == readinessKey then return end
+    if frame and frame:IsShown() then G.Refresh() else readinessKey = key end
+    if G.RefreshLauncherBadge then G.RefreshLauncherBadge() end
+end
+
 function G.Refresh()
     if not frame then return end
 
     local count = #G.companions
 
+    local presence, rosterState, key = Readiness()
+    readinessKey = key
+    local stale = rosterState == "stale"
+    local rosterMessage = presence == "waiting" and "Waiting for the server…"
+        or presence == "lost" and "server not answering"
+        or rosterState == "missing" and "Waiting for the roster…"
+        or stale and "Roster is stale; waiting for an update…"
     if frame.count then
-        -- The header subtitle was created and never written - dead space that looked like
-        -- missing state. It now answers the first question a returning player has.
-        local state = G.ServerAlive() and "|cff20ff20server answering|r" or "|cffff6060server not answering|r"
-        if G.releasing and next(G.releasing) then
-            state = "|cffffc94dworking - releasing...|r"
-        end
+        local state = rosterMessage and ((presence == "lost" and COL_BAD or COL_WARN) .. rosterMessage .. COL_RESET)
+            or next(G.releasing) and (COL_WARN .. "working - releasing…" .. COL_RESET)
+            or (COL_GOOD .. "server answering" .. COL_RESET)
         frame.count:SetText(count == 0 and state
-            or (COL_MUTED .. count .. (count == 1 and " companion · " or " companions · ") .. COL_RESET) .. state)
+            or (COL_MUTED .. count .. (stale and " last seen · " or count == 1 and " companion · " or " companions · ") .. COL_RESET) .. state)
+    end
+    if frame.empty then
+        local hint = G.poolEnabled == false and "No companions yet. Pool creation is disabled on this server." or emptyRosterText
+        frame.empty:SetText(COL_MUTED .. (rosterMessage or hint) .. COL_RESET)
     end
 
     local selected
@@ -762,9 +823,9 @@ function G.Refresh()
             card.stripe:SetTexture(r, g, b, online and 0.85 or 0.25)
 
             local state = G.CardState(companion)
-            local statusColor = state.dead and COL_BAD or state.releasing and COL_WARN
+            local statusColor = stale and COL_MUTED or state.dead and COL_BAD or state.releasing and COL_WARN
                 or state.online and COL_GOOD or COL_MUTED
-            local subtitle = statusColor .. state.status .. COL_RESET
+            local subtitle = statusColor .. (stale and "Last seen: " or "") .. state.status .. COL_RESET
             if state.online and companion.level > 0 then
                 subtitle = ("%sLevel %d %s%s  ·  %s"):format(
                     COL_MUTED, companion.level, G.ClassName(companion.classId), COL_RESET, subtitle)
@@ -790,14 +851,17 @@ function G.Refresh()
                 card.bags:SetText(COL_MUTED .. (state.releasing and "Unavailable" or "Summon to collect.") .. COL_RESET)
                 card.bags:Show()
             end
-            if online and not state.dead and not state.releasing then
-                card.collectButton:Enable()
+            local canCollect = CanSupply(companion) and not G.DeliveryPending()
+            EnableButton(card.collectButton, canCollect)
+            if canCollect then
                 card.collectButton:GetFontString():SetTextColor(1, 0.82, 0.4)
+            else
+                card.collectButton:GetFontString():SetTextColor(0.53, 0.53, 0.55)
+            end
+            if online and not state.dead and not state.releasing then
                 card.trainButton:Show()
                 card.professionsButton:Show()
             else
-                card.collectButton:Disable()
-                card.collectButton:GetFontString():SetTextColor(0.53, 0.53, 0.55)
                 card.trainButton:Hide()
                 card.professionsButton:Hide()
             end
@@ -819,6 +883,7 @@ function G.Refresh()
                 card.releaseButton:Show()
                 card.untrackButton:Show()
             end
+            EnableButton(card.releaseButton, not stale)
 
         else
             card.companion = nil
@@ -832,6 +897,8 @@ function G.Refresh()
 
         if count == 0 then
             frame.hint:SetText("")
+        elseif G.poolEnabled == false then
+            frame.hint:SetText(COL_MUTED .. "Pool creation is disabled on this server." .. COL_RESET)
         elseif free > 0 then
             frame.hint:SetText(("%s%d of %d companions  ·  %d slot%s free - press + Add companion%s"):format(
                 COL_MUTED, count, MAX_CARDS, free, free == 1 and "" or "s", COL_RESET))
@@ -844,6 +911,8 @@ function G.Refresh()
     if addPanel and addPanel:IsShown() and count > addPanel.rosterCount then addPanel:Hide() end
     LayoutWindow(count)
     SyncSupplyScope(selected)
+    RefreshAddPanel()
+    RefreshDelivery()
 end
 
 local function CreateWindow()
@@ -931,23 +1000,6 @@ local function CreateWindow()
 
         if self.elapsed >= POLL_SECONDS then
             self.elapsed = 0
-
-            -- The poll is honest by construction now: G.ServerAlive() is derived from
-            -- the last line's age, so a dead module starves the poll without any
-            -- bookkeeping here, and one live line brings it straight back. The banner
-            -- that says so clears itself on revival - a stale "not answering" over a
-            -- live roster read as broken.
-            if frame.notice then
-                if not G.ServerAlive() then
-                    frame.notice:SetText("|cffff6060the module is not answering - the window resumes when it speaks again|r")
-                    frame.deadNotice = true
-                elseif frame.deadNotice then
-                    frame.notice:SetText("")
-                    frame.notice:Hide()
-                    frame.deadNotice = nil
-                end
-            end
-
             G.PollState()
         end
     end)
@@ -982,15 +1034,15 @@ local function CreateWindow()
     frame.hint:SetPoint("BOTTOMLEFT", PAD, 36)
     Wrap(frame.hint, WIDTH - 2 * PAD)
 
+    frame.delivery = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.delivery:SetPoint("BOTTOMLEFT", PAD, 65)
+    frame.delivery:SetHeight(22)
+    Wrap(frame.delivery, WIDTH - 2 * PAD)
+
     frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.empty:SetPoint("TOPLEFT", PAD, -(HEADER_HEIGHT + 8))
     Wrap(frame.empty, WIDTH - 2 * PAD)
     frame.empty:SetSpacing(4)
-    frame.empty:SetText(COL_MUTED .. "No companions yet." .. COL_RESET .. "\n\n" ..
-        COL_MUTED .. "Press " .. COL_RESET .. "|cffffff00+ Add companion|r" .. COL_MUTED ..
-        ", pick a race and a class, then " .. COL_RESET .. "|cffffff00Create|r" .. COL_MUTED .. "." ..
-        COL_RESET .. "\n" ..
-        COL_MUTED .. "Four is the most: a party of five, counting you." .. COL_RESET)
 
     frame.footline = frame:CreateTexture(nil, "BORDER")
     frame.footline:SetPoint("BOTTOMLEFT", PAD, FOOTER_HEIGHT)
@@ -1049,6 +1101,7 @@ function G.Toggle()
         frame:ClearAllPoints()
         frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 60)
         frame:Show()
+        G.ExpireRequests()
         G.Refresh()
         G.PollState()
     end
@@ -1069,37 +1122,45 @@ end
 -- belongs to an interface, and it still sits in the minimap corner where people look for it.
 local launcher
 
+local function RingRadius(anchor)
+    if anchor ~= Minimap then return 84 end
+    local width, height = anchor:GetWidth(), anchor:GetHeight()
+    return math.max(type(width) == "number" and width or 140, type(height) == "number" and height or 140) / 2 + 14
+end
+
+local function Finite(n) return type(n) == "number" and n > -math.huge and n < math.huge end
+
+local function LauncherScale(frame)
+    local scale = frame:GetEffectiveScale()
+    return Finite(scale) and scale > 0 and scale or 1
+end
+
+local function PlaceLauncher(saved)
+    local anchor = Minimap or UIParent
+    local radius = RingRadius(anchor)
+    local x, y = -radius, 0
+    if type(saved) == "table" and Finite(saved.x) and Finite(saved.y) and not saved.legacy
+        and (saved.version == 2 or (saved.version == nil and not (saved.x == 6 and saved.y == -60))) then
+        local distance = math.sqrt(saved.x * saved.x + saved.y * saved.y)
+        if distance > 0.001 and Finite(distance) then
+            local clamp = math.min(1, radius / distance)
+            x, y = saved.x * clamp, saved.y * clamp
+        end
+    end
+    if CompanionSyncDB then CompanionSyncDB.launcher = { version = 2, x = x, y = y } end
+    if launcher then
+        local scale = LauncherScale(anchor) / LauncherScale(launcher)
+        launcher:ClearAllPoints()
+        launcher:SetPoint("CENTER", anchor, "CENTER", x * scale, y * scale)
+    end
+end
+
 local function CreateLauncher()
     -- Parent to UIParent and anchor to the minimap: a child of Minimap inherits its draw
     -- order and can end up behind the map itself on clients with a restyled minimap.
-    local anchor = Minimap or UIParent
     launcher = CreateFrame("Button", "CompanionSyncLauncher", UIParent)
 launcher:SetSize(24, 24)
-
--- The button rides the minimap's EDGE RING, centre-anchored: any interface suite that
--- moves or rescales the minimap carries it along, and a drag can never strand it mid-screen.
--- The old top-left pixel offsets were relative to a minimap of one size in one place, which
--- is exactly what a suite like Dragon UI rearranges.
-local function RingRadius()
-    local w = Minimap and math.max(Minimap:GetWidth() or 140, Minimap:GetHeight() or 140) or 140
-    return w / 2 + 14
-end
-
-local saved = CompanionSyncDB and CompanionSyncDB.launcher or nil
--- Legacy saves ({x = 6, y = -60}) were top-left pixel offsets from a minimap of one size;
--- their values cannot be carried across a suite that rearranges the map, so they reset to
--- the default west-edge spot - one drag puts the button anywhere the ring allows.
-if saved and (saved.legacy or (saved.x < 40 and saved.y > -200)) then
-    saved = nil
-end
-if not saved then
-    local r = RingRadius()
-    saved = { x = -r, y = 0 }        -- default: straight west of the minimap
-end
-if CompanionSyncDB then
-    CompanionSyncDB.launcher = saved
-end
-launcher:SetPoint("CENTER", anchor, "CENTER", saved.x, saved.y)
+PlaceLauncher(CompanionSyncDB and CompanionSyncDB.launcher)
 launcher:SetFrameStrata("HIGH")
 launcher:SetBackdrop({
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1131,7 +1192,7 @@ launcher.badge:Hide()
 local function RefreshLauncherBadge()
     if not (launcher and launcher.badge) then return end
     local count = G.companions and #G.companions or 0
-    if count > 0 then
+    if G.SnapshotState("roster") == "ready" and count > 0 then
         launcher.badge:SetText("|cffffd200" .. count .. "|r")
         launcher.badge:Show()
     else
@@ -1145,15 +1206,16 @@ launcher:SetMovable(true)
 launcher:RegisterForDrag("LeftButton")
 launcher:SetClampedToScreen(true)
 
+launcher:SetScript("OnMouseDown", function(self) self.dragged = nil end)
 launcher:SetScript("OnDragStart", function(self)
     self.dragged = true
-    self:SetUserPlaced(false)
     self:StartMoving()
     GameTooltip:Hide()
 end)
 
 launcher:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
+    self:SetUserPlaced(false) -- use the versioned save, not WoW's auto-placement
 
     -- Take the cursor's angle around the minimap: the cursor position is divided by the
     -- MINIMAP's effective scale and measured against the minimap's own centre, so both
@@ -1163,27 +1225,17 @@ launcher:SetScript("OnDragStop", function(self)
     local anchor = Minimap or UIParent
     if not anchor then return end
 
-    local scale = anchor:GetEffectiveScale()
+    local scale = LauncherScale(anchor)
     local cx, cy = GetCursorPosition()
     cx, cy = cx / scale, cy / scale
     local mx, my = anchor:GetCenter()
 
-    local dx, dy = cx - mx, cy - my
-    local r = RingRadius()
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d > 0.001 then
-        local k = math.min(1, r / d)
-        dx, dy = dx * k, dy * k        -- clamp onto the ring, keep the angle
-    else
-        dx, dy = -r, 0
+    if not (Finite(mx) and Finite(my)) then
+        PlaceLauncher(CompanionSyncDB and CompanionSyncDB.launcher)
+        return
     end
-
-    self:ClearAllPoints()
-    self:SetPoint("CENTER", anchor, "CENTER", dx, dy)
-
-    if CompanionSyncDB then
-        CompanionSyncDB.launcher = { x = dx, y = dy }
-    end
+    if not CompanionSyncDB then InitDB() end
+    PlaceLauncher({ version = 2, x = cx - mx, y = cy - my })
 end)
 
 launcher:SetScript("OnClick", function(self)
@@ -1198,9 +1250,16 @@ launcher:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:AddLine("Companions", 1, 0.79, 0.30)
     GameTooltip:AddLine("Drag to move - click to open", 0.6, 0.6, 0.6)
+    local state = G.SnapshotState("roster")
     local count = G.companions and #G.companions or 0
-    if count > 0 then
+    if state == "ready" then
         GameTooltip:AddLine(("%d bound - click to manage"):format(count), 1, 1, 1)
+    elseif state == "stale" then
+        GameTooltip:AddLine("Roster is stale - click for status", 1, 1, 1)
+    elseif state == "missing" then
+        GameTooltip:AddLine("Roster not received - click for status", 1, 1, 1)
+    elseif G.poolEnabled == false then
+        GameTooltip:AddLine("None bound - pool creation is disabled", 1, 1, 1)
     else
         GameTooltip:AddLine("None yet - click to add one", 1, 1, 1)
     end
@@ -1225,12 +1284,16 @@ boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_ENTERING_WORLD")
 boot:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
-        if arg1 == addonName then InitDB() end
+        if arg1 == addonName then
+            InitDB()
+            PlaceLauncher(CompanionSyncDB.launcher)
+        end
         return
     end
 
     self:UnregisterEvent("PLAYER_ENTERING_WORLD")
     if not CompanionSyncDB then InitDB() end
+    PlaceLauncher(CompanionSyncDB.launcher)
     if not frame then CreateWindow() end
 
     -- One line, once per login, so "is it even loaded?" is answerable from chat instead of
@@ -1271,16 +1334,13 @@ end)
 
 
 -- /csstate - print what the launcher is, where it is, and what it is anchored to
--- /csreset - put the button back in the minimap's corner
+-- /csreset - restore the launcher's default ring position
 SLASH_CSRESET1 = "/csreset"
 SLASH_CSRESET2 = "/wlcgreset"
 SlashCmdList["CSRESET"] = function()
-    if CompanionSyncDB then CompanionSyncDB.launcher = { x = 6, y = -60 } end
-    if launcher then
-        launcher:ClearAllPoints()
-        launcher:SetPoint("TOPLEFT", Minimap or UIParent, "TOPLEFT", 6, -60)
-    end
-    DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r minimap button back in the corner")
+    if not CompanionSyncDB then InitDB() end
+    PlaceLauncher(nil)
+    DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r minimap button reset")
 end
 
 SLASH_CSSTATE1 = "/csstate"
@@ -1311,18 +1371,13 @@ probe:SetScript("OnEvent", function(self)
             return
         end
 
-        -- longer than one pass plus a margin. The interval comes from the server's hello
-        -- line ("CSYNC|Hello 30") when it has arrived; 30 is the config default and 45 is
-        -- the floor, so a realm that syncs every 90s does not get a false alarm at 46.
         waited = waited + delta
-        local patience = math.max(45, (G.serverInterval or 30) + 15)
-        if waited < patience then return end
+        if waited < G.ServerPatience() then return end
 
         frame:SetScript("OnUpdate", nil)
 
-        -- no timestamp written: the absence is proven by there being nothing to be
-        -- alive from, which is exactly what G.ServerAlive() already reports
-        G.OnServerMessage("the module is not answering - is mod-companion-questsync enabled?")
+        G.presenceProbeExpired = true
+        G.OnReadinessChanged()
 
         DEFAULT_CHAT_FRAME:AddMessage("|cffffc94dCompanion Sync|r: the server is not answering - "
             .. "is mod-companion-questsync enabled?")

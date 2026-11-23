@@ -1,0 +1,153 @@
+diff --git a/src/server/game/Entities/Player/TradeData.h b/src/server/game/Entities/Player/TradeData.h
+--- a/src/server/game/Entities/Player/TradeData.h
++++ b/src/server/game/Entities/Player/TradeData.h
+@@ -20,9 +20,11 @@
+ 
+ #include "Define.h"
+ #include <functional>
++#include <future>
+ #include <utility>
+ 
+ #define AC_TRADE_OFFER_GUARD 1
++#define AC_TRADE_OFFER_COMMIT 1
+ 
+ class Item;
+ class ObjectGuid;
+@@ -71,6 +73,14 @@
+     [[nodiscard]] uint64 GetOfferToken() const { return _offerToken; }
+     [[nodiscard]] bool AcceptsOffer() const { return !_offerGuard || _offerGuard(_player, _trader, this); }
+ 
++    // The companion needs a real window and the result of the inventory save,
++    // not a heuristic based on TradeData disappearing.
++    using OfferCommit = std::function<void(bool, std::shared_future<bool>)>;
++    void SetOfferCommit(OfferCommit receipt) { _offerCommit = std::move(receipt); }
++    [[nodiscard]] OfferCommit TakeOfferCommit() { return std::exchange(_offerCommit, {}); }
++    void MarkOfferWindowOpen() { _offerWindowOpen = true; }
++    [[nodiscard]] bool IsOfferWindowOpen() const { return _offerWindowOpen; }
++
+     [[nodiscard]] bool IsInAcceptProcess() const { return m_acceptProccess; }
+     void SetInAcceptProcess(bool state) { m_acceptProccess = state; }
+ 
+@@ -80,6 +90,8 @@
+ private:                                                // fields
+     uint64 _offerToken = 0;
+     OfferGuard _offerGuard;
++    OfferCommit _offerCommit;
++    bool _offerWindowOpen = false;
+     Player*    _player;                                // Player who own of this TradeData
+     Player*    _trader;                                // Player who trade with m_player
+ 
+diff --git a/src/server/game/Handlers/TradeHandler.cpp b/src/server/game/Handlers/TradeHandler.cpp
+--- a/src/server/game/Handlers/TradeHandler.cpp
++++ b/src/server/game/Handlers/TradeHandler.cpp
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "Chat.h"
++#include "DatabaseEnv.h"
+ #include "Item.h"
+ #include "Language.h"
+ #include "Log.h"
+@@ -30,6 +31,7 @@
+ #include "World.h"
+ #include "WorldPacket.h"
+ #include "WorldSession.h"
++#include <map>
+ 
+ void WorldSession::SendTradeStatus(TradeStatusInfo const& info)
+ {
+@@ -248,6 +250,13 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& /*recvPacket*/)
++    bool const guardedOffer = my_trade->GetOfferToken() || his_trade->GetOfferToken();
++    // The module arms the companion's side after filling the offer. Ignore bot
++    // accept opcodes, including delayed AI callbacks from an earlier window;
++    // only the human's opcode can complete this trade. Leave both flags alone.
++    if (guardedOffer && IsBot())
++        return;
++
+     // Keep the trade records on a rejected accept. Playerbots uses their
+     // disappearance after this opcode to recognise a completed transfer.
+     auto const rejectAccept = [&]
+     {
+         my_trade->SetAccepted(false);
+         his_trade->SetAccepted(false);
+@@ -525,6 +534,35 @@
+             }
+         }
+ 
++        // A storage failure can return a stack to its source even after trade
++        // preflight succeeds. For guarded offers, check exact inventory
++        // deltas by entry; successful stack merges can destroy the source GUID.
++        auto myOfferCommit = my_trade->TakeOfferCommit();
++        auto hisOfferCommit = his_trade->TakeOfferCommit();
++        std::map<uint32, std::pair<int64, int64>> expected;
++        if (guardedOffer)
++        {
++            auto expect = [&](TradedItemInfo const& item, int64 sign)
++            {
++                if (!item.present)
++                    return;
++                auto [it, added] = expected.try_emplace(item.entry);
++                auto& [mine, theirs] = it->second;
++                if (added)
++                {
++                    mine = _player->GetItemCount(item.entry);
++                    theirs = trader->GetItemCount(item.entry);
++                }
++                mine += sign * item.count;
++                theirs -= sign * item.count;
++            };
++            for (uint8 i = 0; i < TRADE_SLOT_TRADED_COUNT; ++i)
++            {
++                expect(myItemsInfo[i], -1);
++                expect(hisItemsInfo[i], 1);
++            }
++        }
++
+         // execute trade: 1. remove
+         for (uint8 i = 0; i < TRADE_SLOT_TRADED_COUNT; ++i)
+         {
+@@ -614,9 +652,30 @@
+         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+         _player->SaveInventoryAndGoldToDB(trans);
+         trader->SaveInventoryAndGoldToDB(trans);
+-        CharacterDatabase.CommitTransaction(trans);
++        bool transferred = true;
++        if (guardedOffer)
++        {
++            transferred = !expected.empty();
++            for (auto const& [entry, counts] : expected)
++                transferred = transferred && _player->GetItemCount(entry) == counts.first &&
++                    trader->GetItemCount(entry) == counts.second;
++        }
++        if (myOfferCommit || hisOfferCommit)
++        {
++            auto saved = CharacterDatabase.AsyncCommitTransaction(trans).m_future.share();
++            if (myOfferCommit)
++                myOfferCommit(transferred, saved);
++            if (hisOfferCommit)
++                hisOfferCommit(transferred, saved);
++        }
++        else
++            CharacterDatabase.CommitTransaction(trans);
+ 
+-        info.Status = TRADE_STATUS_TRADE_COMPLETE;
++        // The native status reports the in-memory transfer, not its async save.
++        // An incomplete transfer closes the window without claiming rollback.
++        info.Status = transferred ? TRADE_STATUS_TRADE_COMPLETE : TRADE_STATUS_TRADE_CANCELED;
+         trader->GetSession()->SendTradeStatus(info);
+         SendTradeStatus(info);
++        if (!transferred && !myOfferCommit && !hisOfferCommit)
++            ChatHandler(this).SendSysMessage("Not all offered items moved. Check your bags before retrying.");
+     }
+@@ -642,6 +701,11 @@
+     if (!my_trade)
+         return;
+ 
++    TradeData* other = my_trade->GetTrader()->GetTradeData();
++    if (!other || other->GetTrader() != _player)
++        return;
++    my_trade->MarkOfferWindowOpen();
++    other->MarkOfferWindowOpen();
+     TradeStatusInfo info;
+     info.Status = TRADE_STATUS_OPEN_WINDOW;
+     my_trade->GetTrader()->GetSession()->SendTradeStatus(info);

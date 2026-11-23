@@ -8,6 +8,9 @@
 --   Pool stock 2: 1-5=12|3-2=9 ...
 --                race-class=free bodies, so the picker can grey out what the pool
 --                cannot serve instead of failing after the player has chosen.
+-- Modern snapshots use Comp set / Pool set <revision> <part>/<total>:<raw slice>.
+-- Sync capabilities 1 <heartbeat seconds> <pool enabled 0/1> describes snapshots only.
+-- Delivery receipts 1 separately advertises confirmed inventory delivery.
 --
 -- Flags: o in world, g in your party, s same level as you, b behind (you carry a quest
 -- it has not got).
@@ -30,10 +33,7 @@ end
 G.version = TocVersion()
 G.companions = {}
 G.stock = {}            -- ["race-class"] = free bodies
-G.syncParts = {}
-G.syncExpected = 0
-G.stockParts = {}
-G.stockExpected = 0
+G.releasing = {}
 
 G.RACES = {
     [1] = "Human", [2] = "Orc", [3] = "Dwarf", [4] = "Night Elf", [5] = "Undead",
@@ -217,18 +217,11 @@ function G.SetCompanions(rows)
         end
     end
 
-    -- a release is finished when the roster stops listing the name (or after two minutes, if
-    -- the server refused and said so in chat)
-    local now = time()
-    for name, asked in pairs(G.releasing) do
-        local still = false
-        for _, row in ipairs(G.companions) do
-            if row.name == name then still = true break end
-        end
-
-        -- a refusal leaves the card saying "releasing..." while nothing happens; the
-        -- fallback expiry is the release sequence's honest length, not two minutes
-        if not still or now - asked > 25 then G.releasing[name] = nil end
+    -- Removing a retired companion from the active roster does not return it to stock.
+    local present = {}
+    for _, row in ipairs(G.companions) do present[row.name] = true end
+    for name in pairs(G.releasing) do
+        if not present[name] then G.releasing[name] = nil end
     end
 
     if G.OnCompanionsChanged then G.OnCompanionsChanged() end
@@ -236,37 +229,84 @@ end
 
 function G.SetStock(stock)
     G.stock = stock or {}
+    G.lastStockAt = time()
     if G.OnStockChanged then G.OnStockChanged() end
 end
 
 -- ---------------------------------------------------------------------------
--- whisper protocol
+-- system protocol
 -- ---------------------------------------------------------------------------
 
 local listener = CreateFrame("Frame")
-listener:RegisterEvent("CHAT_MSG_WHISPER")
-listener:RegisterEvent("CHAT_MSG_MONSTER_WHISPER")
 listener:RegisterEvent("CHAT_MSG_SYSTEM")
 
-    -- One timestamp, one derived truth. sawServerLine was a stored flag that could go
-    -- stale in both directions: a ratchet that stayed true after the module died, and a
-    -- latch that said dead across a world restart until a line arrived. The module is
-    -- "answering" iff a line arrived inside a patience window derived from the module's
-    -- own Hello interval - computed, never stored, self-healing by construction.
-    function G.ServerAlive()
-        if not G.lastServerLineAt then
-            return false
-        end
+local function Clock() return GetTime and GetTime() or time() end
 
-        local patience = math.max(45, (G.serverInterval or 30) * 2 + 15)
-        return (time() - G.lastServerLineAt) <= patience
-    end
+local function LegacyHeartbeat()
+    local pass = G.serverInterval or 30
+    return math.ceil(60 / pass) * pass  -- older servers only heartbeat on a sync pass
+end
+
+function G.ServerPatience() return (G.heartbeatInterval or LegacyHeartbeat()) + 15 end
+
+function G.ServerAlive()
+    return G.lastServerLineAt ~= nil and time() - G.lastServerLineAt <= G.ServerPatience()
+end
+
+function G.SnapshotState(kind)
+    if kind == "pool" and G.poolEnabled == false then return "disabled" end
+    local stamp = kind == "pool" and G.lastStockAt or kind == "roster" and G.lastRosterAt
+    if not stamp then return "missing" end
+    if not G.ServerAlive() or time() - stamp > G.ServerPatience() then return "stale" end
+    return next(kind == "pool" and G.stock or G.companions) and "ready" or "empty"
+end
+
+local function ProtocolActivity()
+    G.lastServerLineAt = time()
+    if G.OnReadinessChanged then G.OnReadinessChanged() end
+end
 
 local SUPPLY_CAP = 64
 local UINT32_MAX = 4294967295
 local SUPPLY_TIMEOUT = 8
 local SUPPLY_CATALOG_COOLDOWN, SUPPLY_ACTION_COOLDOWN = 2, 1
 local lastSupplyNonce, lastSupplyCatalog, lastSupplyAction
+
+local function NextNonce()
+    lastSupplyNonce = (lastSupplyNonce or time() % 2147483647) % UINT32_MAX + 1
+    return lastSupplyNonce
+end
+
+local DELIVERY_REPLY_TIMEOUT, DELIVERY_TRADE_TIMEOUT = 15, 120
+local deliveryRank = { requested = 1, ready = 2, completed = 3, cancelled = 3, failed = 3, unconfirmed = 3 }
+
+function G.DeliveryPending() return G.delivery ~= nil and G.delivery.deadline ~= nil end
+
+local function DeliveryChanged()
+    if G.OnDeliveryChanged then G.OnDeliveryChanged() end
+end
+
+local function ExpireDelivery(now)
+    local order = G.delivery
+    if order and order.deadline and now >= order.deadline then
+        order.message = order.state == "ready" and "No final confirmation. Check your bags and the trade window."
+            or "No delivery reply. Check chat and the trade window before retrying."
+        order.state, order.deadline = "unconfirmed", nil
+        DeliveryChanged()
+    end
+end
+
+local function HandleDeliveryLine(text)
+    ExpireDelivery(Clock())
+    local nonce, state, message = text:match("^Delivery progress (%d+) (%a+):(.+)$")
+    local order = G.delivery
+    local rank = deliveryRank[state]
+    if not (order and order.deadline and nonce == order.wireNonce and rank and rank > order.rank) then return end
+    order.state, order.message, order.rank = state, message, rank
+    if rank == 3 then order.deadline = nil
+    elseif state == "ready" then order.deadline = Clock() + DELIVERY_TRADE_TIMEOUT end
+    DeliveryChanged()
+end
 
 local function SupplyChanged()
     if G.OnSupplyChanged then G.OnSupplyChanged() end
@@ -394,71 +434,189 @@ if ChatFrame_AddMessageEventFilter then
     end)
 end
 
--- Parts of a chunked payload are held until the set is complete, then joined. Sharing
--- this for both payloads keeps one place to fix if the server ever changes the grammar.
-local function Accumulate(parts, expected, index, text)
-    parts[index] = text
+local SNAPSHOT_PARTS, SNAPSHOT_BYTES, SNAPSHOT_TIMEOUT = 32, 192, 8
+local streams = { Comp = {}, Pool = {} }
 
-    for i = 1, expected do
-        if not parts[i] then return false end
+local function UInt(text, max)
+    local n = text and tonumber(text)
+    return n and n <= max and n or nil
+end
+
+local function ValidRows(label, payload, expected)
+    if payload:sub(1, 1) == "|" or payload:sub(-1) == "|" or payload:find("||", 1, true) then return false end
+    local count, seen = 0, {}
+    for row in payload:gmatch("[^|]+") do
+        local key
+        if label == "Comp" then
+            local name, class, race, level, quests, flags, free, suffix =
+                row:match("^([^,%c]+),(%d+),(%d+),(%d+),(%d+),([a-z%-]+),(%d+)(.*)$")
+            if not (name and UInt(class, 255) and UInt(race, 255) and UInt(level, 255)
+                and UInt(quests, UINT32_MAX) and UInt(free, UINT32_MAX)
+                and (suffix == "" or suffix:match("^,y=[^,%c]+ %d+/%d+$"))) then return false end
+            key = name:lower()
+        else
+            local race, class, stock = row:match("^(%d+)%-(%d+)=(%d+)$")
+            local r, c = UInt(race, 255), UInt(class, 255)
+            if not (r and r > 0 and c and c > 0 and UInt(stock, UINT32_MAX)
+                and race == tostring(r) and class == tostring(c)) then return false end
+            key = race .. "-" .. class
+        end
+        if seen[key] then return false end
+        seen[key], count = true, count + 1
+    end
+    return not expected or count == expected
+end
+
+local function Publish(label, payload, expected)
+    if not ValidRows(label, payload, expected) then return end
+    G.lastServerLineAt = time()
+    if label == "Comp" then G.SetCompanions(G.ParseCompPayload(payload))
+    else G.SetStock(G.ParseStockPayload(payload)) end
+    if G.OnReadinessChanged then G.OnReadinessChanged() end
+end
+
+local function HandleSnapshot(label, text)
+    local stream = streams[label]
+    local now = Clock()
+    if stream.pending and now >= stream.pending.deadline then stream.pending = nil end
+
+    local rev, part, total, body = text:match("^set (%d+) (%d+)/(%d+):(.*)$")
+    if rev then
+        rev, part, total = UInt(rev, 9007199254740991), UInt(part, SNAPSHOT_PARTS), UInt(total, SNAPSHOT_PARTS)
+        if not (rev and rev > 0 and part and part > 0 and total and part <= total) then return end
+        if stream.revision and rev < stream.revision then return end
+        if not stream.revision or rev > stream.revision then
+            stream.revision = rev
+            stream.pending = { parts = {}, total = total, count = 0, deadline = now + SNAPSHOT_TIMEOUT }
+        end
+        local pending = stream.pending
+        if not pending then return end
+        local previous = pending.parts[part]
+        if total ~= pending.total or #body > SNAPSHOT_BYTES or (body == "" and total > 1)
+            or (previous and previous ~= body) then
+            stream.pending = nil  -- never retry a poisoned revision
+        elseif not previous then
+            pending.parts[part], pending.count = body, pending.count + 1
+            if pending.count == total then
+                stream.pending = nil
+                Publish(label, table.concat(pending.parts))  -- modern chunks are byte slices
+            end
+        end
+        return
     end
 
-    return true
+    -- Unversioned replies: require contiguous, in-order parts with a stable total.
+    if stream.revision or G.snapshotV1 then return end
+    local legacy = label == "Comp" and "sync" or "stock"
+    part, total, body = text:match("^" .. legacy .. " (%d+)/(%d+):%s*(.*)$")
+    if part then
+        part, total = UInt(part, SNAPSHOT_PARTS), UInt(total, SNAPSHOT_PARTS)
+        if not (part and part > 0 and total and part <= total and total > 1
+            and #body > 0 and #body <= SNAPSHOT_BYTES) then stream.pending = nil return end
+        if part == 1 then
+            stream.pending = { parts = { body }, total = total, count = 1, deadline = now + SNAPSHOT_TIMEOUT }
+            return
+        end
+        local pending = stream.pending
+        if not pending or total ~= pending.total or part ~= pending.count + 1 then stream.pending = nil return end
+        pending.parts[part], pending.count = body, part
+        if part == total then
+            stream.pending = nil
+            Publish(label, table.concat(pending.parts, "|"))
+        end
+        return
+    end
+    local count
+    count, body = text:match("^" .. legacy .. " (%d+):%s*(.*)$")
+    stream.pending = nil
+    count = UInt(count, SNAPSHOT_PARTS * SNAPSHOT_BYTES)
+    if count and #body <= SNAPSHOT_BYTES then Publish(label, body, count) end
 end
 
-local function Join(parts, expected)
-    local ordered = {}
-    for i = 1, expected do ordered[#ordered + 1] = parts[i] end
-    return table.concat(ordered, "|")
+function G.ExpireRequests()
+    local now = Clock()
+    for _, stream in pairs(streams) do
+        if stream.pending and now >= stream.pending.deadline then stream.pending = nil end
+    end
+    ExpireDelivery(now)
+    local expired
+    for name, deadline in pairs(G.releasing) do
+        if now >= deadline then
+            G.releasing[name] = nil
+            expired = expired or {}
+            expired[#expired + 1] = name
+        end
+    end
+    if expired then
+        table.sort(expired)
+        if G.OnServerMessage then G.OnServerMessage("Release not confirmed: " .. table.concat(expired, ", ") .. ". Refresh before retrying.") end
+        if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+    end
 end
+
+-- Keep timeouts running while the companion window is closed.
+local elapsed = 0
+listener:SetScript("OnUpdate", function(_, delta)
+    elapsed = elapsed + delta
+    if elapsed < 0.5 then return end
+    elapsed = 0
+    G.ExpireRequests()
+    if G.OnReadinessChanged then G.OnReadinessChanged() end
+end)
 
 listener:SetScript("OnEvent", function(_, event, message)
-    local text = StripColors(message)
-
-    if event == "CHAT_MSG_SYSTEM" then
-        -- anything the server says proves the module is loaded and talking; the window uses
-        -- this to tell "no companions yet" apart from "no module answering at all"
-        if IsProtocolLine(message) then
-            G.lastServerLineAt = time()   -- the only stored truth: when the server last spoke
+    if event ~= "CHAT_MSG_SYSTEM" then return end
+    if not IsProtocolLine(message) then
+        local system = StripColors(message)
+        local quarantine = system:match("^(.+) is quarantined for offline maintenance%. The body and name remain reserved until staff review%.$")
+            or system:match("^(.+): logout observed%. The body stays reserved for offline maintenance%.$")
+            or system:match("^(.+): logout was not confirmed before timeout%. The body stays reserved for offline maintenance%.$")
+        local plain = system:match("^Companion quest sync:%s*(.+)$") or quarantine and system
+        if not plain then return end
+        local name = plain:match("^(.+) could not be released %- ")
+            or plain:match("^(.+) has gone back to the pool%.")
+            or plain:match("^(.+) is not one of your companions%.$")
+            or quarantine
+        if name and G.releasing[name] then
+            G.releasing[name] = nil
+            if G.OnCompanionsChanged then G.OnCompanionsChanged() end
         end
-
-        if not IsProtocolLine(message) then
-            -- the module answers button presses with a plain system line ("{} is not one of
-            -- your companions", "the pool has no free body"); surface the last one in the
-            -- panel so a refusal is visible without reading chat
-            local plain = StripColors(message)
-
-            -- Proof of life no longer depends on matching the greeting text: the module
-            -- sends "CSYNC|Hello <interval>" at login whatever its chat settings are, and
-            -- IsProtocolLine above already counts it. (Matching prose is how the previous
-            -- version broke the moment the sentence was reworded.)
-
-            if plain:find("Companion quest sync", 1, true) then
-                plain = plain:gsub("^Companion quest sync:?%s*", "")
-                G.lastServerMessage = plain
-                G.lastServerLineAt = time()
-
-                if G.OnServerMessage then G.OnServerMessage(plain) end
-            end
-            return
+        G.lastServerMessage = plain
+        if G.OnServerMessage then G.OnServerMessage(plain) end
+        return
+    end
+    local text = message:sub(7)
+    local label, payload = text:match("^(%a+) (.*)$")
+    if streams[label] then HandleSnapshot(label, payload) return end
+    if label == "Supply" then HandleSupplyLine(StripColors(text)) return end
+    if label == "Delivery" then
+        if text == "Delivery receipts 1" then
+            G.deliveryReceiptsV1 = true
+        else
+            HandleDeliveryLine(StripColors(text))
         end
-        text = StripColors(string.sub(message, 7))   -- drop "CSYNC|"
-
-        if text:sub(1, 7) == "Supply " then
-            HandleSupplyLine(text)
-            return
-        end
-
-        -- the module says hello at login and tells us how often it passes; the panel's
-        -- patience scales with this instead of a hard-coded guess
-        local hello = string.match(text, "^Hello%s+(%d+)$")
-        if hello then
-            G.serverInterval = tonumber(hello)
-            return
-        end
+        return
     end
 
-    local skills = event == "CHAT_MSG_SYSTEM" and string.match(text, "^Skill sync:%s*(.*)$")
+    local hello = UInt(text:match("^Hello (%d+)$"), UINT32_MAX)
+    if hello and hello > 0 then
+        G.serverInterval = hello
+        ProtocolActivity()
+        return
+    end
+    local h, pool = text:match("^Sync capabilities 1 (%d+) ([01])$")
+    h = UInt(h, UINT32_MAX)
+    if h and h > 0 then
+        if not G.snapshotV1 then
+            for _, stream in pairs(streams) do
+                if not stream.revision then stream.pending = nil end
+            end
+        end
+        G.snapshotV1, G.heartbeatInterval, G.poolEnabled = true, h, pool == "1"
+        ProtocolActivity()
+        return
+    end
+    local skills = text:match("^Skill sync:%s*(.*)$")
     if skills then
         if skills ~= G.lastSkillPayload then
             G.lastSkillPayload = skills
@@ -468,40 +626,6 @@ listener:SetScript("OnEvent", function(_, event, message)
         return
     end
 
-    -- companions
-    local part, total, body = string.match(text, "^Comp%s+sync%s+(%d+)/(%d+):%s*(.*)$")
-    if part then
-        G.syncExpected = tonumber(total)
-        if Accumulate(G.syncParts, G.syncExpected, tonumber(part), body) then
-            local joined = Join(G.syncParts, G.syncExpected)
-            G.syncParts = {}
-            G.SetCompanions(G.ParseCompPayload(joined))
-        end
-        return
-    end
-
-    local single = string.match(text, "^Comp%s+sync%s+%d+:%s*(.*)$")
-    if single then
-        G.SetCompanions(G.ParseCompPayload(single))
-        return
-    end
-
-    -- pool stock
-    local sPart, sTotal, sBody = string.match(text, "^Pool%s+stock%s+(%d+)/(%d+):%s*(.*)$")
-    if sPart then
-        G.stockExpected = tonumber(sTotal)
-        if Accumulate(G.stockParts, G.stockExpected, tonumber(sPart), sBody) then
-            local joined = Join(G.stockParts, G.stockExpected)
-            G.stockParts = {}
-            G.SetStock(G.ParseStockPayload(joined))
-        end
-        return
-    end
-
-    local sSingle = string.match(text, "^Pool%s+stock%s+%d+:%s*(.*)$")
-    if sSingle then
-        G.SetStock(G.ParseStockPayload(sSingle))
-    end
 end)
 
 -- ---------------------------------------------------------------------------
@@ -509,7 +633,7 @@ end)
 -- ---------------------------------------------------------------------------
 
 function G.Run(command)
-    if not command or command == "" then return end
+    if not command or command == "" then return false end
 
     -- A dot-command rides chat and is intercepted by the server. With the module absent
     -- there is nothing to intercept it, and the text would simply be said aloud to everyone
@@ -518,30 +642,48 @@ function G.Run(command)
         if G.OnServerMessage then
             G.OnServerMessage("mod-companion-questsync is not answering - is it enabled?")
         end
-        return
+        return false
     end
 
     SendChatMessage(command, "SAY")
+    return true
 end
 
---- Companions whose release is in flight, with the moment it was asked for.
----
---- A release is a server-side sequence - dismiss, wait for the body to be offline, wipe,
---- rename, unbind, write the ledger - and it takes a few seconds. Without this the card sat
---- there looking like the button had done nothing, which reads as "queued" or broken.
-G.releasing = {}
-
 function G.Action(verb, name)
-    if verb == "release" and name and name ~= "" then
-        G.releasing[name] = time()
-        if G.Refresh then G.Refresh() end
+    if verb == "release" then
+        G.ExpireRequests()
+        if not name or name == "" or G.releasing[name] or G.SnapshotState("roster") ~= "ready"
+            or not G.NameTaken(name) then return false end
+        if not G.Run(".companionsync release " .. name) then return false end
+        G.releasing[name] = Clock() + 25
+        if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+        return true
     end
+    return G.Run(".companionsync " .. verb .. (name and name ~= "" and " " .. name or ""))
+end
 
-    if name and name ~= "" then
-        G.Run(".companionsync " .. verb .. " " .. name)
+local function StartDelivery(name, nonce)
+    G.delivery = {
+        name = name, rank = 0, wireNonce = ("%.0f"):format(nonce), deadline = Clock() + DELIVERY_REPLY_TIMEOUT,
+        state = "waiting", message = "Request sent; waiting for a delivery reply…",
+    }
+    DeliveryChanged()
+end
+
+function G.CollectDelivery(name)
+    ExpireDelivery(Clock())
+    if not name or name == "" or G.DeliveryPending() then return false end
+    local command = ".companionsync delivery collect " .. name
+    if G.deliveryReceiptsV1 then
+        local nonce = NextNonce()
+        if not G.Run(command .. (" %.0f"):format(nonce)) then return false end
+        StartDelivery(name, nonce)
     else
-        G.Run(".companionsync " .. verb)
+        if not G.Run(command) then return false end
+        G.delivery = { name = name, state = "legacy", message = "See chat and the trade window for the result (legacy server)." }
+        DeliveryChanged()
     end
+    return true
 end
 
 local function RequestSupply(kind, row)
@@ -557,6 +699,8 @@ local function RequestSupply(kind, row)
     -- Match the separate server buckets: opening a catalog must not delay
     -- the first item action, but switching cards must not bypass either limit.
     local catalog = kind == "catalog"
+    ExpireDelivery(now)
+    if not catalog and G.DeliveryPending() then return false end
     local last, gap = lastSupplyAction, SUPPLY_ACTION_COOLDOWN
     if catalog then last, gap = lastSupplyCatalog, SUPPLY_CATALOG_COOLDOWN end
     if last and now - last < gap then
@@ -566,14 +710,19 @@ local function RequestSupply(kind, row)
     end
 
     -- Lua doubles hold all uint32 values exactly. Use decimal text for the wire.
-    lastSupplyNonce = (lastSupplyNonce or time() % 2147483647) % UINT32_MAX + 1
-    if catalog then lastSupplyCatalog = now else lastSupplyAction = now end
-    local pending = { nonce = lastSupplyNonce, kind = kind, deadline = now + SUPPLY_TIMEOUT }
-    if catalog then pending.rows, pending.count = {}, 0 end
-    supply.rows, supply.message, supply.pending = nil, nil, pending
-    local args = kind .. (" %.0f"):format(pending.nonce)
+    local nonce = NextNonce()
+    local args = kind .. (" %.0f"):format(nonce)
     if row then args = args .. (" %.0f"):format(row.itemId) end
-    G.Action("delivery " .. args, supply.name)
+    if not G.Action("delivery " .. args, supply.name) then return false end
+    if catalog then lastSupplyCatalog = now else lastSupplyAction = now end
+    supply.rows, supply.message = nil, nil
+    if not catalog and G.deliveryReceiptsV1 then
+        StartDelivery(supply.name, nonce)
+    else
+        local pending = { nonce = nonce, kind = kind, deadline = now + SUPPLY_TIMEOUT }
+        if catalog then pending.rows, pending.count = {}, 0 end
+        supply.pending = pending
+    end
     SupplyChanged()
     return true
 end
@@ -604,8 +753,8 @@ function G.CreateCompanion(raceId, classId, name)
         return false
     end
 
-    G.Run(".companionsync create " .. raceId .. " " .. classId .. " " .. name)
-    return true
+    if G.poolEnabled == false then return false end
+    return G.Run(".companionsync create " .. raceId .. " " .. classId .. " " .. name)
 end
 
 function G.Warn(text)
@@ -632,7 +781,7 @@ Confirm("CSYNC_UNBIND",
     function(data) if data and data.name then G.Action("unbind", data.name) end end)
 
 Confirm("CSYNC_RELEASE",
-    "Release %s for good?\n\nThe body is wiped, renamed and returned to the pool. You cannot get it back.",
+    "Request retirement for %s?\n\nThis removes it from your active roster. The body and name remain reserved for offline maintenance.",
     function(data) if data and data.name then G.Action("release", data.name) end end)
 
 function G.ConfirmUnbind(name)

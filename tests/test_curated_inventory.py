@@ -29,7 +29,8 @@ class ManagedInventory(unittest.TestCase):
         self.assertIn('MailboxNearby(bot)', SOURCE)
         mail = SOURCE.split('void TryCuratedMail(', 1)[1].split('/// Credit', 1)[0]
         self.assertIn('PlanDelivery(bot, owner, true, /*mail=*/true)', mail)
-        self.assertIn('mail->sender == ownerGuid && mail->receiver == ownerGuid', mail)
+        self.assertIn('IsDeliveryMail(mail, ownerGuid)', mail)
+        self.assertIn('mail->sender == ownerGuid && mail->receiver == ownerGuid', POLICY)
 
     def test_mail_uses_online_recipient_and_never_returns_to_pool_character(self):
         self.assertIn('draft.SendMailTo(trans, MailReceiver(owner)', SOURCE)

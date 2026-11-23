@@ -1,0 +1,1258 @@
+diff --git a/docs/companion-custody.md b/docs/companion-custody.md
+new file mode 100644
+index 0000000..3d125ed
+--- /dev/null
++++ b/docs/companion-custody.md
+@@ -0,0 +1,9 @@
++# Legacy companion custody
++
++Deploy this module together with the QuestSync custody changes. The shared characters-DB migration and offline rollout procedure live in the paired QuestSync tree: `sql/companion-custody.sql` and `docs/companion-custody.md`. An empty custody table intentionally leaves the old records unverified and reserved; no startup sweep rolls old bodies back to pool names or clears their login flags.
++
++`.companion create` only claims reviewed stock assigned to `legacy`. Existing companions need independently verified custody before summon, dismiss, or companion-memory participation. `.companion forget` and `.companion destroy yes` require a safely dismissed body and request offline retirement; neither wipes, renames, or recycles the body. The owner slot stays reserved until staff finalizes the retirement. Do not run an older allocator alongside these guards.
++
++Death Knights are unavailable for new claims and are excluded from stock regardless of level; do not enroll them as `free`. This does not affect independently verified owned Death Knights.
++
++Run `python -B -m unittest discover -s tests` for the legacy contract checks. QuestSync also has an opt-in isolated MySQL suite exercising SQL from both modules.
+diff --git a/src/wowlegends_companion.cpp b/src/wowlegends_companion.cpp
+index d46bdab..93d2ca0 100644
+--- a/src/wowlegends_companion.cpp
++++ b/src/wowlegends_companion.cpp
+@@ -15,18 +15,18 @@
+  *     account_type = 2 in playerbots_account_type) matching the requested
+  *     race + class + the owner's faction, that is offline, unguilded, not a
+  *     loaded bot, and not the AHBot character.
+- *   - We RENAME that offline pool char to the player's chosen name and record
+- *     the binding (owner_guid -> bot_guid) in `wowlegends_companion`.
++ *   - Only operator-reviewed custody stock is eligible. One transaction names
++ *     the character and writes its module reservation and binding.
+  *   - We summon it with the SAME path the proven gear module uses: dispatching
+  *     a `.playerbots bot ...` chat command through the player's own session
+- *     (ChatHandler::ParseCommands), so we stay decoupled from mod-playerbots
+- *     headers/link order. `.playerbots bot` is SEC_PLAYER, so the player is
++ *     (ChatHandler::ParseCommands), with the playerbot manager checked when
++ *     acting on a connected session. `.playerbots bot` is SEC_PLAYER, so the player is
+  *     allowed to drive it, and OnBotLogin auto-groups + follows + fights.
+  *
+  * Guards: AddClass-pool chars only; never the AHBot account/GUID; never an
+  * online char; name must be valid + unique; cross-faction races rejected;
+- * UNIQUE(bot_guid) makes a double-claim race lose gracefully (we retry another
+- * pool char). One companion per player (PRIMARY KEY owner_guid).
++ * Shared custody partitions stock and preserves reservations while retiring.
++ * One companion per player (PRIMARY KEY owner_guid).
+  *
+  * GUID-cap note: companions are strictly opt-in (one per player), so they are
+  * naturally limited - no hard cap needed for v1.
+@@ -45,10 +45,12 @@
+ #include "Configuration/Config.h"
+ #include "SharedDefines.h"
+ #include "Log.h"
++#ifdef MOD_PLAYERBOTS
++#include "PlayerbotMgr.h"
++#endif
+ #include <cctype>
+ #include <sstream>
+ #include <string>
+-#include <unordered_map>
+ #include <vector>
+ 
+ using namespace Acore::ChatCommands;
+@@ -207,68 +209,94 @@ namespace
+ 
+     uint32 FreeBodiesFor(uint8 race, uint8 clazz, uint32 excludeGuid = 0);
+ 
+-    // ---- released bodies, name reuse and the collector ----------------------
+-    // `.companion forget` used to drop the binding and nothing else: the body kept
+-    // the player's chosen name in `characters`, so the next `.companion create` for
+-    // that name answered "already taken", and the next claim re-bound the very body
+-    // it had just released - which is the stale-entity-name bug (the live entity
+-    // still answers to the old name until a world restart).
+-    //
+-    // A release now:
+-    //   * renames the body to a neutral pool name and updates the character cache,
+-    //     so the chosen name is free immediately;
+-    //   * keeps the guid out of the pool pick for a few minutes (g_releasedBots),
+-    //     so `create` can never re-bind what it just let go;
+-    //   * records it in wowlegends_companion_released, which the collector uses.
+-
+-    std::unordered_map<uint32, uint32> g_releasedBots;   // botGuid -> release time
+-    uint32 const RELEASED_POOL_COOLDOWN_MS = 10 * 60 * 1000;
+-
+-    bool IsRecentlyReleased(uint32 botGuid)
++    bool g_custodyReady = false;
++
++    bool HasSingleColumnUniqueKey(char const* table, char const* column)
+     {
+-        auto it = g_releasedBots.find(botGuid);
+-        if (it == g_releasedBots.end())
+-            return false;
+-        if (getMSTimeDiff(it->second, getMSTime()) > RELEASED_POOL_COOLDOWN_MS)
++        return static_cast<bool>(CharacterDatabase.Query(
++            "SELECT index_name FROM information_schema.statistics WHERE table_schema = DATABASE() "
++            "AND table_name = '{}' AND non_unique = 0 GROUP BY index_name "
++            "HAVING COUNT(*) = 1 AND MIN(column_name) = '{}' LIMIT 1", table, column));
++    }
++
++    bool CustodyTablesTransactional()
++    {
++        return CharacterDatabase.Query(
++            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND engine = 'InnoDB' "
++            "AND table_name IN ('characters', 'wowlegends_companion', 'cq_companion_custody') HAVING COUNT(*) = 3") &&
++            HasSingleColumnUniqueKey("cq_companion_custody", "bot_guid") &&
++            HasSingleColumnUniqueKey("wowlegends_companion", "bot_guid") && HasSingleColumnUniqueKey("wowlegends_companion", "owner_guid");
++    }
++
++    std::string ForeignCustodyClause(char const* guid)
++    {
++        std::string sql;
++        for (char const* table : { "cq_bindings", "wowlegends_companion_multi" })
+         {
+-            g_releasedBots.erase(it);
+-            return false;
++            QueryResult found = CharacterDatabase.Query(
++                "SELECT (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{0}'), "
++                "(SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
++                "AND table_name = '{0}' AND column_name = 'bot_guid')", table);
++            if (!found || (found->Fetch()[0].Get<uint64>() && !found->Fetch()[1].Get<uint64>()))
++                return " AND 1 = 0 ";
++            if (found->Fetch()[0].Get<uint64>())
++                sql += fmt::format(" AND NOT EXISTS (SELECT 1 FROM {} foreign_b WHERE foreign_b.bot_guid = {}) ", table, guid);
+         }
+-        return true;
++        return sql;
++    }
++
++    std::string CurrentCustodyClause()
++    {
++        return " FROM wowlegends_companion b JOIN cq_companion_custody x ON x.bot_guid = b.bot_guid "
++               "JOIN characters c ON c.guid = b.bot_guid AND c.account = x.body_account "
++               "JOIN characters o ON o.guid = b.owner_guid AND o.guid <> c.guid "
++               "WHERE x.module = 'legacy' AND x.state = 'owned' AND x.owner_guid = b.owner_guid "
++               "AND BINARY x.body_name = BINARY c.name AND BINARY b.companion_name = BINARY c.name " +
++               ForeignCustodyClause("b.bot_guid");
+     }
+ 
+-    std::string LettersFromNumber(uint32 value, uint32 letters)
++    bool HasCurrentCustody(uint32 ownerGuid, uint32 botGuid)
+     {
+-        std::string out(letters, 'a');
+-        for (uint32 i = 0; i < letters; ++i)
++        return g_custodyReady && static_cast<bool>(CharacterDatabase.Query(
++            "SELECT 1" + CurrentCustodyClause() + fmt::format(" AND b.owner_guid = {} AND b.bot_guid = {}", ownerGuid, botGuid)));
++    }
++
++    bool IsCompanionLoginPending(ObjectGuid guid)
++    {
++#ifdef MOD_PLAYERBOTS
++        struct LoadingView : PlayerbotHolder
+         {
+-            out[letters - 1 - i] = char('a' + (value % 26));
+-            value /= 26;
+-        }
+-        return out;
++            static bool Contains(ObjectGuid key) { return botLoading.count(key) != 0; }
++        };
++        return LoadingView::Contains(guid);
++#else
++        return true;
++#endif
+     }
+ 
+-    // A valid, unused pool name for a body handed back to the pool.
+-    bool IsPoolName(std::string const& name)
++    bool IsControlledCompanion(Player* bot, Player* owner)
+     {
+-        static char const* kPrefix[] = { "Wanderer", "Drifter", "Wayfarer", "Rambler", "Nomad", "Vagrant" };
+-        for (char const* prefix : kPrefix)
+-            if (name.rfind(prefix, 0) == 0)
+-                return true;
++#ifdef MOD_PLAYERBOTS
++        if (!bot || !owner || bot == owner || !bot->GetSession() || !bot->GetSession()->IsBot())
++            return false;
++        PlayerbotMgr* manager = PlayerbotsMgr::instance().GetPlayerbotMgr(owner);
++        return manager && manager->GetPlayerBot(bot->GetGUID()) == bot;
++#else
+         return false;
++#endif
+     }
+ 
+-    std::string PoolNameFor(uint32 botGuid)
++    std::string FreeCustodyClause()
+     {
+-        static char const* kPrefix[] = { "Wanderer", "Drifter", "Wayfarer", "Rambler", "Nomad", "Vagrant" };
+-        std::string base = kPrefix[botGuid % 6];
+-        for (uint32 letters = 2; letters <= 4; ++letters)
+-        {
+-            std::string candidate = base.substr(0, 12 - letters) + LettersFromNumber(botGuid, letters);
+-            if (!NameTaken(candidate))
+-                return candidate;
+-        }
+-        return std::string();
++        // The ordinary level-one stock contract does not cover the heroic start.
++        return " AND x.module = 'legacy' AND x.state = 'free' AND x.owner_guid = 0 AND x.tracking = 0 "
++               " AND c.online = 0 AND c.level = 1 AND c.at_login = 0 AND c.account = x.body_account "
++               " AND BINARY c.name = BINARY x.body_name "
++               " AND NOT EXISTS (SELECT 1 FROM guild_member gm WHERE gm.guid = c.guid) "
++               " AND NOT EXISTS (SELECT 1 FROM group_member gm WHERE gm.memberGuid = c.guid) "
++               " AND NOT EXISTS (SELECT 1 FROM wowlegends_companion b WHERE b.bot_guid = c.guid) " +
++               ForeignCustodyClause("c.guid") + fmt::format(" AND c.class <> {} AND c.guid <> {} AND c.account <> {} ",
++                   uint32(CLASS_DEATH_KNIGHT), CfgAhbotGuid(), CfgAhbotAccount());
+     }
+ 
+     // ---- the body's truth ----------------------------------------------------
+@@ -282,13 +310,11 @@ namespace
+         return std::string();
+     }
+ 
+-    bool BodyOnline(uint32 botGuid)
++    bool BodyOnlineOrLoading(uint32 botGuid)
+     {
+-        if (ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, botGuid)))
+-            return true;
+-        if (QueryResult r = CharacterDatabase.Query("SELECT online FROM characters WHERE guid = {}", botGuid))
+-            return r->Fetch()[0].Get<uint8>() != 0;
+-        return false;
++        ObjectGuid const key(HighGuid::Player, botGuid);
++        return ObjectAccessor::FindConnectedPlayer(key) || IsCompanionLoginPending(key) ||
++            !CharacterDatabase.Query("SELECT 1 FROM characters WHERE guid = {} AND online = 0", botGuid);
+     }
+ 
+     // Make the client drop whatever name it cached for this guid (it keeps unit names
+@@ -305,47 +331,6 @@ namespace
+         viewer->SendDirectMessage(&data);
+     }
+ 
+-    void SetBindingName(uint32 ownerGuid, std::string const& name)
+-    {
+-        CharacterDatabase.DirectExecute(
+-            "UPDATE wowlegends_companion SET companion_name = '{}' WHERE owner_guid = {}", Escape(name), ownerGuid);
+-    }
+-
+-    // Returns true only if the row now actually carries `name`. A rename that the DB
+-    // refused, or that a live entity's save undid, must never be reported as success -
+-    // that is exactly what sent a summon looking for a name nobody had.
+-    bool RenameCharacter(uint32 guid, std::string const& name)
+-    {
+-        CharacterDatabase.DirectExecute("UPDATE characters SET name = '{}' WHERE guid = {}", Escape(name), guid);
+-        sCharacterCache->UpdateCharacterData(ObjectGuid(HighGuid::Player, guid), name);
+-        return BodyName(guid) == name;
+-    }
+-
+-    // Guids the pool pick must avoid right now.
+-    std::vector<uint32> RecentlyReleasedGuids()
+-    {
+-        std::vector<uint32> out;
+-        for (auto const& kv : g_releasedBots)
+-            if (IsRecentlyReleased(kv.first))
+-                out.push_back(kv.first);
+-
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT bot_guid FROM wowlegends_companion_released "
+-                "WHERE released_at > NOW() - INTERVAL {} MINUTE", RELEASED_POOL_COOLDOWN_MS / 60000))
+-        {
+-            do { out.push_back(r->Fetch()[0].Get<uint32>()); } while (r->NextRow());
+-        }
+-        return out;
+-    }
+-
+-    void LedgerRelease(uint32 botGuid, char const* reason)
+-    {
+-        CharacterDatabase.DirectExecute(
+-            "INSERT INTO wowlegends_companion_released (bot_guid, released_at, reason) "
+-            "VALUES ({}, NOW(), '{}') ON DUPLICATE KEY UPDATE released_at = NOW(), reason = '{}'",
+-            botGuid, reason, reason);
+-    }
+-
+     // Collect the account ids marked AddClass (account_type = 2) from the PLAYERBOTS db.
+     // Mirrors RandomPlayerbotMgr::IsAccountType(acc, 2) / addClassTypeAccounts.
+     std::string AddClassAccountIdCsv()
+@@ -373,16 +358,13 @@ namespace
+     uint32 FreeBodiesFor(uint8 race, uint8 clazz, uint32 excludeGuid)
+     {
+         std::string const accounts = AddClassAccountIdCsv();
+-        if (accounts.empty())
++        if (!g_custodyReady || accounts.empty())
+             return 0;
+ 
+         std::string sql =
+-            "SELECT COUNT(*) FROM characters c WHERE c.account IN (" + accounts + ")" +
+-            " AND c.race = " + std::to_string(race) +
+-            " AND c.class = " + std::to_string(clazz) +
+-            " AND c.online = 0"
+-            " AND c.guid NOT IN (SELECT guid FROM guild_member)"
+-            " AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion)";
++            "SELECT COUNT(*) FROM characters c JOIN cq_companion_custody x ON x.bot_guid = c.guid "
++            "WHERE c.account IN (" + accounts + ")" + fmt::format(" AND c.race = {} AND c.class = {} ", race, clazz) +
++            FreeCustodyClause();
+         if (excludeGuid)
+             sql += " AND c.guid <> " + std::to_string(excludeGuid);
+ 
+@@ -393,100 +375,12 @@ namespace
+ 
+ 
+ 
+-    // A binding whose body is gone, or whose body answers to a different name, is the
+-    // source of every "Character X not found". Boot is the only moment nothing is
+-    // online, so settle it here: drop dead bonds, put names back where the row allows
+-    // it, and otherwise make the binding tell the truth.
+-    void ReconcileBindings()
+-    {
+-        std::vector<std::tuple<uint32, uint32, std::string>> rows;
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT owner_guid, bot_guid, companion_name FROM wowlegends_companion"))
+-        {
+-            do
+-            {
+-                Field* f = r->Fetch();
+-                rows.emplace_back(f[0].Get<uint32>(), f[1].Get<uint32>(), f[2].Get<std::string>());
+-            } while (r->NextRow());
+-        }
+-
+-        uint32 renamed = 0;
+-        uint32 adopted = 0;
+-        uint32 dropped = 0;
+-
+-        for (auto const& [ownerGuid, botGuid, want] : rows)
+-        {
+-            std::string const actual = BodyName(botGuid);
+-            if (actual.empty())
+-            {
+-                CharacterDatabase.DirectExecute("DELETE FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-                LOG_WARN("server", "[companion] dropped bond for owner {} - body {} does not exist", ownerGuid, botGuid);
+-                ++dropped;
+-                continue;
+-            }
+-            if (actual == want)
+-                continue;
+-
+-            if (!BodyOnline(botGuid) && RenameCharacter(botGuid, want))
+-            {
+-                LOG_INFO("server", "[companion] body {} renamed '{}' -> '{}' to match its bond", botGuid, actual, want);
+-                ++renamed;
+-            }
+-            else
+-            {
+-                SetBindingName(ownerGuid, actual);
+-                LOG_WARN("server", "[companion] body {} answers to '{}' - bond for owner {} updated from '{}'",
+-                    botGuid, actual, ownerGuid, want);
+-                ++adopted;
+-            }
+-        }
+-
+-        if (renamed || adopted || dropped)
+-            LOG_INFO("server", "[companion] bindings reconciled at boot: {} renamed, {} adopted, {} dropped",
+-                renamed, adopted, dropped);
+-    }
+-
+-    // A released body is unbound and waiting to be rebuilt, so it must not be holding
+-    // the player's name hostage. The reset renames it once the bot is out; if that
+-    // session died first, this sweep at boot puts it right.
+-    void RepairReleasedNames()
+-    {
+-        QueryResult r = CharacterDatabase.Query(
+-            "SELECT x.bot_guid FROM wowlegends_companion_released x "
+-            "JOIN characters c ON c.guid = x.bot_guid "
+-            "WHERE x.released_at > NOW() - INTERVAL 1 DAY "
+-            "  AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion)");
+-        if (!r)
+-            return;
+-
+-        uint32 fixed = 0;
+-        do
+-        {
+-            uint32 const guid = r->Fetch()[0].Get<uint32>();
+-
+-            // Already carrying a pool name: nothing to do. Renaming anyway walked the
+-            // body to a longer variant on every boot (its own name counts as taken),
+-            // which is churn nobody asked for.
+-            if (IsPoolName(BodyName(guid)))
+-                continue;
+-
+-            if (std::string poolName = PoolNameFor(guid); !poolName.empty())
+-            {
+-                RenameCharacter(guid, poolName);
+-                ++fixed;
+-            }
+-        } while (r->NextRow());
+-
+-        if (fixed)
+-            LOG_INFO("server", "[companion] released bodies renamed back to pool names at boot: {}", fixed);
+-    }
+-
+     // One line at boot: which playable race+class pairs the pool cannot serve, so a
+     // dry class is visible before a player asks for it and is told "none available".
+     void LogPoolHealth()
+     {
+         std::string const accounts = AddClassAccountIdCsv();
+-        if (accounts.empty())
++        if (!g_custodyReady || accounts.empty())
+         {
+             LOG_WARN("server", "[companion] no AddClass accounts configured - .companion create cannot serve anyone");
+             return;
+@@ -494,9 +388,8 @@ namespace
+ 
+         uint32 free = 0;
+         if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT COUNT(*) FROM characters c WHERE c.account IN (" + accounts + ")"
+-                " AND c.online = 0 AND c.guid NOT IN (SELECT guid FROM guild_member)"
+-                " AND c.guid NOT IN (SELECT bot_guid FROM wowlegends_companion)"))
++                "SELECT COUNT(*) FROM characters c JOIN cq_companion_custody x ON x.bot_guid = c.guid "
++                "WHERE c.account IN (" + accounts + ")" + FreeCustodyClause()))
+             free = r->Fetch()[0].Get<uint32>();
+ 
+         std::string dry;
+@@ -523,41 +416,22 @@ namespace
+             free, dryCount, dry.empty() ? std::string() : " - " + dry);
+     }
+ 
+-    // Pick a free AddClass-pool character guid matching race+class+team, skipping
+-    // the just-tried guids (so a UNIQUE(bot_guid) collision can retry the next one).
+-    // Returns 0 if none available. All guards are applied in SQL:
+-    //   - account is AddClass-type (account ids resolved from the playerbots db)
+-    //   - matching race & class
+-    //   - offline (online = 0)
+-    //   - NOT in a guild (guildmember has no row)        -> excludes "real guild" members
+-    //   - NOT the AHBot character guid
+-    //   - NOT a guid we already failed to bind this call
+-    uint32 PickPoolChar(uint8 race, uint8 clazz, std::string const& addClassAccCsv,
+-                        uint32 ahbotGuid, std::vector<uint32> const& skip)
++    uint32 PickPoolChar(uint8 race, uint8 clazz, std::string const& accounts)
+     {
+-        std::string skipCsv;
+-        for (uint32 g : skip)
++        if (!g_custodyReady || accounts.empty())
++            return 0;
++        if (QueryResult rows = CharacterDatabase.Query(
++                "SELECT c.guid FROM characters c JOIN cq_companion_custody x ON x.bot_guid = c.guid "
++                "WHERE c.account IN (" + accounts + ")" + fmt::format(" AND c.race = {} AND c.class = {} ", race, clazz) +
++                FreeCustodyClause() + " ORDER BY c.guid"))
+         {
+-            if (!skipCsv.empty())
+-                skipCsv.push_back(',');
+-            skipCsv += std::to_string(g);
++            do
++            {
++                uint32 const guid = rows->Fetch()[0].Get<uint32>();
++                if (!BodyOnlineOrLoading(guid))
++                    return guid;
++            } while (rows->NextRow());
+         }
+-
+-        std::string sql =
+-            "SELECT c.guid FROM characters c "
+-            "WHERE c.account IN (" + addClassAccCsv + ") "
+-            "AND c.race = " + std::to_string(race) + " "
+-            "AND c.class = " + std::to_string(clazz) + " "
+-            "AND c.online = 0 "
+-            "AND c.guid NOT IN (SELECT guid FROM guild_member) ";
+-        if (ahbotGuid)
+-            sql += "AND c.guid <> " + std::to_string(ahbotGuid) + " ";
+-        if (!skipCsv.empty())
+-            sql += "AND c.guid NOT IN (" + skipCsv + ") ";
+-        sql += "LIMIT 1";
+-
+-        if (QueryResult r = CharacterDatabase.Query("{}", sql))
+-            return r->Fetch()[0].Get<uint32>();
+         return 0;
+     }
+ 
+@@ -571,136 +445,6 @@ namespace
+         ChatHandler(owner->GetSession()).ParseCommands(command);
+     }
+ 
+-    /* ---- pool body reset ----------------------------------------------------
+-     * `.companion forget` only drops the binding, so a released body goes back to
+-     * the pool carrying everything it earned: its level, its gear, its quest log.
+-     * The body handed to Palpal was the previous owner's companion at level 7
+-     * with 39 items - a "new" companion that starts seven levels ahead of its
+-     * owner, in someone else's gear. The claim path therefore blanks the body
+-     * before renaming it, and reports what it erased.
+-     */
+-    struct PoolBodyState
+-    {
+-        uint8 level = 0;
+-        uint16 atLogin = 0;
+-        uint32 items = 0;
+-    };
+-
+-    // `release` = the body is going back to the pool, so it must stop holding the
+-    // player's name. On a CLAIM it must not - the caller renames it to the player's
+-    // chosen name just before this runs, and renaming here afterwards is what made
+-    // `.playerbots bot add Healy` answer "Character Healy not found": the body was
+-    // called Drifterib again by the time the summon ran.
+-    PoolBodyState ResetPoolBody(uint32 botGuid, bool release = false)
+-    {
+-        PoolBodyState state;
+-
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT level, at_login FROM characters WHERE guid = {}", botGuid))
+-        {
+-            Field* f = r->Fetch();
+-            state.level = f[0].Get<uint8>();
+-            state.atLogin = f[1].Get<uint16>();
+-        }
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT COUNT(*) FROM character_inventory WHERE guid = {}", botGuid))
+-            state.items = r->Fetch()[0].Get<uint32>();
+-
+-        // gear and bags: the item rows first (the inventory row points at them)
+-        CharacterDatabase.DirectExecute(
+-            "DELETE ii FROM item_instance ii INNER JOIN character_inventory ci ON ci.item = ii.guid WHERE ci.guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM item_instance WHERE owner_guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_inventory WHERE guid = {}", botGuid);
+-
+-        // quest log: a new owner must not inherit the previous one's progress
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus WHERE guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus_daily WHERE guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus_weekly WHERE guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus_monthly WHERE guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus_seasonal WHERE guid = {}", botGuid);
+-        CharacterDatabase.DirectExecute("DELETE FROM character_queststatus_rewarded WHERE guid = {}", botGuid);
+-
+-        // level, money and the login flags that would block the very next load.
+-        // Spells and talents are left alone: they are level-gated by the client
+-        // and re-initialised by `.playerbots bot initself` once the bot is in.
+-        CharacterDatabase.DirectExecute(
+-            "UPDATE characters SET level = 1, xp = 0, money = 0, rest_bonus = 0, at_login = 0, health = 100 "
+-            "WHERE guid = {}", botGuid);
+-
+-        // Give the player's name back here, not at forget time: a rename issued while
+-        // the bot is still in world is overwritten by its own logout save, which is how
+-        // a forgotten 'Healy' kept the name and the next create answered "Name is
+-        // already taken". This runs after the body is out, so the write sticks.
+-        if (release)
+-        {
+-            if (std::string poolName = PoolNameFor(botGuid); !poolName.empty())
+-                RenameCharacter(botGuid, poolName);
+-        }
+-
+-        return state;
+-    }
+-
+-    /* ---- released bodies go back to the pool clean --------------------------
+-     * The logout is asynchronous, so the reset is queued and only runs once the
+-     * bot is really out of the world - a SQL reset issued while it is still
+-     * online is overwritten by its own save.
+-     */
+-    struct PendingReset
+-    {
+-        uint32 botGuid;
+-        std::string name;
+-        uint32 ownerGuid;
+-        uint32 deadlineMs;
+-        bool destroy;                 // delete the body instead of recycling it
+-    };
+-
+-    std::vector<PendingReset> g_pendingResets;
+-
+-    void QueueBodyReset(uint32 botGuid, std::string const& name, uint32 ownerGuid,
+-                        bool destroy = false, uint32 timeoutMs = 30000)
+-    {
+-        uint32 now = getMSTime();
+-        for (PendingReset& pending : g_pendingResets)
+-        {
+-            if (pending.botGuid == botGuid)
+-            {
+-                pending.deadlineMs = now + timeoutMs;
+-                pending.destroy = pending.destroy || destroy;
+-                return;
+-            }
+-        }
+-        g_pendingResets.push_back({ botGuid, name, ownerGuid, now + timeoutMs, destroy });
+-    }
+-
+-    void ProcessPendingResets()
+-    {
+-        if (g_pendingResets.empty())
+-            return;
+-
+-        uint32 now = getMSTime();
+-        for (auto it = g_pendingResets.begin(); it != g_pendingResets.end();)
+-        {
+-            Player* bot = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, it->botGuid));
+-            if (bot && bot->IsInWorld())
+-            {
+-                if (now < it->deadlineMs)
+-                {
+-                    ++it;
+-                    continue;
+-                }
+-                LOG_WARN("server", "[companion] released body {} ('{}') is still in world - not resetting it",
+-                    it->botGuid, it->name);
+-                it = g_pendingResets.erase(it);
+-                continue;
+-            }
+-
+-            PoolBodyState previous = ResetPoolBody(it->botGuid, true);   // going back to the pool
+-            LOG_INFO("server", "[companion] returned pool body {} ('{}'): level {} -> 1, {} item(s) cleared, at_login {} cleared",
+-                it->botGuid, it->name, previous.level, previous.items, previous.atLogin);
+-            it = g_pendingResets.erase(it);
+-        }
+-    }
+-
+     /* ---- summon verification ------------------------------------------------
+      * `.playerbots bot add` is asynchronous and every one of its failure paths
+      * is silent: the command answers "ok" and AddPlayerBot() then returns
+@@ -722,7 +466,6 @@ namespace
+         uint32 startedMs;
+         uint32 deadlineMs;
+         bool initOnLogin;              // freshly claimed body: needs its gear/spells
+-        uint8 attempts;                // dispatching the add again counts
+     };
+ 
+     std::vector<PendingSummon> g_pendingSummons;
+@@ -808,7 +551,12 @@ namespace
+             }
+ 
+             Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, it->ownerGuid));
+-            if (owner && owner->GetSession())
++            if (!HasCurrentCustody(it->ownerGuid, it->botGuid))
++            {
++                it = g_pendingInits.erase(it);
++                continue;
++            }
++            if (owner && owner->GetSession() && IsControlledCompanion(bot, owner))
+             {
+                 DispatchPlayerbots(owner, "init=" + it->quality + " " + it->name);
+                 ++it->tries;
+@@ -832,11 +580,10 @@ namespace
+                 pending.startedMs = now;
+                 pending.deadlineMs = now + timeoutMs;
+                 pending.initOnLogin = pending.initOnLogin || initOnLogin;
+-                pending.attempts = 0;
+                 return;
+             }
+         }
+-        g_pendingSummons.push_back({ owner->GetGUID().GetCounter(), botGuid, name, now, now + timeoutMs, initOnLogin, 0 });
++        g_pendingSummons.push_back({ owner->GetGUID().GetCounter(), botGuid, name, now, now + timeoutMs, initOnLogin });
+     }
+ 
+     void CheckPendingSummons()
+@@ -849,8 +596,14 @@ namespace
+         {
+             ObjectGuid botGuid(HighGuid::Player, it->botGuid);
+             Player* bot = ObjectAccessor::FindConnectedPlayer(botGuid);
+-            if (bot && bot->IsInWorld())
++            Player* master = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, it->ownerGuid));
++            if (bot && bot->IsInWorld() && IsControlledCompanion(bot, master))
+             {
++                if (!HasCurrentCustody(it->ownerGuid, it->botGuid))
++                {
++                    it = g_pendingSummons.erase(it);
++                    continue;
++                }
+                 LOG_INFO("server", "[companion] '{}' (botGuid {}) reached its owner in {} ms",
+                     it->name, it->botGuid, now - it->startedMs);
+ 
+@@ -891,27 +644,6 @@ namespace
+                 "- playerbots accepted the add and never logged the bot in", it->name, it->botGuid,
+                 it->ownerGuid, now - it->startedMs);
+ 
+-            // One retry, after clearing the flags that block Player::LoadFromDB. The
+-            // body can pick up AT_LOGIN_RENAME between the claim check and the load
+-            // (nothing in the module sets it, but the pool is shared), and the load
+-            // then refuses the character with only a debug line.
+-            if (it->attempts < 2)
+-            {
+-                CharacterDatabase.DirectExecute("UPDATE characters SET at_login = 0 WHERE guid = {}", it->botGuid);
+-                it->attempts++;
+-                it->startedMs = now;
+-                it->deadlineMs = now + 15000;
+-                Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, it->ownerGuid));
+-                if (owner && owner->GetSession())
+-                {
+-                    DispatchPlayerbots(owner, "add " + it->name);
+-                    LOG_INFO("server", "[companion] retrying the summon of '{}' (botGuid {}) after clearing its login flags",
+-                        it->name, it->botGuid);
+-                    ++it;
+-                    continue;
+-                }
+-            }
+-
+             Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HighGuid::Player, it->ownerGuid));
+             if (owner && owner->GetSession())
+             {
+@@ -940,7 +672,6 @@ public:
+     {
+         CheckPendingSummons();
+         CheckPendingInits();
+-        ProcessPendingResets();
+     }
+ 
+     // Auto-create the binding table on every start (idempotent, repack-default,
+@@ -960,49 +691,14 @@ public:
+             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+         LOG_INFO("server", "[companion] wowlegends_companion table ready (personal companion bindings)");
+ 
+-        // Integrity sweep: delete bindings whose bot character is gone, and
+-        // bindings whose OWNER is gone (`.character erase` / account deletion
+-        // skip the delete hooks, and a reused GUID would inherit the companion).
+-        CharacterDatabase.DirectExecute(
+-            "DELETE FROM wowlegends_companion WHERE bot_guid NOT IN (SELECT guid FROM characters)");
+-        CharacterDatabase.DirectExecute(
+-            "DELETE FROM wowlegends_companion WHERE owner_guid NOT IN (SELECT guid FROM characters)");
+-        LOG_INFO("server", "[companion] orphan-binding sweep complete");
+-
+-        // Released bodies: the ledger drives the collector (deleting bodies nobody
+-        // came back for) and survives a restart, so a released guid stays out of the
+-        // pool for a while even if the world bounced in between.
+-        CharacterDatabase.DirectExecute(
+-            "CREATE TABLE IF NOT EXISTS wowlegends_companion_released ("
+-            "bot_guid INT UNSIGNED NOT NULL, "
+-            "released_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+-            "reason VARCHAR(24) NOT NULL, "
+-            "PRIMARY KEY (bot_guid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+-        CharacterDatabase.DirectExecute(
+-            "DELETE FROM wowlegends_companion_released WHERE bot_guid NOT IN (SELECT guid FROM characters)");
+-        LOG_INFO("server", "[companion] released-body ledger ready");
+-
+-        RepairReleasedNames();
+-        ReconcileBindings();
+-
+-        LogPoolHealth();
+-
+-        // A body with a pending login action can never be loaded: Player::LoadFromDB
+-        // refuses AT_LOGIN_RENAME, playerbots reports nothing, and the player sees
+-        // a summon that does nothing forever. Clear the flag on every body that is
+-        // already bound, and across the AddClass pool we hand bodies out from.
+-        CharacterDatabase.DirectExecute(
+-            "UPDATE characters c JOIN wowlegends_companion b ON b.bot_guid = c.guid "
+-            "SET c.at_login = 0 WHERE c.at_login <> 0");
+-        LOG_INFO("server", "[companion] pending login flags cleared on bound companion bodies");
+-
+-        std::string poolAccounts = AddClassAccountIdCsv();
+-        if (!poolAccounts.empty())
+-        {
+-            CharacterDatabase.DirectExecute(
+-                "UPDATE characters SET at_login = 0 WHERE at_login <> 0 AND account IN (" + poolAccounts + ")");
+-            LOG_INFO("server", "[companion] pending login flags cleared across the companion pool");
+-        }
++        // History is audit evidence, not permission to rename or repair a reused body.
++        // Preserve old bindings as reservations until explicitly reviewed offline.
++        g_custodyReady = CustodyTablesTransactional() && static_cast<bool>(
++            CharacterDatabase.Query("SHOW COLUMNS FROM wowlegends_companion LIKE 'companion_name'"));
++        if (!g_custodyReady)
++            LOG_WARN("server", "[companion] lifecycle disabled: install the shared custody migration");
++        else
++            LogPoolHealth();
+     }
+ };
+ 
+@@ -1034,73 +730,60 @@ public:
+         return baseTable;
+     }
+ 
+-    // Read the caller's binding: returns true + fills out-params if one exists.
+     static bool GetBinding(uint32 ownerGuid, uint32& botGuid, std::string& name)
+     {
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT bot_guid, companion_name FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid))
++        if (!g_custodyReady)
++            return false;
++        if (QueryResult r = CharacterDatabase.Query("SELECT b.bot_guid, c.name" + CurrentCustodyClause() +
++                fmt::format(" AND b.owner_guid = {}", ownerGuid)))
+         {
+-            Field* f = r->Fetch();
+-            botGuid = f[0].Get<uint32>();
+-            name = f[1].Get<std::string>();
+-            return true;
++            botGuid = r->Fetch()[0].Get<uint32>();
++            name = r->Fetch()[1].Get<std::string>();
++            return !r->NextRow();
+         }
+         return false;
+     }
+ 
+-    // Prepare a pool body for a claim: reset it, name it, prove both took. Only while
+-    // the body is offline - a live entity overwrites the row at its next save.
+-    static bool ClaimBody(uint32 botGuid, std::string const& chosen)
++    static bool ClaimBody(uint32 ownerGuid, uint32 botGuid, uint8 race, uint8 clazz,
++                          std::string const& accounts, std::string const& chosen)
+     {
+-        if (BodyOnline(botGuid))
++        if (!g_custodyReady || accounts.empty() || !botGuid || BodyOnlineOrLoading(botGuid))
+             return false;
+-
+-        PoolBodyState const previous = ResetPoolBody(botGuid);
+-        bool const named = RenameCharacter(botGuid, chosen);
+-
+-        LOG_INFO("server", "[companion] claimed body {} as '{}': level {} -> 1, {} item(s) cleared, at_login {} cleared, name {}",
+-            botGuid, chosen, previous.level, previous.items, previous.atLogin, named ? "applied" : "REFUSED");
+-        return named;
++        std::string const escaped = Escape(chosen);
++        auto trans = CharacterDatabase.BeginTransaction();
++        trans->Append("UPDATE cq_companion_custody x JOIN characters c ON c.guid = x.bot_guid "
++            "JOIN characters o ON o.guid = {} AND o.guid <> c.guid "
++            "LEFT JOIN characters named ON named.name = '{}' "
++            "SET x.owner_guid = o.guid, x.body_name = '{}', x.state = 'owned', c.name = '{}' "
++            "WHERE x.bot_guid = {} AND c.account IN ({}) AND c.race = {} AND c.class = {} AND named.guid IS NULL " +
++            FreeCustodyClause() + " AND NOT EXISTS (SELECT 1 FROM wowlegends_companion slots WHERE slots.owner_guid = {})",
++            ownerGuid, escaped, escaped, escaped, botGuid, accounts, race, clazz, ownerGuid);
++        trans->Append("SET @wl_claim_changed = ROW_COUNT()");
++        trans->Append("INSERT INTO wowlegends_companion (owner_guid, bot_guid, companion_name) "
++            "SELECT {}, {}, '{}' WHERE @wl_claim_changed > 0", ownerGuid, botGuid, escaped);
++        CharacterDatabase.DirectCommitTransaction(trans);
++        if (!HasCurrentCustody(ownerGuid, botGuid) || BodyName(botGuid) != chosen)
++            return false;
++        sCharacterCache->UpdateCharacterData(ObjectGuid(HighGuid::Player, botGuid), chosen);
++        WlCompanionMemoryInvalidate(botGuid);
++        return true;
+     }
+ 
+-    // Send the body to its owner using the name the row actually carries. If the body
+-    // lost the player's chosen name we try once to put it back (offline only) and
+-    // otherwise adopt the body's name, so chat and reality never disagree.
+-    static bool SummonBody(Player* owner, uint32 ownerGuid, uint32 botGuid, std::string displayName, bool fresh)
++    static bool SummonBody(Player* owner, uint32 ownerGuid, uint32 botGuid, std::string const& displayName, bool fresh)
+     {
+-        std::string actual = BodyName(botGuid);
+-        if (actual.empty())
+-        {
+-            CharacterDatabase.DirectExecute("DELETE FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-            WlCompanionMemoryInvalidate(botGuid);
+-            LOG_WARN("server", "[companion] binding for owner {} pointed at missing body {} - bond cleared", ownerGuid, botGuid);
+-            if (owner->GetSession())
+-                ChatHandler(owner->GetSession()).SendSysMessage(
+-                    "Your companion's character no longer exists, so the bond is cleared. "
+-                    "Use |cffffff00.companion create|r to start again.");
++        if (!HasCurrentCustody(ownerGuid, botGuid))
+             return false;
+-        }
+-
+-        if (actual != displayName)
+-        {
+-            if (!BodyOnline(botGuid) && RenameCharacter(botGuid, displayName))
+-                actual = displayName;
+-            else
+-            {
+-                LOG_WARN("server", "[companion] body {} answers to '{}' but the bond says '{}' - using '{}'",
+-                    botGuid, actual, displayName, actual);
+-                SetBindingName(ownerGuid, actual);
+-                displayName = actual;
+-            }
+-        }
+-
+-        DispatchPlayerbots(owner, "add " + actual);
+-        InvalidateName(owner, botGuid);          // forget any stale nameplate for this guid
+-        QueueSummonVerification(owner, botGuid, actual, fresh);
++        ObjectGuid const key(HighGuid::Player, botGuid);
++        if (Player* bot = ObjectAccessor::FindConnectedPlayer(key))
++            return IsControlledCompanion(bot, owner);
++        if (IsCompanionLoginPending(key))
++            return false;
++        DispatchPlayerbots(owner, "add " + displayName);
++        InvalidateName(owner, botGuid);
++        QueueSummonVerification(owner, botGuid, displayName, fresh);
+         return true;
+     }
+ 
+-    /* ---- .companion (no arg): status ------------------------------------- */
+     static bool HandleCompanionStatusCommand(ChatHandler* handler)
+     {
+         Player* me = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+@@ -1146,17 +829,15 @@ public:
+         if (!IsRealPlayer(me))
+             return false;
+ 
+-        // a. one companion per player
+-        uint32 ownerGuid = me->GetGUID().GetCounter();
+-        uint32 existingBot = 0;
+-        std::string existingName;
+-        if (GetBinding(ownerGuid, existingBot, existingName))
++        uint32 const ownerGuid = me->GetGUID().GetCounter();
++        if (!g_custodyReady)
+         {
+-            std::string const actual = BodyName(existingBot);
+-            handler->PSendSysMessage("You already have a companion: |cff20ff20{}|r. "
+-                "|cffffff00.companion summon|r calls them, |cffffff00.companion forget|r releases them so you can start over.",
+-                actual.empty() ? existingName : actual);
+-            handler->SetSentErrorMessage(true);
++            handler->SendSysMessage("The verified companion pool is not configured.");
++            return false;
++        }
++        if (CharacterDatabase.Query("SELECT 1 FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid))
++        {
++            handler->SendSysMessage("You already have a companion reservation. Unreviewed and retiring reservations need staff review.");
+             return false;
+         }
+ 
+@@ -1186,7 +867,13 @@ public:
+         uint8 clazz = ClassIdFromName(classStr);
+         if (!clazz)
+         {
+-            handler->PSendSysMessage("Unknown class '{}'. Try: warrior paladin hunter rogue priest dk shaman mage warlock druid.", classStr);
++            handler->PSendSysMessage("Unknown class '{}'. Try: warrior paladin hunter rogue priest shaman mage warlock druid.", classStr);
++            handler->SetSentErrorMessage(true);
++            return false;
++        }
++        if (clazz == CLASS_DEATH_KNIGHT)
++        {
++            handler->SendSysMessage("Death Knight companions are unavailable for new claims.");
+             handler->SetSentErrorMessage(true);
+             return false;
+         }
+@@ -1273,79 +960,15 @@ public:
+             handler->SetSentErrorMessage(true);
+             return false;
+         }
+-        uint32 ahbotGuid = CfgAhbotGuid();
+-
+-        // f/g. rename a pool char + insert the binding; UNIQUE(bot_guid) loses
+-        //      races gracefully -> on a duplicate, try the next pool char.
+-        // Skip only the bodies whose rebuild is still in flight - they may still be
+-        // logging out or still hold the previous owner's gear for a moment. A body
+-        // that has already been rebuilt is an ordinary pool body again.
+-        //
+-        // This used to skip everything released in the last ten minutes, which made a
+-        // small class impossible to re-create: two human priests, both released
+-        // minutes apart, and '.companion create human priest' answered "none
+-        // available" until the window expired.
+-        std::vector<uint32> tried;
+-        for (auto const& pending : g_pendingResets)
+-            tried.push_back(pending.botGuid);
+-        uint32 botGuid = 0;
+-        bool bound = false;
+-        for (int attempt = 0; attempt < 8 && !bound; ++attempt)
++        uint32 const botGuid = PickPoolChar(race, clazz, addClassAccCsv);
++        if (!ClaimBody(ownerGuid, botGuid, race, clazz, addClassAccCsv, nameStr))
+         {
+-            botGuid = PickPoolChar(race, clazz, addClassAccCsv, ahbotGuid, tried);
+-            if (!botGuid)
+-                break;   // pool exhausted for this race+class
+-            tried.push_back(botGuid);
+-
+-            // Claim the binding FIRST (UNIQUE bot_guid is the race guard).
+-            QueryResult dup = CharacterDatabase.Query(
+-                "SELECT 1 FROM wowlegends_companion WHERE bot_guid = {}", botGuid);
+-            if (dup)
+-                continue;   // already claimed by someone else; try another
+-
+-            CharacterDatabase.DirectExecute(
+-                "INSERT INTO wowlegends_companion (owner_guid, bot_guid, companion_name) VALUES ({}, {}, '{}')",
+-                ownerGuid, botGuid, Escape(nameStr));
+-
+-            // Confirm WE won the row (lost an owner_guid race? someone else inserted
+-            // our owner row; lost a bot_guid race? the insert silently no-op'd if it
+-            // collided — re-read to be sure this binding is ours).
+-            QueryResult check = CharacterDatabase.Query(
+-                "SELECT bot_guid FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-            if (!check)
+-                continue;   // extremely unlikely; retry
+-            uint32 ownedBot = check->Fetch()[0].Get<uint32>();
+-            if (ownedBot != botGuid)
+-            {
+-                // We lost the owner_guid race to a parallel create; stop.
+-                handler->SendSysMessage("You already have a companion now. Use |cffffff00.companion summon|r.");
+-                handler->SetSentErrorMessage(true);
+-                return false;
+-            }
+-            bound = true;
+-        }
+-
+-        if (!bound || !botGuid)
+-        {
+-            handler->PSendSysMessage("No {} {} companion is available right now. Try a different race or class, or try again later.",
++            handler->PSendSysMessage("No verified {} {} claim could be confirmed. Try another combination or name.",
+                 RaceDisplayName(race), ClassDisplayName(clazz));
+             handler->SetSentErrorMessage(true);
+             return false;
+         }
+ 
+-        // f. prepare the body: reset it, name it, and prove both took. A body that
+-        //    cannot be renamed is not a companion - say so instead of summoning a
+-        //    name nobody answers to, which is what "Character X not found" was.
+-        if (!ClaimBody(botGuid, nameStr))
+-        {
+-            CharacterDatabase.DirectExecute("DELETE FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-            LOG_WARN("server", "[companion] could not name body {} '{}' - claim abandoned", botGuid, nameStr);
+-            handler->PSendSysMessage("Could not prepare a companion body called |cff20ff20{}|r. "
+-                "That name may be taken - try another.", nameStr);
+-            handler->SetSentErrorMessage(true);
+-            return false;
+-        }
+-
+         // h. summon (OnBotLogin auto-groups + follow + combat), by the name the row
+         //    actually carries
+         if (!SummonBody(me, ownerGuid, botGuid, nameStr, true))
+@@ -1408,117 +1031,110 @@ public:
+             return false;
+         }
+ 
+-        std::string const actual = BodyName(botGuid).empty() ? name : BodyName(botGuid);
+-        DispatchPlayerbots(me, "remove " + actual);
+-        handler->PSendSysMessage("|cff20ff20{}|r departs - call them back any time with |cffffff00.companion summon|r.", actual);
++        ObjectGuid const key(HighGuid::Player, botGuid);
++        bool summoning = false;
++        for (PendingSummon const& pending : g_pendingSummons)
++            summoning = summoning || pending.botGuid == botGuid;
++        if (summoning || IsCompanionLoginPending(key) || !IsControlledCompanion(ObjectAccessor::FindConnectedPlayer(key), me))
++        {
++            handler->SendSysMessage("The companion is not safely dismissible by you right now.");
++            return false;
++        }
++        DispatchPlayerbots(me, "remove " + name);
++        handler->PSendSysMessage("|cff20ff20{}|r is being dismissed.", name);
+         return true;
+     }
+ 
+-    /* ---- .companion forget ---------------------------------------------- */
+-    static bool HandleCompanionForgetCommand(ChatHandler* handler)
++    // Wait for the owner to dismiss first. Live logout is not a DB save barrier;
++    // even an offline body remains reserved until maintenance finalizes it.
++    static bool RequestRetirement(ChatHandler* handler, Player* owner)
+     {
+-        Player* me = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+-        if (!IsRealPlayer(me))
+-            return false;
+-
+-        uint32 ownerGuid = me->GetGUID().GetCounter();
++        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+         uint32 botGuid = 0;
+         std::string name;
+         if (!GetBinding(ownerGuid, botGuid, name))
+         {
+-            handler->SendSysMessage("You have no companion to forget.");
+-            handler->SetSentErrorMessage(true);
++            handler->SendSysMessage("No verified companion to release. Ask staff about unreviewed reservations.");
+             return false;
+         }
+-
+-        // Send it away first if it's out (by whatever name the row carries now), then
+-        // drop the binding + its chat memory.
+-        DispatchPlayerbots(me, "remove " + (BodyName(botGuid).empty() ? name : BodyName(botGuid)));
+-        CharacterDatabase.Execute("DELETE FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-        CharacterDatabase.Execute("DELETE FROM playerbot_ai_chat_memory WHERE bot_guid = {}", botGuid);
+-        CharacterDatabase.Execute("DELETE FROM wowlegends_companion_memory WHERE bot_guid = {}", botGuid);
+-        WlCompanionMemoryInvalidate(botGuid);  // pool char is free again
+-
+-        // Free the name the player chose straight away, by renaming the body to a
+-        // neutral pool name (DB + character cache). Leaving it in place is why a
+-        // recreate with the same name answered "already taken", and why the next
+-        // claim re-bound the body it had just released - the stale-entity-name bug.
+-        if (std::string poolName = PoolNameFor(botGuid); !poolName.empty())
+-            RenameCharacter(botGuid, poolName);
+-        g_releasedBots[botGuid] = getMSTime();
+-        LedgerRelease(botGuid, "forget");
+-
+-        // Hand the body back blank once it is really offline: the next person to
+-        // claim it must not inherit this owner's level, gear or quest log.
+-        QueueBodyReset(botGuid, name, ownerGuid);
+-
+-        handler->PSendSysMessage("You release |cff20ff20{}|r. They will forget you, and the bond is gone. The pool character returns for others to claim.", name);
+-        handler->SendSysMessage("You may create a new companion with |cffffff00.companion create <race> <class> <name>|r.");
+-        LOG_INFO("server", "[companion] {} (guid {}) forgot companion '{}' (botGuid {})",
+-            me->GetName(), ownerGuid, name, botGuid);
++        for (PendingSummon const& pending : g_pendingSummons)
++        {
++            if (pending.botGuid == botGuid)
++            {
++                handler->SendSysMessage("A summon is still in flight. Wait, dismiss the companion, then retry.");
++                return false;
++            }
++        }
++        for (PendingInit const& pending : g_pendingInits)
++        {
++            if (pending.botGuid == botGuid)
++            {
++                handler->SendSysMessage("Initialization is still in flight. Wait and retry.");
++                return false;
++            }
++        }
++        if (BodyOnlineOrLoading(botGuid))
++        {
++            handler->SendSysMessage("Dismiss the companion and wait for it to go offline, then retry.");
++            return false;
++        }
++        CharacterDatabase.DirectExecute(
++            "UPDATE cq_companion_custody x JOIN wowlegends_companion b ON b.bot_guid = x.bot_guid AND b.owner_guid = x.owner_guid "
++            "JOIN characters c ON c.guid = x.bot_guid AND c.account = x.body_account "
++            "SET x.state = 'retiring', x.tracking = 0 WHERE x.module = 'legacy' AND x.state = 'owned' "
++            "AND x.owner_guid = {} AND x.bot_guid = {} AND c.online = 0 AND BINARY x.body_name = BINARY c.name "
++            "AND BINARY b.companion_name = BINARY c.name " + ForeignCustodyClause("x.bot_guid"), ownerGuid, botGuid);
++        if (!CharacterDatabase.Query("SELECT 1 FROM cq_companion_custody WHERE bot_guid = {} AND owner_guid = {} "
++                "AND module = 'legacy' AND state = 'retiring'", botGuid, ownerGuid))
++        {
++            handler->SendSysMessage("The durable release reservation was not confirmed.");
++            return false;
++        }
++        WlCompanionMemoryInvalidate(botGuid);
++        handler->PSendSysMessage("{} is quarantined for offline maintenance. The body and its name remain reserved until staff review.", name);
+         return true;
+     }
+ 
+-    /* ---- .companion destroy ----------------------------------------------
+-     * Ends the bond and hands the body back to the pool, rebuilt: reset to level 1,
+-     * stripped, renamed to a pool name so the player's choice is free again. It does
+-     * NOT delete the character - the AddClass pool is the repack's allocation and
+-     * nothing here may deplete it. Needs the word "yes" because it ends the bond.
+-     */
++    static bool HandleCompanionForgetCommand(ChatHandler* handler)
++    {
++        Player* me = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
++        return IsRealPlayer(me) && RequestRetirement(handler, me);
++    }
++
+     static bool HandleCompanionDestroyCommand(ChatHandler* handler, char const* args)
+     {
+         Player* me = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+         if (!IsRealPlayer(me))
+             return false;
+-
+-        std::string confirm = args ? args : "";
+-        while (!confirm.empty() && isspace(static_cast<unsigned char>(confirm.front())))
+-            confirm.erase(confirm.begin());
+-        while (!confirm.empty() && isspace(static_cast<unsigned char>(confirm.back())))
+-            confirm.pop_back();
+-        for (char& c : confirm)
+-            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+-
+-        if (confirm != "yes")
++        if (ToLower(args ? args : "") != "yes")
+         {
+-            handler->SendSysMessage("This deletes the companion for good and cannot be undone. "
+-                                    "Repeat with |cffffff00.companion destroy yes|r if that is what you want.");
+-            handler->SetSentErrorMessage(true);
++            handler->SendSysMessage("Repeat with .companion destroy yes to request offline retirement. Nothing is destroyed now.");
+             return false;
+         }
+-
+-        uint32 ownerGuid = me->GetGUID().GetCounter();
+-        uint32 botGuid = 0;
+-        std::string name;
+-        if (!GetBinding(ownerGuid, botGuid, name))
+-        {
+-            handler->SendSysMessage("You have no companion to destroy.");
+-            handler->SetSentErrorMessage(true);
+-            return false;
+-        }
+-
+-        // The AddClass pool is the vendor's allocation and a companion only borrows
+-        // from it: nothing in this feature may shrink it. So "destroy" is a gentle
+-        // rebuild - the body is reset, renamed to a pool name (freeing the player's
+-        // choice) and handed back, exactly like forget, and the pool keeps every
+-        // character it started with.
+-        DispatchPlayerbots(me, "remove " + (BodyName(botGuid).empty() ? name : BodyName(botGuid)));
+-        CharacterDatabase.Execute("DELETE FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid);
+-        CharacterDatabase.Execute("DELETE FROM playerbot_ai_chat_memory WHERE bot_guid = {}", botGuid);
+-        CharacterDatabase.Execute("DELETE FROM wowlegends_companion_memory WHERE bot_guid = {}", botGuid);
+-        WlCompanionMemoryInvalidate(botGuid);
+-        g_releasedBots[botGuid] = getMSTime();
+-        LedgerRelease(botGuid, "destroy");
+-        QueueBodyReset(botGuid, name, ownerGuid, false);
+-
+-        LOG_INFO("server", "[companion] {} (guid {}) destroyed companion '{}' (botGuid {}) - body rebuilt and returned to the pool",
+-            me->GetName(), ownerGuid, name, botGuid);
+-        handler->PSendSysMessage("|cffff6060{}|r is gone. The body is reset and returned to the pool, and your "
+-                                 "name is free again. |cffffff00.companion create|r starts a new bond.", name);
+-        return true;
++        return RequestRetirement(handler, me);
+     }
++
+ };
+ 
++// Shared with legacy companion memory: historical bindings do not grant access.
++uint32 WlVerifiedCompanionOwner(uint32 botGuid)
++{
++    if (g_custodyReady)
++        if (QueryResult row = CharacterDatabase.Query("SELECT b.owner_guid" + CurrentCustodyClause() +
++                fmt::format(" AND b.bot_guid = {}", botGuid)))
++            return row->Fetch()[0].Get<uint32>();
++    return 0;
++}
++
++uint32 WlVerifiedCompanionBody(uint32 ownerGuid)
++{
++    if (g_custodyReady)
++        if (QueryResult row = CharacterDatabase.Query("SELECT b.bot_guid" + CurrentCustodyClause() +
++                fmt::format(" AND b.owner_guid = {}", ownerGuid)))
++            return row->Fetch()[0].Get<uint32>();
++    return 0;
++}
++
+ void AddWowLegendsCompanionScripts()
+ {
+     new WowLegendsCompanionWorld();
+diff --git a/src/wowlegends_companion_memory.cpp b/src/wowlegends_companion_memory.cpp
+index e7d7ba5..08101ce 100644
+--- a/src/wowlegends_companion_memory.cpp
++++ b/src/wowlegends_companion_memory.cpp
+@@ -32,6 +32,9 @@
+ #include <string>
+ #include <unordered_map>
+ 
++uint32 WlVerifiedCompanionOwner(uint32 botGuid);
++uint32 WlVerifiedCompanionBody(uint32 ownerGuid);
++
+ namespace
+ {
+     std::atomic<bool> g_companionMemEnabled{true};
+@@ -77,10 +80,7 @@ namespace
+             if (it != g_ownerCache.end())
+                 return it->second;
+         }
+-        uint32 owner = 0;
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT owner_guid FROM wowlegends_companion WHERE bot_guid = {}", botGuid))
+-            owner = r->Fetch()[0].Get<uint32>();
++        uint32 const owner = WlVerifiedCompanionOwner(botGuid);
+         {
+             std::lock_guard<std::mutex> lock(g_ownerCacheMutex);
+             g_ownerCache[botGuid] = owner;
+@@ -90,10 +90,7 @@ namespace
+ 
+     uint32 CompanionBotOf(uint32 ownerGuid)
+     {
+-        if (QueryResult r = CharacterDatabase.Query(
+-                "SELECT bot_guid FROM wowlegends_companion WHERE owner_guid = {}", ownerGuid))
+-            return r->Fetch()[0].Get<uint32>();
+-        return 0;
++        return WlVerifiedCompanionBody(ownerGuid);
+     }
+ 
+     // Is the bot (by guid) currently in the owner's group?
+@@ -194,10 +191,7 @@ public:
+             "KEY idx_bot (bot_guid)"
+             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+ 
+-        // Drop memories whose companion binding is gone (forgotten / re-rolled).
+-        CharacterDatabase.DirectExecute(
+-            "DELETE FROM wowlegends_companion_memory WHERE bot_guid NOT IN "
+-            "(SELECT bot_guid FROM wowlegends_companion)");
++        // Preserve historical memory; offline review owns retirement and archival.
+         LOG_INFO("server", "[companion] wowlegends_companion_memory table ready");
+     }
+ 
+diff --git a/tests/test_companion_lifecycle.py b/tests/test_companion_lifecycle.py
+new file mode 100644
+index 0000000..31e9c80
+--- /dev/null
++++ b/tests/test_companion_lifecycle.py
+@@ -0,0 +1,29 @@
++from pathlib import Path
++import unittest
++
++SRC = (Path(__file__).resolve().parents[1] / 'src/wowlegends_companion.cpp').read_text(encoding='utf-8')
++
++
++class Lifecycle(unittest.TestCase):
++    def test_pool_selection_and_claim_share_custody_guard(self):
++        picker = SRC.split('uint32 PickPoolChar(', 1)[1].split('void DispatchPlayerbots', 1)[0]
++        self.assertIn('FreeCustodyClause', picker)
++        claim = SRC.split('static bool ClaimBody(', 1)[1].split('static bool SummonBody(', 1)[0]
++        self.assertIn('FreeCustodyClause', claim)
++        self.assertIn('DirectCommitTransaction', claim)
++        self.assertNotIn('ResetPoolBody', claim)
++
++    def test_historical_repair_has_no_body_write_path(self):
++        self.assertNotIn('RepairReleasedNames', SRC)
++        self.assertNotIn('ReconcileBindings', SRC)
++        self.assertNotIn('UPDATE characters SET at_login', SRC)
++
++    def test_forget_and_destroy_do_not_recycle_while_world_is_running(self):
++        self.assertNotIn('QueueBodyReset', SRC)
++        self.assertNotIn('ResetPoolBody', SRC)
++        self.assertIn('RequestRetirement(handler,', SRC)
++
++    def test_legacy_memory_does_not_follow_unverified_bindings(self):
++        memory = (Path(__file__).resolve().parents[1] / "src/wowlegends_companion.cpp").with_name('wowlegends_companion_memory.cpp').read_text(encoding='utf-8')
++        self.assertIn('WlVerifiedCompanionOwner(botGuid)', memory)
++        self.assertIn('WlVerifiedCompanionBody(ownerGuid)', memory)

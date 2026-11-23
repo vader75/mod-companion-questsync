@@ -22,7 +22,7 @@ class SpecificDelivery(unittest.TestCase):
 
     def test_craft_uses_held_materials_and_preserves_preexisting_product(self):
         body = PICKER.split('static void HandleSupplyAction(', 1)[-1].split('static bool HandleNamedSupply(', 1)[0]
-        self.assertIn('SupplyCraftReady(bot, plan)', body)
+        self.assertIn('SupplyCraftReady(bot, owner, plan)', body)
         self.assertIn('~TRIGGERED_IGNORE_POWER_AND_REAGENT_COST', body)
         self.assertIn('supply.keep = bot->GetItemCount(entry)', body)
         self.assertIn('after - supply.keep < batch', body)
@@ -38,11 +38,12 @@ class SpecificDelivery(unittest.TestCase):
         self.assertIn('#ifndef AC_TRADE_OFFER_GUARD', handler)
         action = PICKER.split('static void HandleSupplyAction(', 1)[1].split('#endif', 1)[0]
         self.assertLess(action.index('CanTradeSurplusNow'), action.index('bot->CastSpell'))
-        self.assertIn('OpenTradeSurplus(bot, owner, /*announce=*/true, /*curated=*/false, supply, opened)', action)
+        self.assertIn('OpenTradeSurplus(bot, owner, /*announce=*/true, /*curated=*/false, supply, opened, nonce)', action)
 
     def test_named_trade_checks_live_authority_at_acceptance(self):
         self.assertIn('HasSupplyAuthority(source, target, true)', WORLD)
-        self.assertIn('GetSession()->IsBot()', WORLD.split('static bool IsControlledCompanion(', 1)[1].split('static bool HasSupplyAuthority(', 1)[0])
+        control = WORLD.split('static bool IsControlledCompanion(Player* bot, Player* owner)\n', 1)[1].split('static bool HasSupplyAuthority(', 1)[0]
+        self.assertIn('GetSession()->IsBot()', control)
         self.assertIn('CancelBoundDelivery(botGuid, owner);', WORLD)
         self.assertIn('CancelBoundDelivery(botGuid, player);', WORLD)
 
@@ -54,10 +55,11 @@ class SpecificDelivery(unittest.TestCase):
         self.assertIn('canCreateExtraItems(', PICKER)
         self.assertIn('supply.sourcePos', POLICY)
 
-    def test_binding_and_supply_require_the_players_own_bot_manager(self):
+    def test_binding_requires_custody_and_supply_also_requires_the_players_own_bot_manager(self):
         binder = WORLD.split('static bool HandleBindCommand(', 1)[1].split('static bool HandleUnbindCommand(', 1)[0]
-        self.assertIn('IsControlledCompanion(bot, player)', binder)
-        self.assertLess(binder.index('IsControlledCompanion(bot, player)'), binder.index('INSERT INTO'))
+        self.assertLess(binder.index('ResolveOwnedCompanion(ownerGuid'), binder.index('SetCompanionTracking(ownerGuid'))
+        self.assertNotIn('INSERT INTO', binder)
         verifier = WORLD.split('static bool HasSupplyAuthority(Player* bot, Player* owner, bool authoritative)\n', 1)[1].split('return true;', 1)[0]
         self.assertIn('IsControlledCompanion(bot, owner)', verifier)
+        self.assertIn('HasCurrentCustody(ownerGuid, botGuid, true)', verifier)
         self.assertIn('manager->GetPlayerBot(bot->GetGUID()) == bot', WORLD)

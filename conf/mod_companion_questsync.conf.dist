@@ -36,8 +36,8 @@
 #        Default: 1
 #
 #    CompanionQuestSync.SyncCompletion
-#        1 = when the owner's copy of a quest is COMPLETE, mark the
-#            companion's copy COMPLETE too (so both can hand in).
+#        1 = when the owner finishes, recheck the companion's own objectives and
+#            finish its copy only if the core allows it. No objective credit is copied.
 #        0 = leave the companion's progress alone.
 #        Default: 1
 #
@@ -72,7 +72,8 @@
 #        Default: 1
 #
 #    CompanionQuestSync.SkipTimedQuests
-#        1 = do not copy timed quests; the client timer is not transferable.
+#        1 = do not copy timed quests.
+#        0 = share the owner's remaining whole seconds, subject to core timed-quest limits.
 #        Default: 1
 #
 #    CompanionQuestSync.ExtraArmourSlots
@@ -86,23 +87,18 @@
 #        pool. Change it only if the server reorganises those accounts.
 #        Default: 2
 #
-#    CompanionQuestSync.RespectLegacyBindings
-#        Honour mod-wowlegends' binding table when claiming a body, so the two
-#        modules never level and quest the same bot. Read only, always.
-#        0 = do not look at that table at all: the module stands completely
-#        alone and needs nothing from mod-wowlegends, not even read access.
-#        Default: 1
+#    Legacy and historical compatibility bindings always reserve their bodies.
+#    The old RespectLegacyBindings setting is no longer used.
 #
 #    CompanionQuestSync.PoolTable
-#        This module's own release ledger: which bodies it has released, when and
-#        why. Pruned after 180 days by `.companionadmin integrity fix`.
-#        Letters, digits and underscores only.
+#        Historical QuestSync release ledger. Only cq_pool is read for
+#        diagnostics; it is never used to grant custody or to repair a body.
 #        Default: "cq_pool"
 #
 #    CompanionQuestSync.BindingTable
-#        Character-database table holding owner_guid -> bot_guid. Change it
-#        only if another module owns the binding. Letters, digits and
-#        underscore only, otherwise the module disables itself.
+#        Character-database table holding owner_guid -> bot_guid. Custody
+#        operations require the canonical cq_bindings table and the additive
+#        companion-custody.sql migration.
 #        Default: "cq_bindings"
 #
 #    CompanionQuestSync.NotifySkippedQuests
@@ -190,8 +186,8 @@ CompanionQuestSync.PinSyncSeconds = 600
 #                     quest the owner has already been rewarded (the companion is
 #                     catching up, not running ahead). .companionsync catchup, or the
 #                     "Ground quests" button in the window, does it on demand.
-#        Default:     1 (on)
-CompanionQuestSync.CatchUpGroundItems = 1
+#        Default:     0 (off; normal gathering consumes actual world loot)
+CompanionQuestSync.CatchUpGroundItems = 0
 #    CompanionQuestSync.CatchUpIdleSeconds
 #        Description: How long the companion's count for a ground quest must sit still
 #                     before it finishes the quest itself. The gather step keeps trying
@@ -207,17 +203,12 @@ CompanionQuestSync.CatchUpIdleSeconds = 120
 CompanionQuestSync.FollowThroughTeleport = 1
 #    CompanionQuestSync.HandInMode
 #        Description: How a finished quest is handed in.
-#                     1 = server-side: the module calls the same core reward the NPC gossip
-#                         would, so distance to the giver cannot block it, and the companion
-#                         walks up to the giver for show. It picks the reward itself when the
-#                         quest offers a choice, and says which it kept.
-#                     0 = through the companion's own AI (mod-playerbots), which needs the
-#                         giver inside the bot's vision - the shape that produced
-#                         "I cannot talk to the quest giver".
+#                     0 = disable module hand-ins.
+#                     1 = use native turn-in with a live, interactable quest ender.
+#                     2 = like mode 1, with a reminder to lead the companion to the ender.
 #        Default:     1
 CompanionQuestSync.HandInMode = 1
-# 2 = the companion hands in itself, but only within HandInNearDistance of the giver;
-#     beyond that it whispers to be led (no reward, no teleport)
+# Mode 2 uses this distance for reminders; it does not extend interaction range.
 CompanionQuestSync.HandInNearDistance = 40
 #    CompanionQuestSync.HandInDelaySeconds
 #        Description: How long a finished quest stays visible before it rewards itself.
@@ -237,9 +228,8 @@ CompanionQuestSync.DropFailedBotQuests = 0
 CompanionQuestSync.RequireGrouped = 0
 
 # May this module mint a companion from the playerbots pool itself?
-# It claims a free AddClass body, blanks it, names it, binds it and calls it out - so a
-# player can have several companions without touching mod-wowlegends. Set to 0 to keep
-# creation entirely in that module.
+# Claims an independently reviewed, clean custody body. No reset runs on claim.
+# Set to 0 to disable player-side creation.
 CompanionQuestSync.AllowCreate = 1
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1
@@ -247,7 +237,6 @@ CompanionQuestSync.BindingTable = "cq_bindings"
 CompanionQuestSync.PoolTable = "cq_pool"
 CompanionQuestSync.ExtraArmourSlots = 1
 CompanionQuestSync.PoolAccountType = 2
-CompanionQuestSync.RespectLegacyBindings = 1
 CompanionQuestSync.NotifySkippedQuests = 2
 CompanionQuestSync.TidyInventory = 1
 #    CompanionQuestSync.MailHome

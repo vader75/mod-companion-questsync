@@ -1,2 +1,4 @@
 *.toc text eol=crlf
 *.lua text eol=crlf
+# Core patches need LF and literal blank context lines.
+patches/*.patch text eol=lf whitespace=-blank-at-eol

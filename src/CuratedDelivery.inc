@@ -30,7 +30,7 @@
         return false;
     }
 
-    bool CanReleaseTemplate(Player* bot, Player* owner, ItemTemplate const* proto)
+    static bool CanReleaseTemplate(Player* bot, Player* owner, ItemTemplate const* proto)
     {
         return proto && !proto->StartQuest && proto->Class != ITEM_CLASS_QUEST &&
                proto->Class != ITEM_CLASS_CONTAINER && proto->Class != ITEM_CLASS_QUIVER &&
@@ -58,19 +58,37 @@
             for (CraftRecipe const& recipe : lane.recipes)
                 if (bot->HasSpell(recipe.spell))
                     if (SpellInfo const* spell = sSpellMgr->GetSpellInfo(recipe.spell))
-                        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
-                            if (uint32(spell->Reagent[i]) == entry)
-                                reserve = std::max(reserve, uint32(spell->ReagentCount[i]));
+                        for (auto const& [reagent, need] : CraftReagentRequirements(spell))
+                            if (reagent == entry)
+                                reserve = std::max(reserve, need);
         return reserve;
+    }
+
+    static bool IsDeliveryMail(Mail const* mail, uint32 ownerGuid)
+    {
+        return mail->state != MAIL_STATE_DELETED && mail->messageType == MAIL_NORMAL &&
+               mail->sender == ownerGuid && mail->receiver == ownerGuid &&
+               mail->subject.rfind("Companion delivery: ", 0) == 0;
+    }
+
+    static bool RecoverableDeliveryMail(Mail const* mail, uint32 ownerGuid)
+    {
+        // Expiry processing skips online recipients. An original self-addressed
+        // parcel still returns to this owner, but a second expiry destroys it.
+        return IsDeliveryMail(mail, ownerGuid) && !mail->IsSentByGM() &&
+               !mail->IsCODPayment() && !mail->IsReturnedMail();
     }
 
     uint32 OwnerStock(Player* owner, uint32 entry)
     {
         uint32 count = owner->GetItemCount(entry, true);
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        auto const now = GameTime::GetGameTime().count();
+        std::set<ObjectGuid::LowType> counted;
         for (Mail const* mail : owner->GetMails())
-            if (mail->state != MAIL_STATE_DELETED)
+            if (mail->state != MAIL_STATE_DELETED && (mail->expire_time >= now || RecoverableDeliveryMail(mail, ownerGuid)))
                 for (auto const& attachment : mail->items)
-                    if (attachment.item_template == entry)
+                    if (attachment.item_template == entry && counted.insert(attachment.item_guid).second)
                         if (Item* item = owner->GetMItem(attachment.item_guid))
                             count += item->GetCount();
         return count;
@@ -198,45 +216,62 @@
         std::map<uint32, uint32> planned;
         std::set<uint8> gearSlots;
         Item* incoming[TRADE_SLOT_TRADED_COUNT] = {};
-        bool splitSelected = false;
+        std::vector<Item*> candidates;
         VisitCarriedItems(bot, [&](Item* item)
         {
-            if (supply.sourcePos && item->GetPos() != supply.sourcePos)
-                return;
-            if (splitSelected || offers.size() >= (mail ? 3 : TRADE_SLOT_TRADED_COUNT) || item->IsInTrade() ||
-                !item->CanBeTraded(mail) || item->IsSoulBound() || item->IsRefundable())
-                return;
+            if ((!supply.sourcePos || item->GetPos() == supply.sourcePos) && !item->IsInTrade() &&
+                item->CanBeTraded(mail) && !item->IsSoulBound() && !item->IsRefundable())
+                candidates.push_back(item);
+        });
+        std::sort(candidates.begin(), candidates.end(), [](Item* a, Item* b)
+        {
+            if (a->GetCount() != b->GetCount())
+                return a->GetCount() > b->GetCount();
+            return a->GetGUID() < b->GetGUID();
+        });
+        std::pair<ObjectGuid, uint32> splitOffer{};
+        uint32 wholeQuantity = 0;
+        for (Item* item : candidates)
+        {
+            if (!supply.entry && offers.size() >= (mail ? 3 : TRADE_SLOT_TRADED_COUNT))
+                break;
             DeliveryRule const rule = DeliveryRuleFor(bot, owner, item, curated, supply);
             if (!rule.limit || gearSlots.count(rule.gearSlot))
-                return;
+                continue;
             uint32 const entry = item->GetEntry();
             uint32 const count = item->GetCount();
-            uint32 const spare = DeliveryQuantity(count, bot->GetItemCount(entry, false), rule, planned[entry], mail);
-            if (!spare || (spare != count && !FindFreeBagPos(bot, item)))
-                return;
-            if (!mail && spare != count)
+            uint32 const carried = bot->GetItemCount(entry, false);
+            // Core can check combined whole stacks, or one exact split. Compare
+            // these plans without placing a speculative split into the inventory.
+            if (!mail && (offers.empty() || supply.entry))
             {
-                // Check the exact quantity without creating a speculative split.
+                uint32 const spare = DeliveryQuantity(count, carried, rule, 0, false);
                 ItemPosCountVec dest;
-                if (!offers.empty() || owner->CanStoreItem(NULL_BAG, NULL_SLOT, dest, entry, spare) != EQUIP_ERR_OK)
-                    return;
-                splitSelected = true;
+                if (spare > splitOffer.second && spare < count && FindFreeBagPos(bot, item) &&
+                    owner->CanStoreItem(NULL_BAG, NULL_SLOT, dest, entry, spare) == EQUIP_ERR_OK)
+                    splitOffer = {item->GetGUID(), spare};
             }
-            else if (!mail)
+            if (offers.size() >= (mail ? 3 : TRADE_SLOT_TRADED_COUNT) ||
+                !DeliveryQuantity(count, carried, rule, planned[entry], true))
+                continue;
+            if (!mail)
             {
                 uint32 limitCategory = 0;
                 incoming[offers.size()] = item;
                 if (owner->CanStoreItems(incoming, int(offers.size() + 1), &limitCategory) != EQUIP_ERR_OK)
                 {
                     incoming[offers.size()] = nullptr;
-                    return;
+                    continue;
                 }
             }
-            offers.emplace_back(item->GetGUID(), spare);
-            planned[entry] += spare;
+            offers.emplace_back(item->GetGUID(), count);
+            planned[entry] += count;
+            wholeQuantity += count;
             if (rule.gearSlot != NULL_SLOT)
                 gearSlots.insert(rule.gearSlot);
-        });
+        }
+        if (splitOffer.second && (offers.empty() || (supply.entry && splitOffer.second > wholeQuantity)))
+            return {splitOffer};
         return offers;
     }
 

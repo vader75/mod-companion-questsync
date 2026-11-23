@@ -4,6 +4,12 @@
         SendProtocolLine(owner, fmt::format("Supply result {}:{}", nonce, message));
     }
 
+    static void SendSupplyFailure(Player* owner, uint32 nonce, char const* message)
+    {
+        SendDeliveryProgress(owner, nonce, "failed", message);
+        SendSupplyResult(owner, nonce, message); // older clients still parse this line
+    }
+
     static bool ParseSupplyNumber(std::string const& text, uint32& value)
     {
         auto const parsed = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -36,7 +42,7 @@
         return 0;
     }
 
-    static bool SupplyCraftReady(Player* bot, CraftPlan const& plan)
+    static bool SupplyCraftReady(Player* bot, Player* owner, CraftPlan const& plan)
     {
         if (bot->HasSpellCooldown(plan.recipe->spell) || !CanStoreCraftOutput(bot, plan))
             return false;
@@ -49,13 +55,9 @@
             if (!focus)
                 return false;
         }
-        for (uint8 r = 0; r < MAX_SPELL_REAGENTS; ++r)
-        {
-            uint32 const reagent = uint32(plan.spell->Reagent[r]);
-            uint32 const need = plan.spell->ReagentCount[r];
-            if (reagent && need && (bot->GetItemCount(reagent) < need || QuestNeedsItem(bot, reagent)))
+        for (auto const& [reagent, need] : CraftReagentRequirements(plan.spell))
+            if (UsableCraftReagentCount(bot, owner, reagent) < need)
                 return false;
-        }
         return true;
     }
 
@@ -129,7 +131,7 @@
                 uint32 const batch = SupplyBatchSize(plan, item);
                 if (!batch)
                     continue;
-                state = SupplyCraftReady(bot, plan) && PreflightSupplyCraft(bot, owner, plan, item, batch) ? "craft" : "missing";
+                state = SupplyCraftReady(bot, owner, plan) && PreflightSupplyCraft(bot, owner, plan, item, batch) ? "craft" : "missing";
             }
 
             // The name is display-only; the bounded numeric item ID is the order key.
@@ -146,11 +148,12 @@
         SendProtocolLine(owner, fmt::format("Supply end {} {}", nonce, index));
     }
 
+#ifdef AC_TRADE_OFFER_COMMIT
     static void HandleSupplyAction(Player* owner, Player* bot, uint32 nonce, uint32 entry, bool make)
     {
         if (!CanTradeSurplusNow(bot, owner) || bot->GetTradeData() || owner->GetTradeData())
         {
-            SendSupplyResult(owner, nonce, "Stand beside your companion, both out of combat and not already trading.");
+            SendSupplyFailure(owner, nonce, "Stand beside your companion, both out of combat and not already trading.");
             return;
         }
         SupplyOrder supply{ entry };
@@ -161,25 +164,34 @@
             CraftPlan const plan = FindSupplyRecipe(bot, entry);
             if (!plan.recipe || !CanOrderProduct(bot, owner, item))
             {
-                SendSupplyResult(owner, nonce, "I don't know a recipe I can share for that item.");
+                SendSupplyFailure(owner, nonce, "I don't know a recipe I can share for that item.");
                 return;
             }
-            if (!SupplyCraftReady(bot, plan) || bot->IsNonMeleeSpellCast(false) || bot->isMoving())
+            if (!SupplyCraftReady(bot, owner, plan) || bot->IsNonMeleeSpellCast(false) || bot->isMoving())
             {
-                SendSupplyResult(owner, nonce, "I can't craft that now. Check my materials, bag space and crafting station.");
+                SendSupplyFailure(owner, nonce, "I can't craft that now. Check my materials, bag space and crafting station.");
                 return;
             }
             uint32 const batch = SupplyBatchSize(plan, item);
             supply.sourcePos = PreflightSupplyCraft(bot, owner, plan, item, batch);
             if (!supply.sourcePos)
             {
-                SendSupplyResult(owner, nonce, "I need a usable stack and room in both our bags before I craft your batch.");
+                SendSupplyFailure(owner, nonce, "I need a usable stack and room in both our bags before I craft your batch.");
                 return;
             }
             opened = InitiateDeliveryTrade(bot, owner);
             if (!opened)
             {
-                SendSupplyResult(owner, nonce, "I couldn't start a trade, so I kept my materials. Try again when trade is available.");
+                SendSupplyFailure(owner, nonce, "I couldn't start a trade, so I kept my materials. Try again when trade is available.");
+                return;
+            }
+            // Initiating a trade calls other realm scripts. Re-read the quest
+            // reserve after that hook and immediately before consuming reagents.
+            if (!SupplyCraftReady(bot, owner, plan) || !HasSupplyAuthority(bot, owner, true))
+            {
+                if (bot->GetTradeData() == opened)
+                    CancelSurplusTrade(bot, owner, nullptr);
+                SendSupplyFailure(owner, nonce, "I kept my materials because the crafting requirements changed.");
                 return;
             }
             supply.keep = bot->GetItemCount(entry);
@@ -192,7 +204,7 @@
             {
                 if (bot->GetTradeData() == opened)
                     CancelSurplusTrade(bot, owner, nullptr);
-                SendSupplyResult(owner, nonce, "I couldn't make that item just now. Check the recipe requirements and try again.");
+                SendSupplyFailure(owner, nonce, "I couldn't make that item just now. Check the recipe requirements and try again.");
                 return;
             }
             supply.fresh = batch;
@@ -204,25 +216,69 @@
                 supply.sourcePos = 0;
                 VisitCarriedItems(bot, [&](Item* stack)
                 {
-                    if (!supply.sourcePos && stack->GetEntry() == entry && stack->GetCount() >= batch &&
+                    if (stack->GetEntry() == entry && stack->GetCount() >= batch &&
                         stack->CanBeTraded() && !stack->IsInTrade() && !stack->IsSoulBound() && !stack->IsRefundable() &&
                         (stack->GetCount() == batch || FindFreeBagPos(bot, stack)))
-                        supply.sourcePos = stack->GetPos();
+                    {
+                        Item* current = supply.sourcePos ? bot->GetItemByPos(supply.sourcePos) : nullptr;
+                        if (!current || std::make_tuple(stack->GetCount(), stack->GetGUID()) <
+                            std::make_tuple(current->GetCount(), current->GetGUID()))
+                            supply.sourcePos = stack->GetPos();
+                    }
                 });
             }
         }
 
-        if ((!make || supply.sourcePos) && OpenTradeSurplus(bot, owner, /*announce=*/true, /*curated=*/false, supply, opened))
+        if ((!make || supply.sourcePos) && OpenTradeSurplus(bot, owner, /*announce=*/true, /*curated=*/false, supply, opened, nonce))
             SendSupplyResult(owner, nonce, "I'm preparing the trade. Check the items, then click Accept when they're ready.");
         else
         {
             if (opened && bot->GetTradeData() == opened)
                 CancelSurplusTrade(bot, owner, nullptr);
-            SendSupplyResult(owner, nonce, make ? "I made the item but couldn't open a trade. It stayed in my bags."
+            SendSupplyFailure(owner, nonce, make ? "I made the item but couldn't open a trade. It stayed in my bags."
                                               : "That item isn't ready to hand over. Check bag space or refresh my supplies.");
         }
     }
 #endif
+
+#endif
+
+    static bool HandleModernCollect(Player* owner, std::string const& text)
+    {
+        auto const tokens = SplitArgs(text.c_str(), 4);
+        uint32 nonce = 0;
+        if (tokens.size() < 3 || tokens[0] != "collect" || !ParseSupplyNumber(tokens[2], nonce))
+            return false; // legacy .companionsync delivery collect <name>
+
+        SendDeliveryProgress(owner, nonce, "requested", "Checking for spare upgrades and supplies.");
+        if (tokens.size() != 3 || !g_cfg.enable || !g_tableReady)
+        {
+            SendDeliveryProgress(owner, nonce, "failed", "Companion delivery is disabled or the request is invalid.");
+            return true;
+        }
+#ifndef AC_TRADE_OFFER_COMMIT
+        SendDeliveryProgress(owner, nonce, "failed", "This realm does not support confirmed companion delivery.");
+#else
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint32 const now = uint32(time(nullptr));
+        uint32& last = g_supplyActionAt[ownerGuid];
+        if (last && now - last < 1u)
+        {
+            SendDeliveryProgress(owner, nonce, "failed", "Give me a moment, then try again.");
+            return true;
+        }
+        last = now;
+        std::vector<uint32> bound;
+        uint32 const guid = FindCompanions(ownerGuid, bound) ? ResolveCompanion(owner, tokens[1], bound) : 0;
+        Player* bot = guid ? FindCompanionPlayer(guid) : nullptr;
+        if (!bot || !HasSupplyAuthority(bot, owner, true) || !CanTradeSurplusNow(bot, owner) ||
+            bot->GetTradeData() || owner->GetTradeData())
+            SendDeliveryProgress(owner, nonce, "failed", "Stand beside your summoned companion, both out of combat and not already trading.");
+        else if (!OpenTradeSurplus(bot, owner, /*announce=*/true, /*curated=*/true, {}, nullptr, nonce))
+            SendDeliveryProgress(owner, nonce, "failed", "No eligible delivery could be offered. Check bag space and available supplies.");
+#endif
+        return true;
+    }
 
     static bool HandleNamedSupply(Player* owner, std::string const& text)
     {
@@ -231,18 +287,43 @@
             return false;
         bool const catalog = tokens[0] == "catalog";
         uint32 nonce = 0, entry = 0;
-        if (tokens.size() != (catalog ? 3 : 4) || !ParseSupplyNumber(tokens[1], nonce) ||
-            (!catalog && !ParseSupplyNumber(tokens[2], entry)))
+        if (tokens.size() < 2 || !ParseSupplyNumber(tokens[1], nonce))
             return true;
+        if (!catalog)
+            SendDeliveryProgress(owner, nonce, "requested", "Checking the requested supply.");
+        auto const fail = [&](char const* message)
+        {
+            if (catalog)
+                SendSupplyResult(owner, nonce, message);
+            else
+                SendSupplyFailure(owner, nonce, message);
+        };
+        if (tokens.size() != (catalog ? 3 : 4) || (!catalog && !ParseSupplyNumber(tokens[2], entry)))
+        {
+            fail("The supply request is invalid.");
+            return true;
+        }
+        if (!g_cfg.enable || !g_tableReady)
+        {
+            fail("Companion delivery is disabled.");
+            return true;
+        }
 #ifndef AC_TRADE_OFFER_GUARD
-        SendSupplyResult(owner, nonce, "This realm doesn't support guarded companion trades.");
+        fail("This realm doesn't support guarded companion trades.");
 #else
+#ifndef AC_TRADE_OFFER_COMMIT
+        if (!catalog)
+        {
+            fail("This realm does not support confirmed companion delivery.");
+            return true;
+        }
+#endif
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
         uint32 const now = uint32(time(nullptr));
         uint32& last = (catalog ? g_supplyCatalogAt : g_supplyActionAt)[ownerGuid];
         if (last && now - last < (catalog ? 2u : 1u))
         {
-            SendSupplyResult(owner, nonce, "Give me a moment, then try again.");
+            fail("Give me a moment, then try again.");
             return true;
         }
         last = now;
@@ -257,11 +338,13 @@
                     break;
                 }
         if (!bot || !bot->IsAlive())
-            SendSupplyResult(owner, nonce, "Summon or revive this companion to see their supplies.");
+            fail("Summon or revive this companion to see their supplies.");
         else if (catalog)
             SendSupplyCatalog(owner, bot, nonce);
+#ifdef AC_TRADE_OFFER_COMMIT
         else
             HandleSupplyAction(owner, bot, nonce, entry, tokens[0] == "make");
+#endif
 #endif
         return true;
     }
