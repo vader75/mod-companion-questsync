@@ -13,9 +13,11 @@ class ManagedInventory(unittest.TestCase):
         self.assertNotIn('DestroyItemCount', tidy)
         self.assertNotIn('MailHome(', tidy)
         self.assertNotIn('"s vendor"', SOURCE)
-        sell = SOURCE.split('uint32 SellManagedJunk(', 1)[1].split('void TryEquipUpgrades(', 1)[0]
-        self.assertIn('proto->Quality != ITEM_QUALITY_POOR', sell)
-        self.assertIn('!= ITEM_USAGE_VENDOR', sell)
+        junk = SOURCE.split('static bool IsManagedVendorJunk(', 1)[1].split('static bool ManagedSaleDue(', 1)[0]
+        sell = SOURCE.split('uint32 SellManagedJunk(', 1)[1].split('namespace VendorWalk', 1)[0]
+        self.assertIn('proto->Quality != ITEM_QUALITY_POOR', junk)
+        self.assertIn('!= ITEM_USAGE_VENDOR', junk)
+        self.assertIn('IsManagedVendorJunk(owner, bot, item)', sell)
         self.assertIn('HandleSellItemOpcode(request)', sell)
 
     def test_automatic_and_manual_trade_revalidate_the_same_delivery_plan(self):

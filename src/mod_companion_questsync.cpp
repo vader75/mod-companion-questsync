@@ -63,9 +63,17 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
+#include "MotionMaster.h"
+#include "MoveSpline.h"
+#include "MoveSplineInit.h"
+#include "PathGenerator.h"
+#include "TargetedMovementGenerator.h"
+#include "VendorErrandPolicy.h"
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
+#include "FollowActions.h"
+#include "Formations.h"
 #ifdef MOD_PLAYERBOTS
 #include "PlayerbotMgr.h"
 #include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
@@ -126,6 +134,7 @@ namespace
         uint32 notifySkipped    = 1;   // 0 off, 1 class/race only, 2 all refusals
         bool tidyInventory     = true;
         bool sellJunk          = true;      // confirmed junk only, at a vendor
+        bool vendorErrand      = false;     // experimental walk at a settled stop
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -463,6 +472,9 @@ namespace
         bool mail = false, SupplyOrder supply = {});
     static bool DeliveryStillValid(Player* bot, Player* owner, PendingTrade const& pending);
     static bool IsControlledCompanion(Player* bot, Player* owner);
+    static void CancelVendorErrandsFor(uint32 botGuid);
+    static bool HasVendorErrandLease(uint32 botGuid);
+    static bool VendorSaleBlocked(uint32 ownerGuid, uint32 botGuid);
     static bool HasSupplyAuthority(Player* bot, Player* owner, bool authoritative);
     static bool IsTownDeliveryStop(Player* owner, Player* bot);
     WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest);
@@ -643,6 +655,7 @@ namespace
         g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 2);
         g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
         g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
+        g_cfg.vendorErrand       = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorErrand", false);
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
 
@@ -790,6 +803,7 @@ namespace
 
     void PurgeCompanionState(uint32 botGuid)
     {
+        CancelVendorErrandsFor(botGuid);
         g_passMemo.erase(botGuid);
         g_lastGatherZone.erase(botGuid);
         g_groundStall.erase(botGuid);
@@ -2154,7 +2168,8 @@ namespace
 
     bool GatherFromGround(Player* owner, Player* bot, std::string& what)
     {
-        if (!owner || !bot || !bot->IsAlive() || bot->IsInCombat() || bot->IsInFlight() ||
+        if (!owner || !bot || HasVendorErrandLease(bot->GetGUID().GetCounter()) ||
+            !bot->IsAlive() || bot->IsInCombat() || bot->IsInFlight() ||
             bot->IsBeingTeleported() || bot->GetTransport() || bot->GetVehicle() ||
             bot->GetMap() != owner->GetMap() || bot->GetLootGUID() ||
             bot->HasUnitState(UNIT_STATE_CASTING) || g_itemGroundObjects.empty())
@@ -4474,19 +4489,41 @@ namespace
                !g_pendingTrade.count(bot->GetGUID().GetCounter());
     }
 
+    static bool IsManagedVendorJunk(Player* owner, Player* bot, Item const* item)
+    {
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto || proto->Quality != ITEM_QUALITY_POOR || !proto->SellPrice ||
+            item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+            return false;
+#ifdef MOD_PLAYERBOTS
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai || ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", proto->ItemId)->Get() != ITEM_USAGE_VENDOR)
+            return false;
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    static bool ManagedSaleDue(Player* bot, uint32 now)
+    {
+        auto const it = g_sellAt.find(bot->GetGUID().GetCounter());
+        return it == g_sellAt.end() || !it->second || now - it->second >= Timing::SellJunk;
+    }
+
     uint32 SellManagedJunk(Player* owner, Player* bot)
     {
-        if (!g_cfg.sellJunk || !CanManageBags(owner, bot) || bot->isMoving())
+        if (!g_cfg.sellJunk || !CanManageBags(owner, bot) || bot->isMoving() ||
+            VendorSaleBlocked(owner->GetGUID().GetCounter(), bot->GetGUID().GetCounter()))
             return 0;
         uint32 const now = uint32(time(nullptr));
-        uint32& last = g_sellAt[bot->GetGUID().GetCounter()];
-        if (last && now - last < Timing::SellJunk)
+        if (!ManagedSaleDue(bot, now))
             return 0;
+        Creature* vendor = nullptr;
         std::list<Unit*> units;
         Acore::AnyUnitInObjectRangeCheck check(bot, INTERACTION_DISTANCE);
         Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
         Cell::VisitObjects(bot, searcher, INTERACTION_DISTANCE);
-        Creature* vendor = nullptr;
         for (Unit* unit : units)
             if ((vendor = bot->GetNPCIfCanInteractWith(unit->GetGUID(), UNIT_NPC_FLAG_VENDOR)) &&
                 !vendor->HasFlagsExtra(CREATURE_FLAG_EXTRA_NO_SELL_VENDOR))
@@ -4495,37 +4532,443 @@ namespace
                 vendor = nullptr;
         if (!vendor)
             return 0;
-        last = now;
+        g_sellAt[bot->GetGUID().GetCounter()] = now;
+        ObjectGuid const vendorGuid = vendor->GetGUID();
+        std::string const vendorName = g_cfg.debug >= 1 ? vendor->GetName() : std::string{};
 
         uint32 sold = 0;
         VisitCarriedItems(bot, [&](Item* item)
         {
-            ItemTemplate const* proto = item->GetTemplate();
-            if (!proto || proto->Quality != ITEM_QUALITY_POOR || !proto->SellPrice ||
-                item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+            if (!IsManagedVendorJunk(owner, bot, item))
                 return;
-#ifdef MOD_PLAYERBOTS
-            PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
-            if (!ai || ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", proto->ItemId)->Get() != ITEM_USAGE_VENDOR)
-                return;
-#else
-            return;
-#endif
             auto const guid = item->GetGUID();
             uint16 const pos = item->GetPos();
             WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
-            request.VendorGuid = vendor->GetGUID();
+            request.VendorGuid = vendorGuid;
             request.ItemGuid = guid;
+            request.Count = 0; // native full stack sale; handler mutates Count
             bot->GetSession()->HandleSellItemOpcode(request);
             Item* remaining = bot->GetItemByPos(pos);
             if (!remaining || remaining->GetGUID() != guid)
                 ++sold;
         });
         if (sold && g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} confirmed junk stack(s) to {}", bot->GetName(), sold, vendor->GetName());
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} confirmed junk stack(s) to {}", bot->GetName(), sold, vendorName);
         if (sold)
             g_session[owner->GetGUID().GetCounter()].sold += sold;
         return sold;
+    }
+
+    namespace VendorWalk = VendorErrandPolicy;
+    using VendorClock = std::chrono::steady_clock;
+
+    struct VendorErrand
+    {
+        uint32 botGuid;
+        uint32 splineId;
+        ObjectGuid vendor;
+        VendorWalk::Stop ownerStop;
+        VendorWalk::Point destination;
+        VendorClock::time_point deadline;
+        bool selling = false;
+    };
+    std::map<uint32, VendorErrand> g_vendorErrands; // one active lease per owner
+    std::map<uint32, VendorWalk::Stop> g_vendorStopSamples;
+    std::map<uint32, VendorClock::time_point> g_vendorWalkRetry; // by companion, independent of old sale throttle
+    // Cancellation survives dismissal and config reload, not ownership transfer.
+    std::map<std::pair<uint32, uint32>, VendorWalk::CanceledWalk> g_vendorSaleSuppressed; // owner, bot
+
+    static bool HasVendorErrandLease(uint32 botGuid)
+    {
+        return std::any_of(g_vendorErrands.begin(), g_vendorErrands.end(), [botGuid](auto const& lease)
+            { return lease.second.botGuid == botGuid; });
+    }
+
+    static bool VendorSaleBlocked(uint32 ownerGuid, uint32 botGuid)
+    {
+        return !VendorWalk::AllowsOrdinarySale(HasVendorErrandLease(botGuid), g_vendorSaleSuppressed.count({ownerGuid, botGuid}) != 0);
+    }
+
+    static VendorWalk::Point VendorPosition(WorldObject const* object)
+    {
+        return {object->GetPositionX(), object->GetPositionY(), object->GetPositionZ()};
+    }
+
+    static VendorWalk::Stop VendorStop(Player const* player)
+    {
+        return {player->GetMapId(), player->GetInstanceId(), VendorPosition(player)};
+    }
+
+    static void StopVendorErrandMovement(Player* bot, VendorErrand const& errand)
+    {
+        if (bot && bot->IsInWorld() && bot->movespline->GetId() == errand.splineId && !bot->movespline->Finalized())
+            bot->StopMoving(); // never expire or reset a MotionMaster slot
+    }
+
+    static void RetireVendorErrand(uint32 ownerGuid, bool canceled)
+    {
+        auto const it = g_vendorErrands.find(ownerGuid);
+        if (it == g_vendorErrands.end())
+            return;
+        VendorErrand const errand = it->second;
+        Player* bot = FindCompanionPlayer(errand.botGuid);
+        if (canceled)
+        {
+            auto const botStop = bot ? VendorStop(bot) :
+                VendorWalk::Stop{errand.ownerStop.map, errand.ownerStop.instance, errand.destination};
+            g_vendorSaleSuppressed[{ownerGuid, errand.botGuid}] = {errand.ownerStop, botStop};
+            g_vendorStopSamples.erase(ownerGuid);
+        }
+        g_vendorErrands.erase(it);
+        StopVendorErrandMovement(bot, errand);
+    }
+
+    static void CancelVendorErrandsFor(uint32 botGuid)
+    {
+        auto const it = std::find_if(g_vendorErrands.begin(), g_vendorErrands.end(), [botGuid](auto const& lease)
+            { return lease.second.botGuid == botGuid; });
+        if (it != g_vendorErrands.end())
+            RetireVendorErrand(it->first, true);
+        g_vendorWalkRetry.erase(botGuid);
+    }
+
+    static bool VendorWalkEnabled()
+    {
+        return g_cfg.enable && g_tableReady && g_cfg.tidyInventory && g_cfg.sellJunk && g_cfg.vendorErrand;
+    }
+
+    static bool OnVendorWalkGround(Player* player)
+    {
+        return player && player->IsInWorld() && player->IsAlive() && player->GetSession() &&
+               !player->GetSession()->isLogingOut() && !player->IsBeingTeleported() &&
+               !player->GetDirectTransport() && !player->GetVehicle() && !player->IsInFlight() && !player->IsMounted() &&
+               !player->CanFly() && !player->IsFalling() && !player->IsInWater();
+    }
+
+    static bool OwnerAtVendorStop(Player* owner)
+    {
+        return OnVendorWalkGround(owner) && !owner->isMoving() && owner->movespline->Finalized() &&
+               !owner->IsInCombat() && !owner->GetTradeData() && !owner->IsMovementPreventedByCasting();
+    }
+
+    static bool NormalVendorFollow(Player* owner, Player* bot, bool settled)
+    {
+#ifdef MOD_PLAYERBOTS
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai || ai->GetMaster() != owner || ai->GetGroupLeader() != owner || !ai->CanMove() ||
+            ai->GetState() != BOT_STATE_NON_COMBAT || !ai->HasStrategy("follow", BOT_STATE_NON_COMBAT) ||
+            ai->HasStrategy("stay", BOT_STATE_NON_COMBAT) || ai->HasStrategy("move from group", BOT_STATE_NON_COMBAT) ||
+            ai->HasStrategy("move from group", BOT_STATE_COMBAT) ||
+            ai->HasStrategy("master fishing", BOT_STATE_NON_COMBAT))
+            return false;
+
+        MotionMaster const* motion = bot->GetMotionMaster();
+        if (motion->GetMotionSlotType(MOTION_SLOT_CONTROLLED) != NULL_MOTION_TYPE)
+            return false;
+        if (settled && (bot->isMoving() || !bot->movespline->Finalized()))
+            return false;
+        Formation* formation = ai->GetAiObjectContext()->GetValue<Formation*>("formation")->Get();
+        if (!formation)
+            return false;
+        auto const active = motion->GetMotionSlotType(MOTION_SLOT_ACTIVE);
+        if (active == FOLLOW_MOTION_TYPE)
+        {
+            auto const* follow = static_cast<FollowMovementGenerator<Player> const*>(motion->GetMotionSlot(MOTION_SLOT_ACTIVE));
+            return follow->GetTarget() == owner && formation->GetTargetName() == "group leader" &&
+                (!settled || (bot->GetDistance(owner) <= formation->GetMaxDistance() && !FollowAction(ai).isUseful()));
+        }
+        // Chaos/near follow the owner's position via POINT, which can relaunch even with a
+        // finalized spline (e.g. paused). Wait until the generator expires to IDLE.
+        if (!(active == NULL_MOTION_TYPE && motion->GetMotionSlotType(MOTION_SLOT_IDLE) == IDLE_MOTION_TYPE) ||
+            (formation->getName() != "chaos" && formation->getName() != "near"))
+            return false;
+        if (!settled)
+            return true; // Don't keep recalculating Chaos's jitter while the actual AI evaluates follow.
+        WorldLocation const slot = formation->GetLocation();
+        return !Formation::IsNullLocation(slot) && slot.GetMapId() == bot->GetMapId() &&
+            bot->GetDistance(slot.GetPositionX(), slot.GetPositionY(), slot.GetPositionZ()) <= formation->GetMaxDistance();
+#else
+        return false;
+#endif
+    }
+
+    static bool SafeVendorWalkPair(Player* owner, Player* bot, bool settled = false)
+    {
+        if (!OwnerAtVendorStop(owner) || !CanManageBags(owner, bot) || !OnVendorWalkGround(bot) ||
+            !IsControlledCompanion(bot, owner) || !owner->IsInMap(bot) || !owner->InSamePhase(bot) ||
+            !owner->GetGroup() || owner->GetGroup() != bot->GetGroup() ||
+            bot->GetLootGUID() ||
+            bot->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE) || bot->HasUnitState(UNIT_STATE_NOT_MOVE | UNIT_STATE_FOLLOW_MOVE) ||
+            bot->HasUnitState(UNIT_STATE_LOST_CONTROL) || bot->IsSitState() ||
+            bot->IsMovementPreventedByCasting() ||
+            !VendorWalk::Within(VendorPosition(owner), VendorPosition(bot), VendorWalk::Leash))
+            return false;
+
+        return NormalVendorFollow(owner, bot, settled);
+    }
+
+    static bool EligibleErrandMerchant(Player* owner, Player* bot, Creature* vendor)
+    {
+        return vendor && vendor->IsInWorld() && vendor->IsAlive() && !vendor->isMoving() &&
+               !vendor->IsInCombat() && !vendor->IsInWater() && !vendor->IsFlying() &&
+               !vendor->GetDirectTransport() && !vendor->GetCharmerGUID() &&
+               owner->IsInMap(vendor) && owner->InSamePhase(vendor) && bot->InSamePhase(vendor) &&
+               vendor->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) && !vendor->HasFlagsExtra(CREATURE_FLAG_EXTRA_NO_SELL_VENDOR) &&
+               vendor->GetReactionTo(bot) > REP_UNFRIENDLY && vendor->GetReactionTo(owner) > REP_UNFRIENDLY &&
+               VendorWalk::Within(VendorPosition(owner), VendorPosition(vendor), VendorWalk::Leash) &&
+               owner->CanSeeOrDetect(vendor) && bot->CanSeeOrDetect(vendor);
+    }
+
+    static bool VendorRouteIsClear(Player* bot, Movement::PointsArray const& path)
+    {
+        auto last = VendorPosition(bot);
+        uint32 const phase = bot->GetPhaseMask();
+        float const height = bot->GetCollisionHeight();
+        Map const* map = bot->GetMap();
+        for (auto const& p : path)
+        {
+            VendorWalk::Point const next{p.x, p.y, p.z};
+            if (map->IsInWater(phase, p.x, p.y, p.z, height) ||
+                (VendorWalk::DistanceSquared(last, next) > 0.0f &&
+                 !map->isInLineOfSight(last.x, last.y, last.z + height, p.x, p.y, p.z + height,
+                    phase, LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing)))
+                return false;
+            last = next;
+        }
+        return true;
+    }
+
+    static bool VendorErrandPairStillSafe(Player* owner, Player* bot, VendorErrand const& errand)
+    {
+        return VendorWalkEnabled() && VendorClock::now() < errand.deadline && SafeVendorWalkPair(owner, bot) &&
+            VendorWalk::SameStop(errand.ownerStop, VendorStop(owner));
+    }
+
+    static bool ArrivedAtErrandDestination(Player* bot, VendorErrand const& errand)
+    {
+        return bot && bot->movespline->GetId() == errand.splineId && bot->movespline->Finalized() &&
+            !bot->isMoving() && bot->movespline->timePassed() == bot->movespline->Duration() &&
+            VendorWalk::Within(VendorPosition(bot), errand.destination, VendorWalk::ArrivalTolerance);
+    }
+
+    static bool MerchantStillAtDestination(Player* owner, Player* bot, Creature* vendor, VendorErrand const& errand)
+    {
+        return EligibleErrandMerchant(owner, bot, vendor) &&
+            VendorWalk::Within(VendorPosition(vendor), errand.destination, VendorWalk::StopTolerance);
+    }
+
+    static bool ReadyVendorErrandSale(uint32 ownerGuid, Player* owner, Player* bot, VendorErrand const& errand)
+    {
+        auto const lease = g_vendorErrands.find(ownerGuid);
+        if (lease == g_vendorErrands.end() || !lease->second.selling || lease->second.splineId != errand.splineId ||
+            !HasSupplyAuthority(bot, owner, true) || !VendorErrandPairStillSafe(owner, bot, errand) ||
+            !ArrivedAtErrandDestination(bot, errand))
+            return false;
+        Creature* vendor = bot->GetNPCIfCanInteractWith(errand.vendor, UNIT_NPC_FLAG_VENDOR);
+        return MerchantStillAtDestination(owner, bot, vendor, errand) && bot->IsWithinLOSInMap(vendor);
+    }
+
+    // Retain only GUIDs across native sale callbacks. Each stack is a fresh transaction;
+    // do not visit new items added by a callback or fall back to an alternate merchant.
+    static uint32 SellVendorErrandJunk(uint32 ownerGuid, VendorErrand const& errand, bool& completed)
+    {
+        uint32 const now = uint32(time(nullptr));
+        std::vector<ObjectGuid> items;
+        {
+            Player* bot = FindCompanionPlayer(errand.botGuid);
+            Player* owner = FindDeliveryOwner(ownerGuid);
+            if (!ReadyVendorErrandSale(ownerGuid, owner, bot, errand) || !ManagedSaleDue(bot, now))
+                return 0;
+            VisitCarriedItems(bot, [&](Item* item)
+            {
+                if (IsManagedVendorJunk(owner, bot, item))
+                    items.push_back(item->GetGUID());
+            });
+        }
+        g_sellAt[errand.botGuid] = now;
+        uint32 sold = 0;
+        for (ObjectGuid const itemGuid : items)
+        {
+            WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
+            request.VendorGuid = errand.vendor;
+            request.ItemGuid = itemGuid;
+            request.Count = 0;
+            {
+                Player* bot = FindCompanionPlayer(errand.botGuid);
+                Player* owner = FindDeliveryOwner(ownerGuid);
+                if (!ReadyVendorErrandSale(ownerGuid, owner, bot, errand))
+                    return sold;
+                if (Item* item = bot->GetItemByGuid(itemGuid);
+                    !item || item->GetOwnerGUID() != bot->GetGUID() || !Player::IsInventoryPos(item->GetPos()) ||
+                    !IsManagedVendorJunk(owner, bot, item))
+                    continue;
+                bot->GetSession()->HandleSellItemOpcode(request);
+            }
+            Player* bot = FindCompanionPlayer(errand.botGuid);
+            if (!bot)
+                return sold;
+            bool inBuyback = false;
+            for (uint32 slot = BUYBACK_SLOT_START; slot < BUYBACK_SLOT_END && !inBuyback; ++slot)
+                if (Item* item = bot->GetItemFromBuyBackSlot(slot); item && item->GetGUID() == itemGuid)
+                    inBuyback = true;
+            if (!inBuyback)
+                return sold; // no confirmed native sale: do not hand off to ordinary sale
+            ++sold;
+        }
+        completed = ReadyVendorErrandSale(ownerGuid, FindDeliveryOwner(ownerGuid), FindCompanionPlayer(errand.botGuid), errand);
+        return sold;
+    }
+
+    static void UpdateVendorErrands()
+    {
+        bool const enabled = VendorWalkEnabled();
+        if (!enabled)
+        {
+            if (g_vendorSaleSuppressed.empty())
+                g_vendorStopSamples.clear();
+            g_vendorWalkRetry.clear();
+        }
+        for (auto it = g_vendorErrands.begin(); it != g_vendorErrands.end();)
+        {
+            uint32 const ownerGuid = it->first;
+            VendorErrand const errand = it->second;
+            if (errand.selling)
+            {
+                ++it;
+                continue;
+            }
+            VendorWalk::Step step;
+            {
+                Player* bot = FindCompanionPlayer(errand.botGuid);
+                Player* owner = enabled ? FindDeliveryOwner(ownerGuid) : nullptr;
+                bool const safePair = VendorErrandPairStillSafe(owner, bot, errand) && HasSupplyAuthority(bot, owner, false);
+                Creature* vendor = safePair ? ObjectAccessor::GetCreature(*bot, errand.vendor) : nullptr;
+                bool const safe = safePair && MerchantStillAtDestination(owner, bot, vendor, errand);
+                bool const sameSpline = bot && bot->movespline->GetId() == errand.splineId;
+                bool const finalized = sameSpline && bot->movespline->Finalized();
+                step = VendorWalk::NextStep(safe, sameSpline, finalized, ArrivedAtErrandDestination(bot, errand));
+            }
+            if (step == VendorWalk::Step::Wait)
+            {
+                ++it;
+                continue;
+            }
+
+            bool completed = false;
+            if (step == VendorWalk::Step::Sell)
+            {
+                it->second.selling = true; // callbacks cannot run an ordinary sale while this lease is held
+                it = g_vendorErrands.end(); // lifecycle callbacks can remove the current lease
+                if (uint32 const sold = SellVendorErrandJunk(ownerGuid, errand, completed))
+                    g_session[ownerGuid].sold += sold;
+            }
+            auto const lease = g_vendorErrands.find(ownerGuid);
+            if (lease != g_vendorErrands.end() && lease->second.splineId == errand.splineId)
+                RetireVendorErrand(ownerGuid, !completed);
+            it = g_vendorErrands.upper_bound(ownerGuid);
+        }
+    }
+
+    static bool StartVendorErrand(Player* owner, Player* bot, VendorClock::time_point now)
+    {
+        uint32 const ownerGuid = owner->GetGUID().GetCounter(), botGuid = bot->GetGUID().GetCounter();
+        if (!VendorWalk::MayStart(bot->GetFreeInventorySpace(), !g_vendorErrands.count(ownerGuid)) ||
+            VendorSaleBlocked(ownerGuid, botGuid) || !SafeVendorWalkPair(owner, bot, true) ||
+            !ManagedSaleDue(bot, uint32(time(nullptr))))
+            return false;
+
+        auto const retry = g_vendorWalkRetry.find(botGuid);
+        if (retry != g_vendorWalkRetry.end() && now < retry->second)
+            return false;
+        g_vendorWalkRetry[botGuid] = now + std::chrono::seconds(6);
+
+        bool hasJunk = false;
+        VisitCarriedItems(bot, [&](Item* item) { hasJunk = hasJunk || IsManagedVendorJunk(owner, bot, item); });
+        if (!hasJunk)
+            return false;
+
+        std::list<Unit*> units;
+        Acore::AnyUnitInObjectRangeCheck check(owner, VendorWalk::Leash);
+        Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(owner, units, check);
+        Cell::VisitObjects(owner, searcher, VendorWalk::Leash);
+        VendorWalk::Point const start = VendorPosition(bot), anchor = VendorPosition(owner);
+        std::vector<Creature*> merchants;
+        for (Unit* unit : units)
+            if (Creature* vendor = unit->ToCreature(); EligibleErrandMerchant(owner, bot, vendor))
+            {
+                if (bot->GetNPCIfCanInteractWith(vendor->GetGUID(), UNIT_NPC_FLAG_VENDOR))
+                    return false; // already at an eligible merchant: leave this to the opportunistic sale
+                merchants.push_back(vendor);
+            }
+        if (merchants.empty() || !HasSupplyAuthority(bot, owner, true))
+            return false;
+        std::sort(merchants.begin(), merchants.end(), [start](Creature const* a, Creature const* b)
+        {
+            return VendorWalk::DistanceSquared(start, VendorPosition(a)) < VendorWalk::DistanceSquared(start, VendorPosition(b));
+        });
+        constexpr std::size_t maxCandidates = 3;
+        for (std::size_t i = 0; i < std::min(merchants.size(), maxCandidates); ++i)
+        {
+            Creature* vendor = merchants[i];
+            auto const end = VendorPosition(vendor);
+            PathGenerator path(bot);
+            path.SetSlopeCheck(true);
+            if (!path.CalculatePath(end.x, end.y, end.z, /*forceDest=*/false) || path.GetPathType() != PATHFIND_NORMAL ||
+                !VendorWalk::IsBoundedPath(path.GetPath(), start, anchor, end) || !VendorRouteIsClear(bot, path.GetPath()))
+                continue;
+
+            if (!SafeVendorWalkPair(owner, bot, true))
+                return false;
+            // Use only the checked path. Do not alter follow strategies or motion generators.
+            // Follow, including Chaos's point reissues, always wins if it starts moving again.
+            Movement::MoveSplineInit init(bot);
+            init.MovebyPath(path.GetPath());
+            init.SetWalk(true);
+            if (init.Launch() <= 0)
+                return false;
+            g_vendorWalkRetry[botGuid] = now + std::chrono::seconds(20);
+            g_vendorErrands.emplace(ownerGuid, VendorErrand{botGuid, bot->movespline->GetId(), vendor->GetGUID(),
+                VendorStop(owner), end, now + std::chrono::seconds(8)});
+            return true;
+        }
+        return false;
+    }
+
+    static void ScanVendorErrandStop(Player* owner, std::vector<uint32> const& bots)
+    {
+        bool const enabled = VendorWalkEnabled();
+        if (!enabled && g_vendorSaleSuppressed.empty())
+            return;
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        if (bots.empty() || !OwnerAtVendorStop(owner) ||
+            (!enabled && std::none_of(bots.begin(), bots.end(), [ownerGuid](uint32 botGuid)
+                { return g_vendorSaleSuppressed.count({ownerGuid, botGuid}); })))
+        {
+            g_vendorStopSamples.erase(ownerGuid);
+            return;
+        }
+        auto const stop = VendorStop(owner);
+        auto [sample, inserted] = g_vendorStopSamples.try_emplace(ownerGuid, stop);
+        bool const settled = !inserted && VendorWalk::SameStop(sample->second, stop);
+        sample->second = stop;
+        if (!settled || g_vendorErrands.count(ownerGuid))
+            return;
+        for (uint32 botGuid : bots)
+        {
+            auto const canceled = g_vendorSaleSuppressed.find({ownerGuid, botGuid});
+            if (canceled == g_vendorSaleSuppressed.end())
+                continue;
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (SafeVendorWalkPair(owner, bot, true) &&
+                VendorWalk::MayRearm(canceled->second, stop, VendorStop(bot), settled, true))
+                g_vendorSaleSuppressed.erase(canceled);
+        }
+        if (!enabled)
+            return;
+        auto const now = VendorClock::now();
+        for (uint32 botGuid : bots)
+            if (Player* bot = FindCompanionPlayer(botGuid); bot && StartVendorErrand(owner, bot, now))
+                break;
     }
 
     /// Wear upgrades even when the bags are not full.
@@ -5390,7 +5833,8 @@ namespace
                 if (!lastWarning || now - lastWarning >= Timing::JunkNotice)
                 {
                     lastWarning = now;
-                    SayToOwner(bot, owner, "My bags are nearly full. I'll sell what I can at the next merchant; ask me for a trade if you need to make room now.", 120);
+                    SayToOwner(bot, owner, "My bags are nearly full. Lead me right up to a merchant to sell junk, "
+                        "or trade with me to make room for other items.", 120);
                 }
             }
         }
@@ -6848,6 +7292,7 @@ namespace
         if (owner)
             CancelBoundDelivery(botGuid, owner);
         PurgeCompanionState(botGuid);
+        g_vendorSaleSuppressed.erase({ownerGuid, botGuid});
         InvalidateCompanionGuid(ownerGuid);
         g_pendingRelease.push_back({ ownerGuid, botGuid, name, std::chrono::steady_clock::now() + std::chrono::seconds(15) });
         if (bot)
@@ -7147,6 +7592,7 @@ public:
     void OnUpdate(uint32 diff) override
     {
         ApplyDeliveryReceipts(); // a core-accepted transaction may finish after disable
+        UpdateVendorErrands();  // cancel active movement even after disable
         if (!g_cfg.enable || !g_tableReady)
             return;
 
@@ -7181,7 +7627,9 @@ public:
                 SendHeartbeat(player);
 
                 std::vector<uint32> bots;
-                if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+                bool const bound = FindCompanions(player->GetGUID().GetCounter(), bots);
+                ScanVendorErrandStop(player, bots);
+                if (!bound)
                     continue;
 
                 uint32 const nowTs = static_cast<uint32>(time(nullptr));
@@ -9412,6 +9860,9 @@ public:
         // to the next login. Dropping the future does not cancel the DB task.
         for (auto it = g_deliveryReceipts.begin(); it != g_deliveryReceipts.end();)
             it = it->second.ownerGuid == ownerGuid ? g_deliveryReceipts.erase(it) : std::next(it);
+        g_vendorStopSamples.erase(ownerGuid);
+        CancelVendorErrandsFor(ownerGuid); // this GUID may be a companion logging out
+        RetireVendorErrand(ownerGuid, true);
         if (!g_cfg.enable)
             return;
 

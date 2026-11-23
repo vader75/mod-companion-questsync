@@ -169,6 +169,56 @@ either module advertises the retired body as stock. See the
 
 ---
 
+## T10 — Short vendor errand
+
+Use a disposable realm with matching core/Playerbots and loaded movement maps. This is an
+opt-in test: set `CompanionQuestSync.VendorErrand = 1` alongside `TidyInventory = 1` and
+`SellJunk = 1`. Keep the feature off in production until the movement and inventory outcomes
+below are observed. Allow for the normal two-minute sale throttle between runs on the same bot.
+
+1. As group leader, group two summoned followers in normal `follow` with the default `chaos`
+   formation, each with seven free slots and known grey vendor junk, plus
+   protected items (quest stock or a grey quest starter, useful and non-grey stock). Stop on
+   foot near a friendly merchant; the merchant should be within 12 yards of you but outside
+   both companions' native interaction range. Wait for the settled stop. Verify that only one
+   errand movement is active at a time, the route stays within the leash, and the follower sells
+   only current confirmed junk after native arrival. Read back item GUIDs/quantities, buyback,
+   money and the CompanionSync slot count; no success whisper or mail is expected. Walk away
+   normally afterward and confirm normal follow resumes without a teleport.
+2. Repeat with eight free slots, no confirmed junk, an out-of-phase/no-sell merchant, and no
+   complete path (e.g. a closed door). Expect no errand or sale. Keep a second usable merchant
+   in the area on an arrival/cancellation case: the errand must not switch merchants.
+3. Mid-walk, separately move the owner, enter combat on either side, open a trade, make the
+   merchant unavailable, dismiss the bot, start the logout countdown, or reload with the
+   option off. Repeat with two owners; one owner's errand or cancellation must not affect the
+   other. Allow a native follow point to be reissued during a walk: the newer movement must
+   win. Repeat with `stay`, a still-active (including paused) point generator, and a ground
+   chest objective eligible in both sync lanes; no errand may take over active AI movement,
+   and neither ground-gather lane may redirect a live errand lease.
+4. For a **late** cancellation, get the companion into native interaction range of the chosen
+   merchant before it reaches the endpoint; cancel (e.g. start owner logout, then abort it).
+   Confirm that immediate and later ordinary QuestSync sale passes sell nothing while still
+   at that stop. Repeat with the chosen merchant made unavailable and a second merchant
+   already in range: there must be no sale to either. Reloading with the option off does
+   not clear the block. Move the owner at least three yards and let the companion move at
+   least one yard and settle in normal follow at the new stop. Ordinary sales can then
+   resume, including at a different merchant, subject to their normal throttle.
+5. With the option off and no canceled errand, lead a companion into native range and verify the pre-existing sale
+   still works. For bag-pressure notices, verify the existing owner-wide throttle and that the
+   next step is clear when two companions are short on space.
+
+Chaos uses `MoveTo`/`MovePoint`, not native `FOLLOW_MOTION_TYPE`. QuestSync waits for the
+point generator to expire to idle: a finalized spline alone doesn't prove a paused point
+won't relaunch. `FollowAction::isUseful()` checks distance from the formation position, and
+Chaos can change that position every three seconds. Moving out of the formation radius can
+therefore trigger a replacement point even if the owner is stationary. QuestSync doesn't
+reserve the AI's movement; it yields rather than suppressing follow. Some merchant locations
+may never complete a Chaos errand. Guaranteed completion within the 12-yard leash would
+need a cooperative Playerbots movement lease; do not infer it from the MSVC compile or
+compiled policy fixture. Record gameplay results separately before considering enablement.
+
+---
+
 ## What each failure means for you
 
 | Symptom | Send me |
