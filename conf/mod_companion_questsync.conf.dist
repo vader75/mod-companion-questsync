@@ -263,10 +263,13 @@ CompanionQuestSync.ExtraBags = 4
 
 
 #    CompanionQuestSync.ExtraBagItem / ExtraBags
-#        Give the companion somewhere to put things: any empty bag slot is filled
+#        Ordinary upkeep: any empty bag slot is filled
 #        once with ExtraBagItem (default Pumpkin Bag, 16 slots, no level requirement),
 #        up to ExtraBags slots. A slot that is already occupied is never touched, so a
 #        bag the player gave the companion stays. 0 for either disables it.
+#        51809 is not allowed here: Portable Holes are a separate one-time
+#        starter grant for new claims with the Playerbots initialization policy
+#        patch and companion-starter-bags.sql installed (see docs/companion-custody.md).
 #
 
 #    CompanionQuestSync.MapPins

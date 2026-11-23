@@ -1,0 +1,150 @@
+diff --git a/src/Bot/Factory/PlayerbotFactory.cpp b/src/Bot/Factory/PlayerbotFactory.cpp
+--- a/src/Bot/Factory/PlayerbotFactory.cpp
++++ b/src/Bot/Factory/PlayerbotFactory.cpp
+@@ -4,6 +4,9 @@
+  */
+ 
+ #include "PlayerbotFactory.h"
++#include "PlayerbotInitializationPolicy.h"
++
++#include <atomic>
+ 
+ #include <array>
+ #include <utility>
+@@ -549,8 +552,29 @@
+     }
+ }
+ 
++namespace
++{
++std::atomic<Playerbots::InitializationVeto> initializationVeto{nullptr};
++}
++
++bool Playerbots::RegisterInitializationVeto(InitializationVeto veto)
++{
++    InitializationVeto expected = nullptr;
++    return veto && (initializationVeto.compare_exchange_strong(expected, veto) || expected == veto);
++}
++
++bool Playerbots::ShouldDeferInitialization(std::uint32_t bodyGuid)
++{
++    auto const veto = initializationVeto.load();
++    return veto && veto(bodyGuid);
++}
++
+ void PlayerbotFactory::Randomize(bool incremental)
+ {
++    // Guard before Prepare/Clear*; suppressing only InitBags is too late.
++    if (Playerbots::ShouldDeferInitialization(bot->GetGUID().GetCounter()))
++        return;
++
+     // if (sPlayerbotAIConfig.disableRandomLevels)
+     // {
+     //     return;
+@@ -2556,8 +2580,22 @@
+ //     }
+ // }
+ 
++bool PlayerbotFactory::EquipEmptyBagSlot(uint8 slot, uint32 item)
++{
++    if (slot < INVENTORY_SLOT_BAG_START || slot >= INVENTORY_SLOT_BAG_END)
++        return false;
++
++    uint16 const expected = (uint16(INVENTORY_SLOT_BAG_0) << 8) | slot;
++    uint16 dest = 0;
++    return !bot->GetItemByPos(expected) && CanEquipUnseenItem(slot, dest, item, false) &&
++           dest == expected && !bot->GetItemByPos(expected) && bot->EquipNewItem(dest, item, true);
++}
++
+ void PlayerbotFactory::InitBags(bool destroyOld)
+ {
++    if (Playerbots::ShouldDeferInitialization(bot->GetGUID().GetCounter()))
++        return;
++
+     for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+     {
+         uint32 newItemId = 51809;
+@@ -2674,14 +2712,14 @@
+     bot->ApplyEnchantment(item, PERM_ENCHANTMENT_SLOT, true);
+ }
+ 
+-bool PlayerbotFactory::CanEquipUnseenItem(uint8 slot, uint16& dest, uint32 item)
++bool PlayerbotFactory::CanEquipUnseenItem(uint8 slot, uint16& dest, uint32 item, bool swap)
+ {
+     dest = 0;
+ 
+     if (Item* pItem = Item::CreateItem(item, 1, bot, false, 0, true))
+     {
+-        InventoryResult result = botAI ? botAI->CanEquipItem(slot, dest, pItem, true, true)
+-                                       : bot->CanEquipItem(slot, dest, pItem, true, true);
++        InventoryResult result = botAI ? botAI->CanEquipItem(slot, dest, pItem, swap, true)
++                                       : bot->CanEquipItem(slot, dest, pItem, swap, true);
+         pItem->RemoveFromUpdateQueueOf(bot);
+         delete pItem;
+         return result == EQUIP_ERR_OK;
+diff --git a/src/Bot/Factory/PlayerbotFactory.h b/src/Bot/Factory/PlayerbotFactory.h
+--- a/src/Bot/Factory/PlayerbotFactory.h
++++ b/src/Bot/Factory/PlayerbotFactory.h
+@@ -86,6 +86,8 @@
+     void InitFood();
+     void InitMounts();
+     void InitBags(bool destroyOld = true);
++    // Explicit caller-owned bag grant: no replacement, persistence or other factory steps.
++    bool EquipEmptyBagSlot(uint8 slot, uint32 item);
+     // forcePvp (WL, v1.7.0): score gems/enchants with the calculator's PvP weights
+     // (resilience +7) instead of PvE. Default false = unchanged behaviour for bots.
+     void ApplyEnchantAndGemsNew(bool destroyOld = true, bool forcePvp = false);
+@@ -159,7 +161,7 @@
+     // void InitSecondEquipmentSet();
+     // void InitEquipmentNew(bool incremental);
+     bool CanEquipItem(ItemTemplate const* proto);
+-    bool CanEquipUnseenItem(uint8 slot, uint16& dest, uint32 item);
++    bool CanEquipUnseenItem(uint8 slot, uint16& dest, uint32 item, bool swap = true);
+     static bool IsPrimaryTradeSkill(uint16 skillId);
+     static bool IsGatheringTradeSkill(uint16 skillId);
+     static bool IsCraftingTradeSkill(uint16 skillId);
+diff --git a/src/Bot/PlayerbotInitializationPolicy.h b/src/Bot/PlayerbotInitializationPolicy.h
+new file mode 100644
+--- /dev/null
++++ b/src/Bot/PlayerbotInitializationPolicy.h
+@@ -0,0 +1,17 @@
++#ifndef PLAYERBOT_INITIALIZATION_POLICY_H
++#define PLAYERBOT_INITIALIZATION_POLICY_H
++
++#include <cstdint>
++
++#define MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1 1
++
++namespace Playerbots
++{
++// Optional process-lifetime provider, registered while module scripts load.
++// The callback must be thread-safe; true vetoes native randomization and bag init.
++using InitializationVeto = bool (*)(std::uint32_t bodyGuid);
++bool RegisterInitializationVeto(InitializationVeto veto);
++bool ShouldDeferInitialization(std::uint32_t bodyGuid);
++}
++
++#endif
+diff --git a/src/Bot/PlayerbotMgr.cpp b/src/Bot/PlayerbotMgr.cpp
+--- a/src/Bot/PlayerbotMgr.cpp
++++ b/src/Bot/PlayerbotMgr.cpp
+@@ -25,6 +25,7 @@
+ #include "PlayerbotAIConfig.h"
+ #include "PlayerbotRepository.h"
+ #include "PlayerbotFactory.h"
++#include "PlayerbotInitializationPolicy.h"
+ #include "PlayerbotOperations.h"
+ #include "PlayerbotSecurity.h"
+ #include "PlayerbotTextMgr.h"
+@@ -751,6 +752,11 @@
+     if (!addClassBot)
+         return "ERROR: You can not use this command on non-addclass bot.";
+ 
++    // Report a veto rather than claiming success for an explicit initialization.
++    if ((cmd.starts_with("init=") || cmd == "level" || cmd == "levelup" || cmd == "random") &&
++        Playerbots::ShouldDeferInitialization(bot->GetGUID().GetCounter()))
++        return "ERROR: Native initialization is deferred for this bot.";
++
+     if (!admin)
+     {
+         Player* master = ObjectAccessor::FindConnectedPlayer(masterguid);

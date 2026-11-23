@@ -71,6 +71,9 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "StatsWeightCalculator.h"  // reward choice scored the way the bot's own AI would
 #include "PlayerbotFactory.h"      // teach a hand-raised level what a trainer would
 #include "RandomPlayerbotMgr.h"    // the per-bot value store keeps the profession choice
+#if __has_include("PlayerbotInitializationPolicy.h")
+#include "PlayerbotInitializationPolicy.h"
+#endif
 #endif
 #include "QuestDef.h"
 #include "ScriptMgr.h"
@@ -831,12 +834,57 @@ namespace
     }
 
     bool g_custodyReady = false;
+    bool g_starterBagsReady = false;
 
     bool CharacterTableExists(char const* table)
     {
         return static_cast<bool>(CharacterDatabase.Query(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{}'", table));
     }
+
+#ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
+    bool g_nativeInitializationVetoRegistered = false;
+    enum class NativeCustodySchema { Unknown, Absent, Present };
+    std::atomic<NativeCustodySchema> g_nativeCustodySchema{NativeCustodySchema::Unknown};
+
+    // The custody reservation is keyed by body, not by the current summoner,
+    // tracking, the QuestSync enable flag, or the account's other characters.
+    bool DeferNativeBotInitialization(uint32 bodyGuid)
+    {
+        NativeCustodySchema const schema = g_nativeCustodySchema.load();
+        if (schema != NativeCustodySchema::Present)
+            return schema != NativeCustodySchema::Absent;
+
+        // COUNT always returns a row on success. Never treat a failed read as
+        // "not ours". Even a broken binding cannot release the reservation.
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM cq_companion_custody WHERE bot_guid = {} "
+            "AND module = 'cq' AND state IN ('owned', 'retiring')", bodyGuid);
+        return !row || row->Fetch()[0].Get<uint64>() != 0;
+    }
+
+    void ProbeNativeCustodySchema()
+    {
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody'), "
+            "(SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name IN ('bot_guid', 'module', 'state'))");
+        NativeCustodySchema schema = NativeCustodySchema::Unknown;
+        if (row)
+        {
+            uint64 const tables = row->Fetch()[0].Get<uint64>();
+            uint64 const columns = row->Fetch()[1].Get<uint64>();
+            if (!tables && !columns)
+                schema = NativeCustodySchema::Absent;
+            else if (tables == 1 && columns == 3)
+                schema = NativeCustodySchema::Present;
+        }
+        g_nativeCustodySchema = schema;
+        if (schema == NativeCustodySchema::Unknown)
+            LOG_ERROR("server.loading", "[CompanionQuestSync] custody schema unknown; native initialization deferred");
+    }
+#endif
 
     bool HasSingleColumnUniqueKey(char const* table, char const* column)
     {
@@ -874,13 +922,14 @@ namespace
 
     // The shared, operator-approved custody row is authoritative. Neither a binding
     // alone nor a release timestamp (including ties) proves who owns a reused guid.
-    std::string CurrentCustodyClause(bool tracked)
+    std::string CurrentCustodyClause(bool tracked, std::string const& assignment = {})
     {
-        return std::string(" FROM cq_bindings b JOIN cq_companion_custody x ON x.bot_guid = b.bot_guid "
+        return (assignment.empty() ? " FROM " : "UPDATE ") +
+            std::string("cq_bindings b JOIN cq_companion_custody x ON x.bot_guid = b.bot_guid "
                            "JOIN characters c ON c.guid = b.bot_guid AND c.account = x.body_account "
-                           "JOIN characters o ON o.guid = b.owner_guid AND o.guid <> c.guid "
-                           "WHERE x.module = 'cq' AND x.state = 'owned' AND x.owner_guid = b.owner_guid "
-                           "AND BINARY x.body_name = BINARY c.name AND BINARY b.companion_name = BINARY c.name ") +
+                           "JOIN characters o ON o.guid = b.owner_guid AND o.guid <> c.guid ") + assignment +
+            "WHERE x.module = 'cq' AND x.state = 'owned' AND x.owner_guid = b.owner_guid "
+            "AND BINARY x.body_name = BINARY c.name AND BINARY b.companion_name = BINARY c.name " +
             (tracked ? " AND x.tracking = 1 " : "") + ForeignCustodyClause("b.bot_guid");
     }
 
@@ -3743,6 +3792,84 @@ namespace
         return count;
     }
 
+    constexpr uint32 kStarterBagItem = 51809; // Portable Hole, 24 general-purpose slots
+
+    bool ConsumeStarterBags(std::string const& identity)
+    {
+        // DirectExecute does not return the affected row count. Read back this
+        // attempt's unique token, not merely a "consumed" bit another call could set.
+        QueryResult id = CharacterDatabase.Query("SELECT UUID()");
+        if (!id)
+            return false;
+        std::string const token = id->Fetch()[0].Get<std::string>();
+        std::string const match = fmt::format(" AND x.starter_bag_attempt = '{}'", token);
+        CharacterDatabase.DirectExecute(CurrentCustodyClause(true, fmt::format("SET x.starter_bag_attempt = '{}' ", token)) +
+            identity + " AND x.starter_bag_attempt = ''");
+        return static_cast<bool>(CharacterDatabase.Query("SELECT 1" + CurrentCustodyClause(true) + identity + match));
+    }
+
+    // True means do not run the ordinary bag fallback on this visit (pending,
+    // attempted, or authority uncertain). Both verified summon and upkeep can
+    // be the first to see a controlled session, including after a restart.
+    bool HandleStarterBags(Player* owner, Player* bot)
+    {
+#ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
+        if (!g_starterBagsReady)
+            return false;
+        if (!IsControlledCompanion(bot, owner))
+            return true;
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string name = bot->GetName();
+        CharacterDatabase.EscapeString(name);
+        std::string const identity = fmt::format(
+            " AND b.owner_guid = {} AND b.bot_guid = {} AND c.account = {} AND BINARY c.name = '{}'",
+            owner->GetGUID().GetCounter(), botGuid, bot->GetSession()->GetAccountId(), name);
+        QueryResult row = CharacterDatabase.Query("SELECT x.starter_bag_attempt" + CurrentCustodyClause(true) + identity);
+        if (!row)
+            return true;
+        if (row->Fetch()[0].IsNull() || !row->Fetch()[0].Get<std::string_view>().empty())
+            return false;
+
+        // Spend first, including when every slot was already occupied. A crash
+        // between this write and the inventory save can lose bags, never reissue them.
+        if (!ConsumeStarterBags(identity))
+            return true;
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(kStarterBagItem);
+        if (!proto || proto->Class != ITEM_CLASS_CONTAINER || proto->SubClass != ITEM_SUBCLASS_CONTAINER ||
+            proto->ContainerSlots != 24 || proto->BagFamily != 0)
+        {
+            LOG_ERROR("server.loading", "[CompanionQuestSync] starter bags spent for {} but item {} is not a standard 24-slot bag",
+                      botGuid, kStarterBagItem);
+            return true;
+        }
+
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        uint32 empty = 0;
+        uint32 given = 0;
+        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+        {
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                continue;
+            ++empty;
+            if (factory.EquipEmptyBagSlot(slot, kStarterBagItem))
+                ++given;
+        }
+        if (given)
+        {
+            auto trans = CharacterDatabase.BeginTransaction();
+            bot->SaveInventoryAndGoldToDB(trans);
+            CharacterDatabase.CommitTransaction(trans);
+        }
+        if (given != empty)
+            LOG_ERROR("server.loading", "[CompanionQuestSync] starter bags spent for {} ({}): equipped {} of {}",
+                      bot->GetName(), botGuid, given, empty);
+        return true;
+#else
+        return false;
+#endif
+    }
+
     /// Give the companion somewhere to put things.
     ///
     /// Chasing bag space with destruction is the wrong end of the problem: a level-6
@@ -3754,7 +3881,7 @@ namespace
     /// held by a bag the player gave the companion - is never touched.
     void EnsureBags(Player* owner, Player* bot)
     {
-        if (!g_cfg.extraBags || !g_cfg.extraBagItem)
+        if (HandleStarterBags(owner, bot) || !g_cfg.extraBags || !g_cfg.extraBagItem || g_cfg.extraBagItem == kStarterBagItem)
             return;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(g_cfg.extraBagItem);
@@ -3766,19 +3893,15 @@ namespace
         for (uint8 i = 0; i < g_cfg.extraBags && i < (INVENTORY_SLOT_BAG_END - INVENTORY_SLOT_BAG_START); ++i)
         {
             uint8 const slot = INVENTORY_SLOT_BAG_START + i;
-            if (bot->GetBagByPos(slot))
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
                 continue;                                   // already has one
 
-            ItemPosCountVec dest;
-            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, g_cfg.extraBagItem, 1) != EQUIP_ERR_OK)
-                break;
-
-            Item* bag = bot->StoreNewItem(dest, g_cfg.extraBagItem, true);
-            if (!bag)
-                continue;
-
-            bot->EquipItem(uint16((INVENTORY_SLOT_BAG_0 << 8) | slot), bag, true);
-            ++given;
+            // Never store an intermediate item or write to a different/occupied slot.
+            uint16 dest = 0;
+            uint16 const expected = (uint16(INVENTORY_SLOT_BAG_0) << 8) | slot;
+            if (bot->CanEquipNewItem(slot, dest, g_cfg.extraBagItem, false) == EQUIP_ERR_OK && dest == expected &&
+                !bot->GetItemByPos(expected) && bot->EquipNewItem(dest, g_cfg.extraBagItem, true))
+                ++given;
         }
 
         if (given)
@@ -6309,6 +6432,7 @@ namespace
             error = "the verified companion pool is not configured";
             return false;
         }
+
         if (!ValidCompanionName(name) || sObjectMgr->CheckPlayerName(name) != CHAR_NAME_SUCCESS)
         {
             error = "choose a valid two-to-twelve letter character name";
@@ -6329,13 +6453,15 @@ namespace
 
         std::string escaped = name;
         CharacterDatabase.EscapeString(escaped);
+        std::string const starterAssignment = g_starterBagsReady ?
+            ", x.starter_bag_attempt = COALESCE(x.starter_bag_attempt, '') " : " ";
         auto trans = CharacterDatabase.BeginTransaction();
         // One synchronous character-DB transaction. No reset on claim: only bodies
         // independently prepared offline and enrolled as free may enter the pool.
         trans->Append("UPDATE cq_companion_custody x JOIN characters c ON c.guid = x.bot_guid "
             "JOIN characters o ON o.guid = {} AND o.guid <> c.guid "
             "LEFT JOIN characters named ON named.name = '{}' "
-            "SET x.owner_guid = o.guid, x.body_name = '{}', x.state = 'owned', x.tracking = 1, c.name = '{}' "
+            "SET x.owner_guid = o.guid, x.body_name = '{}', x.state = 'owned', x.tracking = 1, c.name = '{}'" + starterAssignment +
             "WHERE x.bot_guid = {} AND c.account IN ({}) AND c.race = {} AND c.class = {} AND named.guid IS NULL " +
             FreeCustodyClause() + " AND (SELECT COUNT(*) FROM cq_bindings slots WHERE slots.owner_guid = {}) < {}",
             ownerGuid, escaped, escaped, escaped, candidate, accounts, uint32(race), uint32(clazz), ownerGuid, kMaxCompanions);
@@ -7131,6 +7257,10 @@ public:
 
     void OnAfterConfigLoad(bool reload) override
     {
+#ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
+        if (g_nativeInitializationVetoRegistered)
+            ProbeNativeCustodySchema();
+#endif
         // Both hooks fire once at startup (config load, then world startup);
         // announce only on the first one and on an explicit .reload config.
         Refresh(reload);
@@ -7353,6 +7483,7 @@ private:
     {
         LoadSettings();
         g_custodyReady = false;
+        g_starterBagsReady = false;
         g_tableReady = g_cfg.enable && CheckBindingTable();
         CancelPendingDeliveries();
         if (!g_cfg.enable)
@@ -7362,6 +7493,14 @@ private:
             static_cast<bool>(CharacterDatabase.Query("SHOW COLUMNS FROM cq_bindings LIKE 'companion_name'"));
         if (g_tableReady && !g_custodyReady)
             LOG_WARN("server.loading", "[CompanionQuestSync] lifecycle disabled: install custody schema and use cq_bindings");
+#ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
+        g_starterBagsReady = g_custodyReady && g_nativeInitializationVetoRegistered &&
+            g_nativeCustodySchema == NativeCustodySchema::Present && static_cast<bool>(CharacterDatabase.Query(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name = 'starter_bag_attempt'"));
+#endif
+        if (g_custodyReady && !g_starterBagsReady && (!_announced || reload))
+            LOG_WARN("server.loading", "[CompanionQuestSync] starter bags disabled: require Playerbots initialization policy and companion-starter-bags.sql; claims remain available");
         LoadWorldMapAreas();
 
         if (g_tableReady)
@@ -9667,6 +9806,11 @@ public:
 
 void Addmod_companion_questsyncScripts()
 {
+#ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
+    g_nativeInitializationVetoRegistered = Playerbots::RegisterInitializationVeto(DeferNativeBotInitialization);
+    if (!g_nativeInitializationVetoRegistered)
+        LOG_ERROR("server.loading", "[CompanionQuestSync] Playerbots initialization veto registration failed; custody is not protected");
+#endif
     new CompanionQuestSyncWorldScript();
     new CompanionQuestSyncCommandScript();
     new CompanionQuestSyncPlayerScript();

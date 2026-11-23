@@ -41,17 +41,27 @@ def free_clause(src):
             + strings(format_code.split(',', 1)[0]).format(*bindings))
 
 
-def current_clause(src):
+def current_clause(src, assignment=''):
     code = function(src, 'std::string CurrentCustodyClause(')
     before = code.split('ForeignCustodyClause(', 1)[0]
     if '(tracked ?' in before:
         before = before.split('(tracked ?', 1)[0] + '" AND x.tracking = 1 "'
+    if '+ assignment +' in before:
+        body = before.split('std::string(', 1)[1]
+        joins, where = body.split('+ assignment +', 1)
+        return (('UPDATE ' if assignment else ' FROM ') + strings(joins) + assignment + strings(where)
+                + foreign(src, 'b.bot_guid'))
     return strings(before) + foreign(src, 'b.bot_guid')
 
 
-def claim(src, owner, bot, name, clazz=1):
-    code = src.split('auto trans = CharacterDatabase.BeginTransaction();', 1)[1].split('CharacterDatabase.DirectCommitTransaction', 1)[0]
+def claim(src, owner, bot, name, clazz=1, arm_starter=True):
+    claim_code = function(src, 'bool CreateCompanion(') if 'bool CreateCompanion(' in src else src
+    code = claim_code.split('auto trans = CharacterDatabase.BeginTransaction();', 1)[1].split('CharacterDatabase.DirectCommitTransaction', 1)[0]
     update, row_count, insert = re.findall(r'trans->Append\((.*?);', code, re.S)
+    if 'starterAssignment' in update:
+        selected = claim_code.split('starterAssignment = g_starterBagsReady ?', 1)[1].split(';', 1)[0]
+        armed, unarmed = selected.split(':', 1)
+        update = update.replace('+ starterAssignment +', armed if arm_starter else unarmed)
     before, after = update.split('FreeCustodyClause()', 1)
     update_sql = (strings(before) + free_clause(src) + strings(after)).format(
         owner, name, name, name, bot, '100', 1, clazz, owner, 4)
@@ -62,6 +72,23 @@ def claim(src, owner, bot, name, clazz=1):
 def retirement_request(src, marker, owner, bot):
     code = function(src, marker).split('CharacterDatabase.DirectExecute(', 1)[1]
     return strings(code.split('ForeignCustodyClause', 1)[0]).format(owner, bot) + foreign(src, 'x.bot_guid') + ';'
+
+
+def starter_attempt(src, token, owner=1, bot=10, account=100, name='Current'):
+    handler = function(src, 'bool HandleStarterBags(')
+    identity = strings(handler.split('std::string const identity = fmt::format(', 1)[1].split('\n', 2)[1]).format(
+        owner, bot, account, name)
+    consume = function(src, 'bool ConsumeStarterBags(')
+    assignment = strings(consume.split('CurrentCustodyClause(true, fmt::format(', 1)[1].split(', token)', 1)[0]).format(token)
+    pending = strings(consume.split('identity + ', 1)[1].split(');', 1)[0])
+    match = strings(consume.split('std::string const match = fmt::format(', 1)[1].split(', token)', 1)[0]).format(token)
+    return current_clause(src, assignment) + identity + pending + '; SELECT 1' + current_clause(src) + identity + match + ';'
+
+
+def native_veto_sql(src, bot):
+    code = function(src, 'bool DeferNativeBotInitialization(')
+    sql = code.split('CharacterDatabase.Query(', 1)[1].split(', bodyGuid)', 1)[0]
+    return strings(sql).format(bot)
 
 
 @unittest.skipUnless(MYSQL, 'set CQ_TEST_MYSQL for isolated MySQL integration tests')
@@ -90,6 +117,7 @@ class MySQLLifecycle(unittest.TestCase):
             INSERT INTO cq_companion_custody (bot_guid,module,body_account,body_name,state,reviewed_by) VALUES
                 (10,'cq',100,'Blankcq','free','fixture'), (11,'legacy',100,'Blankwl','free','fixture');
         ''')
+        self.run_sql((ROOT / 'sql/companion-starter-bags.sql').read_text())
 
     def run_sql(self, sql, use_db=True, fails=False):
         cmd = [MYSQL, '--no-defaults', '--protocol=PIPE', '--socket=cq_lifecycle_audit_fixture',
@@ -148,8 +176,58 @@ class MySQLLifecycle(unittest.TestCase):
         error = self.run_sql(claim(self.cq, 1, 10, 'Collision'), fails=True)
         self.assertIn('Duplicate entry', error)
         self.assertEqual(self.run_sql('SELECT x.state,c.name FROM cq_companion_custody x JOIN characters c ON c.guid=x.bot_guid WHERE x.bot_guid=10'), 'free\tBlankcq')
+        self.assertEqual(self.run_sql('SELECT starter_bag_attempt IS NULL FROM cq_companion_custody WHERE bot_guid=10'), '1')
         self.run_sql(claim(self.legacy, 2, 11, 'Valid'))
         self.assertEqual(self.run_sql('SELECT b.bot_guid' + current_clause(self.legacy)), '11')
+
+    def test_starter_grant_is_not_backfilled_and_only_one_attempt_wins(self):
+        marker = 'SELECT IFNULL(HEX(starter_bag_attempt), "NULL") FROM cq_companion_custody WHERE bot_guid=10'
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.assertEqual(self.run_sql(marker), 'NULL')
+        self.run_sql('''UPDATE cq_companion_custody SET owner_guid=1, state='owned', tracking=1 WHERE bot_guid=10;
+                        INSERT INTO cq_bindings (owner_guid, bot_guid, companion_name) VALUES (1,10,'Blankcq');''')
+        self.assertEqual(self.run_sql(starter_attempt(self.cq, first, name='Blankcq')), '')
+        self.assertEqual(self.run_sql(marker), 'NULL')
+        self.run_sql('''DELETE FROM cq_bindings WHERE bot_guid=10;
+                        UPDATE cq_companion_custody SET owner_guid=0, state='free', tracking=0 WHERE bot_guid=10;''')
+        self.run_sql(claim(self.cq, 1, 10, 'Current'))
+        self.assertEqual(self.run_sql(marker), '')
+        for wrong_identity in ({'owner': 2}, {'account': 101}, {'name': 'current'}):
+            self.assertEqual(self.run_sql(starter_attempt(self.cq, first, **wrong_identity)), '')
+        self.assertEqual(self.run_sql(marker), '')
+        self.assertEqual(self.run_sql(starter_attempt(self.cq, first)), '1')
+        self.assertEqual(self.run_sql(starter_attempt(self.cq, second)), '')
+        self.assertEqual(self.run_sql(marker), first.encode().hex().upper())
+        self.run_sql(retirement_request(self.cq, 'bool MarkCompanionRetiring(', 1, 10))
+        self.run_sql('DROP TABLE wowlegends_companion_multi;')
+        self.run_sql((ROOT / 'sql/companion-retirement-maintenance.sql').read_text())
+        self.run_sql("CALL cq_finalize_companion_retirement('cq',10,1,100,'Current');")
+        self.run_sql('CREATE TABLE wowlegends_companion_multi LIKE cq_bindings;')
+        self.run_sql(claim(self.cq, 2, 10, 'Replayed'))
+        self.assertEqual(self.run_sql(starter_attempt(self.cq, second)), '')
+        self.assertEqual(self.run_sql(marker), first.encode().hex().upper())
+        self.assertEqual(self.run_sql('SELECT state FROM cq_companion_custody WHERE bot_guid=10'), 'retired')
+
+    def test_claim_without_capability_or_migration_leaves_no_pending_grant(self):
+        self.run_sql('ALTER TABLE cq_companion_custody DROP COLUMN starter_bag_attempt')
+        self.run_sql(claim(self.cq, 1, 10, 'Unaligned', arm_starter=False))
+        self.assertEqual(self.run_sql('SELECT b.bot_guid' + current_clause(self.cq)), '10')
+        self.run_sql((ROOT / 'sql/companion-starter-bags.sql').read_text())
+        self.assertEqual(self.run_sql('SELECT starter_bag_attempt IS NULL FROM cq_companion_custody WHERE bot_guid=10'), '1')
+        self.assertEqual(self.run_sql(starter_attempt(self.cq, str(uuid.uuid4()), name='Unaligned')), '')
+
+    def test_native_veto_uses_exact_reserved_body_even_when_untracked_or_binding_drifted(self):
+        veto = lambda guid: self.run_sql(native_veto_sql(self.cq, guid))
+        self.assertEqual(veto(10), '0')  # free stock
+        self.run_sql(claim(self.cq, 1, 10, 'Current'))
+        self.run_sql(claim(self.legacy, 2, 11, 'Legacy'))
+        self.assertEqual([veto(guid) for guid in (10, 11, 12)], ['1', '0', '0'])  # same account
+        self.run_sql('UPDATE cq_companion_custody SET tracking=0 WHERE bot_guid=10')
+        self.assertEqual(veto(10), '1')
+        self.run_sql(retirement_request(self.cq, 'bool MarkCompanionRetiring(', 1, 10))
+        self.assertEqual(veto(10), '1')
+        self.run_sql('UPDATE cq_bindings SET companion_name="Drifted" WHERE bot_guid=10')
+        self.assertEqual(veto(10), '1')
 
     def test_offline_retirement_rolls_back_on_conflict_and_never_recycles(self):
         self.run_sql(claim(self.cq, 1, 10, 'Current'))
