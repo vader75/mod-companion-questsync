@@ -40,6 +40,11 @@ same name when the roster refreshes. The window stays compact even with four com
   your bags before retrying: part of the offer may already have moved.
   Without receipt support, Collect uses the original command and leaves the result
   to chat and the trade window.
+- **Bag space:** below eight free slots, the card suggests a merchant stop for an
+  active party companion. Stand beside a real merchant and let the companion catch
+  up. On servers with automatic junk selling enabled, eligible junk is sold when
+  the companion is in merchant range and both of you are out of combat and not trading.
+  No button is needed. **Refresh** updates the bag count after a sale.
 
 Summon, dismiss, revive and level stay beside the companion's name. **Untrack**
 preserves ownership. **Release** requests retirement; it does not wipe the body or

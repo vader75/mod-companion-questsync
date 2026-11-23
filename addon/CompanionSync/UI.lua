@@ -346,6 +346,8 @@ local function CreateCard()
     card.craftTrack = SkillTrack(card, 224, -104)
     card.quests = Label(card, "", 16, -77, 192)
     card.bags = Label(card, "", 440, -77, 192)
+    card.merchantHint = Label(card, "Stop by a merchant", 440, -132, 192)
+    card.merchantHint:Hide()
 
     -- the whole card responds to the cursor, so the row under it is obviously the one the
     -- buttons belong to
@@ -357,6 +359,9 @@ local function CreateCard()
         GameTooltip:AddLine(self.companion.name, 1, 0.85, 0.4)
         if G.HasFlag(self.companion, "b") then
             GameTooltip:AddLine("You carry a quest this companion has not picked up yet.", 0.75, 0.75, 0.75, true)
+        end
+        if self.merchantHint:IsShown() then
+            GameTooltip:AddLine("Stop beside a merchant and let your companion catch up. If automatic junk selling is enabled, they can sell eligible junk once both of you are out of combat and not trading.", 1, 0.82, 0.4, true)
         end
         GameTooltip:AddLine("Companions craft and offer surplus automatically. Accept the trade when it opens.", 0.75, 0.75, 0.75, true)
         GameTooltip:Show()
@@ -832,6 +837,14 @@ function G.Refresh()
             end
             card.subtitle:SetText(subtitle)
 
+            local lowBags = rosterState == "ready" and state.free ~= nil and state.free < 8
+                and not state.dead and G.HasFlag(companion, "g")
+            if lowBags then
+                card.merchantHint:Show()
+            elseif card.merchantHint:IsShown() then
+                card.merchantHint:Hide()
+                if GameTooltip:IsOwned(card) then GameTooltip:Hide() end
+            end
             if state.free ~= nil then
                 UpdateSkill(card.gatherTrack, state.gather, "Gathering · Unavailable", 0.46, 0.73, 0.52)
                 UpdateSkill(card.craftTrack, state.craft, "Crafting · Unavailable", 0.72, 0.62, 0.37)
@@ -840,7 +853,7 @@ function G.Refresh()
                 local free = state.free
                 local bags = free == 0 and "Bags full" or ("%d bag slots free"):format(free)
                 card.quests:SetText(COL_MUTED .. ("%d active quest%s"):format(state.quests, state.quests == 1 and "" or "s") .. COL_RESET)
-                card.bags:SetText((free <= 4 and COL_WARN or COL_MUTED) .. bags .. COL_RESET)
+                card.bags:SetText((lowBags and COL_WARN or COL_MUTED) .. bags .. COL_RESET)
                 card.quests:Show()
                 card.bags:Show()
             else

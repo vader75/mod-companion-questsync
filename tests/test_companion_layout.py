@@ -10,14 +10,31 @@ class CompanionLayout(unittest.TestCase):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute(STUB)
         self.lua.execute('''
-            time = function() return 100 end
+            clock = 100
+            time = function() return clock end
             ToggleWorldMap = function() end
+            GameTooltip.SetOwner = function(self, owner) self.owner, self.lines = owner, {} end
+            GameTooltip.IsOwned = function(self, owner) return rawget(self, 'owner') == owner end
+            GameTooltip.AddLine = function(self, text) self.lines[#self.lines+1] = text end
+            GameTooltip.Hide = function(self) self.owner, self.lines = nil, {} end
+            function TooltipText() return table.concat(rawget(GameTooltip, 'lines') or {}, '\\n') end
             local create = CreateFrame
             frames, requests = {}, {}
             CreateFrame = function(kind, name, parent, template)
                 local f = create(kind, name, parent, template)
                 f.kind, f.parent, f.shown, f.enabled = kind, parent, true, true
                 f.SetText = function(self, text) self.text = text end
+                local fontString = f.CreateFontString
+                f.CreateFontString = function(self, ...)
+                    local label = fontString(self, ...)
+                    self.labels = rawget(self, 'labels') or {}
+                    self.labels[#self.labels+1] = label
+                    label.SetText = function(self, text) self.text = text end
+                    label.Show = function(self) self.shown = true end
+                    label.Hide = function(self) self.shown = false end
+                    label.IsShown = function(self) return rawget(self, 'shown') ~= false end
+                    return label
+                end
                 f.Show = function(self) self.shown = true end
                 f.Hide = function(self) self.shown = false end
                 f.IsShown = function(self) return self.shown end
@@ -43,6 +60,23 @@ class CompanionLayout(unittest.TestCase):
                         end
                     end
                 end
+            end
+            function VisibleLabel(text)
+                for _, f in ipairs(frames) do
+                    local parent = f
+                    while type(parent) == 'table' and rawget(parent, 'shown') do
+                        parent = rawget(parent, 'parent')
+                    end
+                    if type(parent) ~= 'table' or rawget(parent, 'shown') ~= false then
+                        for _, label in ipairs(rawget(f, 'labels') or {}) do
+                            local value = rawget(label, 'text')
+                            if rawget(label, 'shown') ~= false and value and value:find(text, 1, true) then
+                                return f
+                            end
+                        end
+                    end
+                end
+                return false
             end
         ''')
         self.g = self.lua.table()
@@ -88,6 +122,39 @@ class CompanionLayout(unittest.TestCase):
         self.roster('1: Élise,5,1,14,1,ogs,8')
         self.click('Collect delivery')
         self.assertEqual(self.requests[len(self.requests)], '.companionsync delivery collect Élise')
+
+    def test_low_bags_suggest_a_merchant_stop_until_space_recovers(self):
+        visible = self.lua.globals().VisibleLabel
+        self.roster('1: Mirdan,7,11,14,8,ogs,8')
+        self.assertFalse(visible('Stop by a merchant'))
+        count = len(self.requests)
+        self.roster('1: Mirdan,7,11,14,8,ogs,7')
+        self.assertTrue(visible('7 bag slots free'))
+        self.assertTrue(visible('Stop by a merchant'))
+        self.assertEqual(len(self.requests), count)
+        self.roster('1: Mirdan,7,11,14,8,ogs,12')
+        self.assertFalse(visible('Stop by a merchant'))
+
+    def test_merchant_cue_does_not_use_stale_or_unavailable_companions(self):
+        visible = self.lua.globals().VisibleLabel
+        self.roster('1: Mirdan,7,11,14,8,ogs,0')
+        self.assertTrue(visible('Bags full'))
+        self.assertTrue(visible('Stop by a merchant'))
+        self.lua.globals().clock = 10000
+        self.g.Refresh()
+        self.assertFalse(visible('Stop by a merchant'))
+        for flags in ('ogsd', 'os', '-'):
+            self.roster(f'1: Mirdan,7,11,14,8,{flags},0')
+            self.assertFalse(visible('Stop by a merchant'), flags)
+
+    def test_open_tooltip_drops_merchant_advice_when_bag_space_recovers(self):
+        self.roster('1: Mirdan,7,11,14,8,ogs,0')
+        globals_ = self.lua.globals()
+        card = globals_.VisibleLabel('Stop by a merchant')
+        card.OnEnter(card)
+        self.assertIn('Stop beside a merchant', globals_.TooltipText())
+        self.roster('1: Mirdan,7,11,14,8,ogs,12')
+        self.assertNotIn('Stop beside a merchant', globals_.TooltipText())
 
 
 if __name__ == '__main__':
