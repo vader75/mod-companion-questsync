@@ -322,7 +322,7 @@ namespace
     /// The middle ground between instant and manual: the finished quest is visible as a gold
     /// pin for HandInDelaySeconds, then rewards itself.
     std::map<uint64, uint32> g_readyAt;
-    std::map<uint64, uint32> g_leadNudgeAt;  // (bot, quest) -> last lead-me whisper
+    std::map<uint64, uint32> g_handInTravelHintAt;  // (owner, quest) -> last travel hint
 
     /// Owners whose teleport has just been seen: the companion is brought along a moment
     /// later, once the client has finished loading the destination.
@@ -412,7 +412,7 @@ namespace
     std::map<uint32, uint32> g_lastGatherZone;            // bot guid -> last zone the gather catch-up ran for
     std::map<uint32, uint32> g_lastRepair;
     std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
-    std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
+    thread_local uint32 g_commandReplyOwner = 0;          // only while executing a player command
     std::map<uint32, uint32> g_lastAutoProduce;           // bot guid -> unix time of the last quiet craft
     std::map<uint32, uint32> g_lastAutoTrade;             // owner guid -> last applied automatic offer
     std::map<uint32, uint32> g_lastAutoTradeAttempt;      // separate from actual mail precedence
@@ -1446,15 +1446,10 @@ namespace
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
 
-        // A command the player just issued is a conversation, not a broadcast: its
-        // answers speak at once, whatever the ambient gap is. Without this a button
-        // press felt dead - the verdicts joined the back of a queue that drains one
-        // line per window, and the player had already clicked again by the time the
-        // first one arrived.
-        auto burst = g_commandBurst.find(ownerGuid);
-        bool const inBurst = burst != g_commandBurst.end() && now - burst->second < 20;
-
-        if (!inBurst && last && now - last < minGap)
+        // Replies on the command stack can speak immediately. Ambient hand-in
+        // notices stay paced even if the command synchronously runs a quest pass.
+        bool const commandReply = g_commandReplyOwner == ownerGuid && !handIn;
+        if (!commandReply && last && now - last < minGap)
         {
             // Hold it, do not lose it. The one-shot "help me finish this quest"
             // request used to be dropped here when the window was busy, so a player
@@ -2369,6 +2364,17 @@ namespace
 
     EnderSpot DescribeQuestEnder(WorldObject* giver);
 
+    // Navigation is one errand for the player, even if several companions owe it.
+    bool TakeHandInTravelHint(Player* owner, uint32 questId, uint32 now)
+    {
+        uint64 const key = (uint64(owner->GetGUID().GetCounter()) << 32) | questId;
+        uint32& last = g_handInTravelHintAt[key];
+        if (last && now - last < 600)
+            return false;
+        last = now;
+        return true;
+    }
+
     /// Position is the other half of a desync: the two logs can match while the
     /// companion is a zone away, and nothing used to say so. Reports three cases -
     /// separated, too far from the giver, or actually standing on it - in the same
@@ -2418,27 +2424,23 @@ namespace
 
             if (spot.map != bot->GetMapId())
             {
+                if (!TakeHandInTravelHint(owner, questId, now))
+                    continue;
                 last = now;
                 SayToOwner(bot, owner, "'" + quest->GetTitle() + "' gets handed in at " + spot.name +
-                                      ", and that is on another map from here - we would have to travel there together.");
+                                      ", and that is on another map from here - we would have to travel there together.",
+                           45, questId, true);
                 return;
             }
-
-            // A standing fact, not news: one hint per quest per ten minutes. Repeating
-            // it every sweep is what made it feel like nagging.
-            std::pair<uint32, uint32> const hintKey{ bot->GetGUID().GetCounter(), questId };
-            uint32& hintAt = g_turnInHintAt[hintKey];
-            uint32 const nowTs = static_cast<uint32>(time(nullptr));
-            if (hintAt && nowTs - hintAt < 600)
-                continue;
-
-            float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
 
             // Spawn coordinates are directions, not evidence that the giver is usable.
             if (giver)
             {
+                uint32& hintAt = g_turnInHintAt[{botGuid, questId}];
+                if (hintAt && now - hintAt < 600)
+                    continue;
                 last = now;
-                hintAt = nowTs;
+                hintAt = now;
 
                 std::string const here = MapCoords(spot.x, spot.y, bot->GetZoneId());
                 SayToOwner(bot, owner, "I am at " + spot.name + " with '" + quest->GetTitle() +
@@ -2448,10 +2450,12 @@ namespace
                 return;
             }
 
+            float const dist = bot->GetDistance(spot.x, spot.y, spot.z);
             if (dist > 60.0f)
             {
+                if (!TakeHandInTravelHint(owner, questId, now))
+                    continue;
                 last = now;
-                hintAt = nowTs;
                 std::string const coords = MapCoords(spot.x, spot.y, bot->GetZoneId());
 
                 // If the owner has already been rewarded for this quest, their part is
@@ -2611,9 +2615,7 @@ namespace
 
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32& last = g_lastWhisperAt[ownerGuid];
-        auto burst = g_commandBurst.find(ownerGuid);
-        bool const inBurst = burst != g_commandBurst.end() && now - burst->second < 20;
-        if (last && now - last < (inBurst ? 2 : Timing::WhisperGap))
+        if (last && now - last < Timing::WhisperGap)
             return;
 
         // Drop what no longer applies before speaking. The queue exists to survive
@@ -2735,12 +2737,6 @@ namespace
         g_lastWhisperByBot[chosen->botGuid] = now;
         speaker->Whisper(spoken, LANG_UNIVERSAL, owner);
         queue.erase(chosen);
-
-        // In a burst the player is mid-conversation: keep speaking while the short
-        // gap allows, so a press's handful of verdicts all arrive together instead
-        // of trickling across the next five windows.
-        if (inBurst && !queue.empty())
-            FlushWhisperQueue(owner, nullptr);
 
         if (g_cfg.debug >= 2)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} whispered (queued): {}", speaker->GetName(), spoken);
@@ -4339,11 +4335,8 @@ namespace
                 // The companion can finish the hand-in itself, but only where a player
                 // could too: in reach of the giver, not across half the map. Beyond the
                 // range it asks to be led; nothing is rewarded and nothing blinks.
-                uint64 const leadKey = (uint64(botGuid) << 32) | questId;
-                uint32& nudgedAt = g_leadNudgeAt[leadKey];
-                if (!nudgedAt || nowTs - nudgedAt >= 180)
+                if (TakeHandInTravelHint(owner, questId, nowTs))
                 {
-                    nudgedAt = nowTs;
                     LogHandInWait(owner, bot, quest, spot, dist, "out-of-range");
                     SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' at " +
                                spot.name + " myself. Lead me up to the giver and I will do the rest.", 90,
@@ -7432,16 +7425,23 @@ public:
     // .companionadmin - the same behaviour, for a named player, from the console
     // -----------------------------------------------------------------------
 
-    /// Every .companionsync verb opens a short conversation window: its answers
-    /// speak at once instead of joining the ambient rate limit's queue, and the
-    /// flush drains several lines with a 2-second gap. Called at the top of each
-    /// handler - a press should feel like a press, not like a letter in the post.
-    static void MarkCommandBurst(ChatHandler* handler)
+    class CommandReplyScope
     {
-        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
-        if (player)
-            g_commandBurst[player->GetGUID().GetCounter()] = uint32(time(nullptr));
-    }
+    public:
+        explicit CommandReplyScope(ChatHandler* handler) : previous(g_commandReplyOwner)
+        {
+            Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+            g_commandReplyOwner = player ? player->GetGUID().GetCounter() : 0;
+        }
+
+        ~CommandReplyScope() { g_commandReplyOwner = previous; }
+
+        CommandReplyScope(CommandReplyScope const&) = delete;
+        CommandReplyScope& operator=(CommandReplyScope const&) = delete;
+
+    private:
+        uint32 const previous;
+    };
 
     static std::vector<std::string> SplitArgs(char const* args, size_t want)
     {
@@ -7767,7 +7767,7 @@ public:
 
     static bool HandleCatchUpCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -7876,7 +7876,6 @@ public:
     /// includes ordinary alts and is not evidence of ownership by this module.
     static bool HandleBindCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -7897,7 +7896,6 @@ public:
     /// keeps being yours; it just stops being reconciled.
     static bool HandleUnbindCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -7978,7 +7976,6 @@ public:
     /// .companionsync create <race> <class> <name> - mint a companion from the pool.
     static bool HandleCreateCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8052,7 +8049,6 @@ public:
     /// .companionsync pool - what the pool can still hand out, per race and class.
     static bool HandlePoolCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8069,7 +8065,6 @@ public:
     /// .companionsync release <name> - quarantine a verified companion for offline retirement.
     static bool HandleReleaseCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8106,7 +8101,7 @@ public:
     /// out. No argument means "the whole group", which is what a player wants after a wipe.
     static bool HandleSummonCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8366,7 +8361,7 @@ public:
 
     static bool HandleTradeCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8438,7 +8433,7 @@ public:
     /// waited for. Products are used in play and requested surplus can be delivered.
     static bool HandleProduceCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8515,7 +8510,6 @@ public:
     /// each gathered skill against its ceiling.
     static bool HandleProfessionsCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8585,7 +8579,7 @@ public:
 
     static bool HandleLearnCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8663,7 +8657,7 @@ public:
 
     static bool HandleReviveCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8738,7 +8732,6 @@ public:
 
     static bool HandleDismissCommand(ChatHandler* handler, char const* args)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8828,7 +8821,6 @@ public:
     /// .companionsync list - what is bound, and what each companion is doing.
     static bool HandleListCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -8867,7 +8859,6 @@ public:
 
     static bool HandleSyncCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
         if (!g_cfg.enable)
         {
             handler->PSendSysMessage("|cffff8000Companion quest sync|r is disabled in the server configuration.");
@@ -8931,7 +8922,6 @@ public:
             SendPinSync(player, true);
             return true;
         }
-        MarkCommandBurst(handler);
 
         uint32 botGuid = 0;
         if (!g_cfg.enable || !FindCompanionGuid(player->GetGUID().GetCounter(), botGuid))
@@ -8975,7 +8965,7 @@ public:
     /// whole binding, so four companions are one command.
     static bool HandleQuestsCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
+        CommandReplyScope replies(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9079,7 +9069,6 @@ public:
 
     static bool HandleStatusCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;
@@ -9181,7 +9170,6 @@ public:
 
     static bool HandleLevelCommand(ChatHandler* handler, char const* /*args*/)
     {
-        MarkCommandBurst(handler);
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!player)
             return false;

@@ -6,6 +6,27 @@ SOURCE = (Path(__file__).resolve().parents[1] / 'src/mod_companion_questsync.cpp
 
 
 class HandInContract(unittest.TestCase):
+    def test_periodic_whispers_do_not_use_a_recent_command_as_permission(self):
+        self.assertNotIn('g_commandBurst', SOURCE)
+        queue = SOURCE.split('void FlushWhisperQueue(', 1)[1].split('auto& queue =', 1)[0]
+        self.assertIn('now - last < Timing::WhisperGap', queue)
+
+    def test_distant_hand_in_hint_is_shared_by_all_companions_of_the_owner(self):
+        turnin = SOURCE.split('void DeliverHandIns(', 1)[1].split('if (!giver)\n', 1)[0]
+        self.assertIn('TakeHandInTravelHint(owner, questId, nowTs)', turnin)
+        gate = SOURCE.split('bool TakeHandInTravelHint(', 1)[1].split('void ReportPosition(', 1)[0]
+        self.assertIn('owner->GetGUID().GetCounter()', gate)
+        self.assertIn('| questId', gate)
+
+    def test_position_travel_hints_share_dedup_but_arrival_does_not(self):
+        report = SOURCE.split('void ReportPosition(', 1)[1].split('std::string DescribeMissingItemsUncached(', 1)[0]
+        cross_map, rest = report.split('if (spot.map != bot->GetMapId())', 1)[1].split('if (giver)', 1)
+        arrival, distant = rest.split('if (dist > 60.0f)', 1)
+        self.assertIn('TakeHandInTravelHint(owner, questId, now)', cross_map)
+        self.assertIn('45, questId, true);', cross_map)
+        self.assertIn('TakeHandInTravelHint(owner, questId, now)', distant)
+        self.assertNotIn('TakeHandInTravelHint', arrival)
+
     def test_no_second_hand_in_for_a_body_rejected_by_the_sync_resolver(self):
         sweep = SOURCE.split('SyncReport SyncCompanion(Player* owner)', 1)[1].split('aggregate.added += one.added;', 1)[0]
         self.assertNotIn('DeliverHandIns(owner, bot)', sweep)
