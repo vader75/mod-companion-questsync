@@ -31,7 +31,8 @@ Keeper stock stays with the companion. The server can offer curated trades autom
 
 - **Quests:** The accept hook copies eligible quests; a periodic pass catches missed accepts. Companions earn their own objective credit. Completion rechecks their own objectives, and hand-ins use native reward handling. Class and race locks still apply. Timed quests are skipped by default.
 - **Ground objectives:** Companions can loot spawned ground objects. **Ground quests** manually fills missing items that the server indexes as ground loot for summoned companions; it does not grant kill credit. Automatic synthetic catch-up is off by default. If enabled, that background fallback waits for stalled progress and requires the owner to have received the quest reward.
-- **Progression:** Companions can receive starter gear and bags, equip upgrades, learn spells on level-up, and spend new talent points along their existing specialization. The **Professions** section shows gathering and crafting skill. Use **Train** for spells and talents or **Teach skills** for professions.
+- **Progression:** Companions can receive starter gear, equip upgrades, learn spells on level-up, and spend new talent points along their existing specialization. The **Professions** section shows gathering and crafting skill. Use **Train** for spells and talents or **Teach skills** for professions.
+- **Starter bags:** On realms with starter-bag support installed, newly claimed companions get one chance to equip up to four **Portable Holes** (24 slots each) on their first verified summon. Only empty bag slots are filled; existing bags and their contents stay put. Existing companions aren't upgraded, and removed Portable Holes aren't replaced.
 - **Professions:** Warriors, paladins and death knights use Mining/Blacksmithing; hunters, rogues and shamans use Skinning/Leatherworking; druids, mages, priests and warlocks use Herbalism/Alchemy. Supported recipes depend on attained skill and aren't a full profession-leveling route. Crafting consumes reagents; trade or repair vendors can restock shop supplies or repair gear. Bag cleanup sells only eligible grey vendor junk and does not delete items.
 - **Travel:** Companions can follow actual teleports, not simply blink when you walk away. The module does not follow you into a battleground or arena. Use **Revive** on a fallen companion nearby; a distant companion can release and recover as a ghost instead.
 
@@ -40,7 +41,7 @@ Keeper stock stays with the companion. The server can offer curated trades autom
 ### Requirements
 
 - A buildable AzerothCore 3.3.5a source tree with compatible [mod-playerbots](https://github.com/mod-playerbots/mod-playerbots), working realm databases, and extracted client data. Follow the Playerbots installation guide for its required AzerothCore fork and branch; do not assume stock AzerothCore is interchangeable. Test the combination on a staging realm. QuestSync is part of the worldserver build, not a plug-in for a prebuilt executable.
-- Access to the **characters** database and permission to configure and rebuild worldserver. No Playerbots source patch is required by QuestSync.
+- Access to the **characters** database and permission to configure and rebuild worldserver. Basic QuestSync does not require a Playerbots patch. Starter bags require the Playerbots initialization patch and characters migration below.
 - `mod-wowlegends` is **not** required. If your realm also uses its legacy companion allocator, apply the [legacy custody guard](patches/mod-wowlegends-companion-custody.patch) (verified base `523563e`), and deploy both custody-aware modules together before allowing claims. Do not leave an old allocator running against shared stock.
 
 ### Build
@@ -73,7 +74,16 @@ Keeper stock stays with the companion. The server can offer curated trades autom
    | Guard only | Guarded automatic and manual surplus offers work. **Collect delivery** falls back to the older trade flow without addon receipts. Named picker requests are unavailable. |
    | Guard and receipt | Adds named **Take/Craft** requests and addon delivery status. Completion requires a confirmed save, not just a closed trade window. |
 
-3. Re-run CMake so it discovers the new module, then build and install worldserver using your usual AzerothCore procedure. For example, from the core root on Windows with Visual Studio 2022:
+3. For starter bags, apply the [Playerbots initialization patch](patches/mod-playerbots-companion-initialization.patch) from the **mod-playerbots** directory, not the AzerothCore root. Skip it if already applied; if the check fails, reconcile your Playerbots revision rather than forcing it.
+
+   ```sh
+   cd modules/mod-playerbots
+   git -c core.autocrlf=false apply --check ../mod-companion-questsync/patches/mod-playerbots-companion-initialization.patch &&
+     git -c core.autocrlf=false apply ../mod-companion-questsync/patches/mod-playerbots-companion-initialization.patch
+   cd ../..
+   ```
+
+4. Re-run CMake so it discovers the new module, then build and install worldserver using your usual AzerothCore procedure. For example, from the core root on Windows with Visual Studio 2022:
 
    ```sh
    cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSCRIPTS=static -DMODULES=static
@@ -93,6 +103,14 @@ Keeper stock stays with the companion. The server can offer curated trades autom
    ```
 
    The SQL adds tables if absent. It does not migrate old bindings, repair old indexes, or populate stock. `cq_bindings` is the roster, `cq_companion_custody` holds reviewed reservations, and `cq_pool` is historical only. An empty custody table is a safe starting point, not a ready-to-use pool. Use the [custody guide](docs/companion-custody.md) to review and enroll existing owners or clean AddClass stock offline. AddClass account type alone is not proof that a character is safe to claim.
+
+   If you built with the Playerbots initialization patch, apply the [starter-bag migration](sql/companion-starter-bags.sql) **once**, after the custody schema and before starting worldserver:
+
+   ```sh
+   mysql -u your_db_user -p acore_characters < sql/companion-starter-bags.sql
+   ```
+
+   Without both the working Playerbots hook and this migration, claims still work but don't qualify for the grant, even after a later upgrade. Leave `ExtraBagItem` on its normal fallback (default: Pumpkin Bag); do not set it to Portable Hole (`51809`). See the [custody guide](docs/companion-custody.md) for the grant's save and rollback limits.
 3. Install the built binary and copy the [module config template](conf/mod_companion_questsync.conf.dist) to `configs/modules/mod_companion_questsync.conf` in your server config directory. If upgrading, merge settings rather than overwriting your live config. Review the settings below before you start.
 4. Start worldserver and check `[CompanionQuestSync]` output for schema or custody errors. On a test character with reviewed custody, check the roster, summon and dismiss, accept an eligible quest, and verify the companion's progress. Walk to a live quest ender and verify the companion's reward separately from yours. If you enabled trade, test a manually accepted delivery and check the received items. The [acceptance checklist](docs/companion-audit-acceptance.md) covers negative cases as well.
 
@@ -126,6 +144,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 | --- | --- |
 | No panel or empty roster | Confirm CompanionSync is enabled and the server is running the module, then click **Refresh**. `/csync test` checks the client parser; it does not prove the server is sending data. |
 | No available race/class or an old companion won't summon | Check reviewed stock or ownership, current character identity, and custody/schema logs. Don't re-enroll an ambiguous body to bypass a refusal. |
+| A new companion didn't receive Portable Holes | Confirm the patched build and starter-bag migration were in place before the claim. The grant only fills empty slots and will not retry after the attempt has been spent. |
 | Quest missing or won't turn in | Check eligibility, quest-log and bag space, and the companion's own objectives. Summon it and bring it to a live, usable ender. Mode `0` disables the module's own hand-ins. |
 | No pins | Open the matching **zone** map, check both server pin settings and the addon, then use `/cpins refresh` with the map open. Check `DataDir` if zone mapping looks wrong. |
 | Supplies unavailable or trade cancels | Confirm server patch support, companion control, range, combat state, and free bag space. For Craft, also check materials and any required station. Refresh the picker before retrying. |
