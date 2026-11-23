@@ -200,15 +200,21 @@ Everything in this section is autonomous or one click; nothing needs a command t
 - **Produce** (card button, `.companionsync produce <name>`) - the same craft on
   demand, with one chat report: what was made or what to do next. Finish any open
   trade and get out of combat before asking.
-- **Trade is a habit too** (`AutoTrade`, default on) - beside you with something spare,
-  the companion opens the trade itself every three minutes, the keep-five reserve
-  respected; you accept. Mail stays the fallback for what cannot wait for a moment
-  together.
-- **Trade** (card button, `.companionsync trade <name>`) - standing next to a companion,
-  it opens a trade with you and offers its surplus: every gathered mat and produced item
-  above the five it keeps for itself, biggest stacks first, six slots (the trade window's
-  own limit). Gear, quest items and food are never offered. You accept; the bot's
-  accept-trade trigger answers on its side. Trade range applies - it asks you closer.
+- **Background inventory**: companions put on their own upgrades and quietly sell only
+  grey items that Playerbots also marks as vendor junk, at a merchant they can interact
+  with. Crowded bags never trigger item deletion or bulk mail. Quest items and uncertain
+  gear stay with the companion.
+- **Curated trade** (`AutoTrade`, default on): when you and a companion are stationary
+  and out of combat in a rested area, it can offer a clear armor upgrade or supplies you
+  requested. One automatic offer per owner per ten minutes; you still click Accept.
+  Gear must be equippable and beat the active-spec score for that slot by more than 10%;
+  weapons, jewelry, sets, and gear with ambiguous effects remain manual decisions.
+- **Mail**: at a reachable mailbox, the same policy can send up to three whole stacks.
+  There is never more than one unclaimed companion parcel at a time, and a 15-minute
+  cooldown covers all companions for the owner. Raw materials and vendor junk stay out.
+- **Trade** (card button, `.companionsync trade <name>`) is the manual path for both
+  useful items and supported profession surplus. It preserves at least five of each
+  material or product, and more where a known supported recipe needs it.
 - **Revive** (card button on a dead companion, `.companionsync revive <name>`) - within
   forty yards the body rises where it fell, at the half-strength a real resurrection
   would carry; beyond that its spirit releases at the graveyard the way the client's own
@@ -232,6 +238,9 @@ available over SOAP, for the same reason `.companion` is not.
 | `.companionsync professions [name]` | teach the class profession pair, re-cap to the level, arm gathering |
 | `.companionsync produce <name>` | craft what its own gathering already paid for |
 | `.companionsync trade <name>` | open a trade and hand over its surplus |
+| `.companionsync delivery preview` | list the curated items ready from summoned companions without moving them |
+| `.companionsync delivery collect <name>` | ask a nearby companion for curated items only |
+| `.companionsync delivery request <item ID>` | for this login, top up a supported crafted consumable to five including bags, bank and pending mail; `delivery clear` clears requests |
 | `.companionsync revive <name>` | raise a fallen companion, or let its spirit walk home |
 | `.companionsync pins` | push map pins now |
 | `.companionsync refresh` | resend the panel payload now |
@@ -313,16 +322,15 @@ each one. The defaults that matter most:
 | `ExtraArmourSlots` | 1 | belt, bracers, gloves and cloak in the class's armour type |
 | `PoolAccountType` | 2 | `playerbots_account_type` value that marks an AddClass body |
 | `NotifySkippedQuests` | 2 | 0 silent, 1 class/race only, 2 all refusals |
-| `TidyInventory` / `KeepFreeSlots` / `BagMargin` | 1 / 2 / 8 | keep bag room so pickups never stall; the ladder starts 8 slots before the wall. Everything below the keep-quality line (whites AND greys) is posted home in a letter - only what a full letter cannot carry falls to the destroy ladder, cheapest first - and the AI vendor-junk and surplus passes run from the margin, not only at zero slots |
-| `MailHome` | 1 | white-and-better overflow is posted to the owner instead of destroyed; the letter carries up to 12 items, at most one per 120 s |
-| `SellJunk` / `TidyVendorJunk` / `TidySurplus` | 1 / 1 / 1 | what it may sell or destroy to make room |
-| `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |
+| `TidyInventory` / `KeepFreeSlots` / `BagMargin` | 1 / 2 / 8 | bag-space warnings and an eligible merchant sale before retrying a blocked quest pickup |
+| `MailHome` | 1 | curated delivery at a mailbox; turning this off never destroys anything |
+| `SellJunk` | 1 | quietly sell confirmed grey vendor junk at an interactable merchant |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
 | `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | companion quest pins via CompanionPins; native quest-giver icons are unchanged |
 | `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
 | `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
 | `AutoProduce` | 1 | craft what its gathering paid for every three minutes per companion, outside combat, silently; the Produce button gives the report on demand |
-| `AutoTrade` | 1 | beside you with something spare: the trade opens itself every three minutes, outside combat; you accept, mail stays the fallback |
+| `AutoTrade` | 1 | open a curated trade in a rested area when stationary and out of combat; you accept |
 | `CatchUpGroundItems` / `CatchUpIdleSeconds` | 1 / 120 | finish a collection quest whose items lie on the ground (oats in a field, cloth in a crate) when the world will not yield them: only ground items, only for a quest the owner has already been rewarded |
 | `FollowThroughTeleport` | 1 | take the companion through your hearthstone, portal or summon (never into a battleground); walking away never teleports it |
 | `HandInMode` / `HandInDelaySeconds` / `HandInNearDistance` | 2 / 20 / 40 | hand-in in reach of the giver (2 = auto within 40 yd, whispers to be led beyond; 1 = server-side anywhere; 0 = bot AI); a finished quest stays visible (gold pin, companion at the giver) 20 s before it rewards |

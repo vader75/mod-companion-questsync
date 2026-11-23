@@ -42,7 +42,11 @@ class ProfessionContract(unittest.TestCase):
         self.assertIn("CanStoreNewItem", planner)
 
     def test_auto_produce_blocks_combat_independently_of_sync_configuration(self):
-        self.assertRegex(SOURCE, r"if \(g_cfg\.autoProduce && !bot->IsInCombat\(\) && !owner->IsInCombat\(\)")
+        self.assertIn('if (g_cfg.autoProduce && CanManageBags(owner, bot))', SOURCE)
+        gate = section('bool CanManageBags(', 'uint32 SellManagedJunk(')
+        for actor in ('owner', 'bot'):
+            self.assertIn(f'!{actor}->IsInCombat()', gate)
+            self.assertIn(f'!{actor}->GetTradeData()', gate)
 
     def test_missing_materials_are_not_treated_as_vendor_stock(self):
         producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")

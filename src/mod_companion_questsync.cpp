@@ -44,6 +44,8 @@
 extern DBCStorage<AreaTableEntry> sAreaTableStore;
 
 #include "GossipDef.h"
+#include "GameObject.h"
+#include "ItemPackets.h"
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
@@ -74,6 +76,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "WorldSessionMgr.h"
 
 #include <algorithm>
+#include <charconv>
 #include <deque>
 #include <set>
 #include <string>
@@ -117,20 +120,19 @@ namespace
         uint32 levelMode        = 1;   // 0 off, 1 raise to owner, 2 exact
         uint32 notifySkipped    = 1;   // 0 off, 1 class/race only, 2 all refusals
         bool tidyInventory     = true;
-        bool sellJunk          = true;      // ask the AI to sell vendor trash first
-        bool tidyVendorJunk    = true;      // at zero slots, bin what playerbots would vendor
+        bool sellJunk          = true;      // confirmed junk only, at a vendor
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
-        bool tidySurplus       = true;      // last resort: bin spare consumables/materials
+
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
         bool autoProduce       = true;      // crafting is its own habit; the button is for the report
         bool autoTrade         = true;      // beside you with something spare: the trade opens itself
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
-        uint32 itemKeepQuality = 2;         // never bin anything at or above this (2 = green)
+
         uint32 keepFreeSlots   = 2;
         uint32 bagMargin       = 8;  // the tidy ladder starts this many slots before the wall
-        bool mailHome          = true;    // post keep-worthy overflow to the owner
+        bool mailHome          = true;    // curated mailbox fallback
         std::string bindingTable = "cq_bindings";   // this module's own table
         std::string poolTable    = "cq_pool";       // this module's own ledger
     };
@@ -206,10 +208,13 @@ namespace
         constexpr uint32 GearCheck         = 180; // how often upgrades are looked for
         constexpr uint32 GearRetry         = 300; // an unfilled slot is not retried sooner
         constexpr uint32 SellJunk          = 120; // vendor trash is sold at most this often
-        constexpr uint32 JunkNotice        = 120; // "your bags were full" repeats after this
+        constexpr uint32 JunkNotice        = 600; // per-owner bag pressure reminder
         constexpr uint32 RewardProd        = 60;  // how often a hand-in attempt is repeated
         constexpr uint32 AcceptWindow      = 60;  // a quest accepted this recently is still settling
-        constexpr uint32 MailHome          = 120; // how often a "posted home" letter may go out
+        constexpr uint32 MailHome          = 900; // per-owner curated parcel cooldown
+        constexpr uint32 TradeDelivery     = 600; // per-owner proactive trade cooldown
+        constexpr uint32 MailAfterOffer    = 120; // give a town trade first chance
+        constexpr uint32 TownOfferTimeout  = 30;  // don't hold a town window open indefinitely
     }
 
     uint32 constexpr kBindingCacheSeconds = 60;
@@ -232,7 +237,7 @@ namespace
     };
 
     std::unordered_map<uint32, PassMemo> g_passMemo;     // owner guid -> memo
-    std::unordered_map<uint32, uint32> g_junkNoticeAt;   // bot guid -> unix time
+    std::unordered_map<uint32, uint32> g_junkNoticeAt;   // owner guid -> unix time
 
     // Heartbeat window state. Namespace-level rather than members of the world
     // script: the accept hook adds quests too, and a window total that ignored
@@ -263,7 +268,7 @@ namespace
         uint32 handedIn = 0;    // server-side rewards (HandInMode = 1)
         uint32 mailed = 0;      // items posted home (MailHome)
         uint32 letters = 0;     // letters sent home
-        uint32 destroyed = 0;   // items the tidy ladder destroyed (grey trash only)
+        uint32 sold = 0;        // confirmed junk stacks sold to a real merchant
         uint8 levelFrom = 0;
         uint8 levelTo = 0;
     };
@@ -311,8 +316,10 @@ namespace
     /// bot guid -> { has an unfinished ground objective, when that was last checked }
     std::map<uint32, std::pair<bool, uint32>> g_gatherPending;
 
-    /// bot guid -> when the last "posted home" letter went out
-    std::map<uint32, uint32> g_mailAt;
+    /// Owner-wide mail cooldown and explicit, per-login supply requests.
+    std::map<uint32, uint32> g_ownerDeliveryMailAt;
+    std::map<uint32, uint32> g_ownerMailPolicyAt;
+    std::map<uint32, std::set<uint32>> g_requestedSupplies;
 
     /// (bot guid, quest id) -> when the copy first became ready to hand in.
     ///
@@ -380,7 +387,7 @@ namespace
     std::map<uint32, uint32> g_lastVendorRestock;         // bot guid -> unix time of the last vendor stop
     std::unordered_map<uint32, uint32> g_commandBurst;    // owner guid -> unix time of the last command
     std::map<uint32, uint32> g_lastAutoProduce;           // bot guid -> unix time of the last quiet craft
-    std::map<uint32, uint32> g_lastAutoTrade;             // bot guid -> unix time of the last self-trade
+    std::map<uint32, uint32> g_lastAutoTrade;             // owner guid -> last automatic handoff
     /// A trade whose items wait for the window to open: the begin round-trip runs on
     /// the bot's own AI tick, and items SetItem'd before it are lost to the client -
     /// the owner saw an empty trade window while the companion insisted it had put
@@ -392,6 +399,8 @@ namespace
         std::vector<std::pair<ObjectGuid, uint32>> offer; // exact source stack and surplus count
         bool applied = false;                           // the window is filled; now guard it
         bool announceFailure = false;                  // automatic probes do not report routine deferrals
+        bool curated = false;
+        bool automatic = false;
 
         uint64 noticeId = 0;                            // identifies this offer, not a later window
         struct OfferedItem { TradeSlots slot; ObjectGuid guid; uint32 count; };
@@ -400,7 +409,9 @@ namespace
     constexpr uint32 TradeReserveCount = 5;
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
-    static std::vector<std::pair<ObjectGuid, uint32>> PlanTradeSurplus(Player* bot);
+    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery(Player* bot, Player* owner, bool curated, bool mail = false);
+    static bool DeliveryStillValid(Player* bot, Player* owner, PendingTrade const& pending);
+    static bool IsTownDeliveryStop(Player* owner, Player* bot);
     bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap = 45,
                     uint32 validWhileMissing = 0, bool handIn = false, uint64 tradeNoticeId = 0);
     static uint16 FindFreeBagPos(Player* bot, Item const* item);
@@ -571,16 +582,16 @@ namespace
         g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 2);
         g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
         g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
-        g_cfg.tidyVendorJunk     = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyVendorJunk", true);
+
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
-        g_cfg.tidySurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidySurplus", true);
+
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
         g_cfg.autoProduce        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoProduce", true);
         g_cfg.autoTrade          = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoTrade", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
-        g_cfg.itemKeepQuality    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ItemKeepQuality", 2);
+
         g_cfg.keepFreeSlots      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.KeepFreeSlots", 2);
         g_cfg.bagMargin          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.BagMargin", 8);
         g_cfg.mailHome           = sConfigMgr->GetOption<bool>("CompanionQuestSync.MailHome", true);
@@ -733,7 +744,7 @@ namespace
         for (auto itr = g_readyAt.begin(); itr != g_readyAt.end();)
             itr = (itr->first >> 32 == botGuid) ? g_readyAt.erase(itr) : std::next(itr);
 
-        g_mailAt.erase(botGuid);
+
 
         // guids are pooled, so a stale "already announced" pair would silence the next
         // companion that inherits this body
@@ -1011,21 +1022,24 @@ namespace
         if (pending.offeredItems.empty() || trade->GetMoney() || trade->GetSpell())
             return false;
 
-        std::map<uint32, uint32> totals;
+        TradeData const* receiver = trade->GetTrader()->GetTradeData();
+        if (!receiver || receiver->GetMoney() || receiver->GetSpell())
+            return false;
+        for (uint8 slot = 0; slot < TRADE_SLOT_COUNT; ++slot)
+            if (receiver->GetItem(TradeSlots(slot)))
+                return false;
+
         for (auto const& [slot, guid, count] : pending.offeredItems)
         {
             Item const* item = trade->GetItem(slot);
             if (!item || item->GetGUID() != guid || item->GetCount() != count)
                 return false;
-            totals[item->GetEntry()] += count;
+
         }
         for (uint8 slot = uint8(pending.offeredItems.size()); slot < TRADE_SLOT_COUNT; ++slot)
             if (trade->GetItem(TradeSlots(slot)))
                 return false;
-        for (auto const& [entry, offered] : totals)
-            if (bot->GetItemCount(entry, false) < offered + TradeReserveCount)
-                return false;
-        return true;
+        return DeliveryStillValid(bot, trade->GetTrader(), pending);
     }
 
     static void CancelSurplusTrade(Player* bot, Player* owner, char const* reason)
@@ -1061,7 +1075,8 @@ namespace
                 continue;
             }
 
-            if (!CanTradeSurplusNow(bot, owner))
+            if (!CanTradeSurplusNow(bot, owner) || (pending.automatic &&
+                (!IsTownDeliveryStop(owner, bot) || uint32(time(nullptr)) - pending.at >= Timing::TownOfferTimeout)))
             {
                 CancelSurplusTrade(bot, owner, nullptr);
                 itr = g_pendingTrade.erase(itr);
@@ -1073,7 +1088,8 @@ namespace
                 // A missing or replaced stack invalidates what the player was offered.
                 if (!trade->IsAccepted() || !MatchesTradeOffer(bot, trade, pending))
                 {
-                    CancelSurplusTrade(bot, owner, "My offer changed. I'll check what I can spare and try again.");
+                    CancelSurplusTrade(bot, owner, pending.announceFailure
+                        ? "My offer changed. Ask me again when you're ready." : nullptr);
                     itr = g_pendingTrade.erase(itr);
                 }
                 else
@@ -1101,7 +1117,7 @@ namespace
 
             // Recalculate the reserve before touching bags. Never substitute a stack
             // with the same item entry: it may already be offered or held in reserve.
-            if (PlanTradeSurplus(bot) != pending.offer)
+            if (PlanDelivery(bot, owner, pending.curated) != pending.offer)
             {
                 CancelSurplusTrade(bot, owner, nullptr);
                 itr = g_pendingTrade.erase(itr);
@@ -1140,8 +1156,9 @@ namespace
             {
                 pending.applied = true;
                 trade->SetAccepted(true);
-                SayToOwner(bot, owner, "I put " + std::to_string(offered) +
-                           " stack(s) in the trade - take them, they are yours.", 30, 0, false, pending.noticeId);
+                if (pending.announceFailure)
+                    SayToOwner(bot, owner, "I put " + std::to_string(offered) +
+                               " stack(s) in the trade - take them, they are yours.", 30, 0, false, pending.noticeId);
                 ++itr;                            // the record stays: the guard is live now
             }
             else
@@ -3326,58 +3343,9 @@ namespace
         return 0;
     }
 
-    /// Open a trade with the owner and fill it with the surplus above the keep-five
-    /// reserve: every gathered mat and produced item, biggest stacks first, six slots.
-    static std::vector<std::pair<ObjectGuid, uint32>> PlanTradeSurplus(Player* bot)
-    {
-        auto const pair = ClassProfessionPair(bot->getClass());
+#include "CuratedDelivery.inc"
 
-        // five of every produced item and gathered mat stays in its own bags - the
-        // reserve is consumed across every stack of the same item, not per stack
-        std::map<uint32, uint32> keepLeft;
-        for (CraftLane const& lane : CraftLanes(pair.second))
-            for (CraftRecipe const& recipe : lane.recipes)
-                keepLeft[recipe.product] = TradeReserveCount;
-        for (uint32 const id : GatheredReagentsOf(pair.first))
-            keepLeft[id] = TradeReserveCount;
-
-        std::vector<std::pair<ObjectGuid, uint32>> offers;
-
-        auto consider = [&](Item* item)
-        {
-            if (!item || !item->CanBeTraded())
-                return;
-
-            auto const kept = keepLeft.find(item->GetEntry());
-            if (kept == keepLeft.end())
-                return;                                       // never its gear, quest items or food
-
-            uint32 const count = item->GetCount();
-            uint32 const spare = count > kept->second ? count - kept->second : 0;
-            kept->second -= std::min(count, kept->second);
-            if (!spare)
-                return;
-
-            if (spare == count || FindFreeBagPos(bot, item))
-                offers.emplace_back(item->GetGUID(), spare);
-        };
-
-        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-
-        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i))
-                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                    consider(bot->GetItemByPos(i, j));
-
-        std::stable_sort(offers.begin(), offers.end(),
-                  [](auto const& a, auto const& b) { return a.second > b.second; });
-        if (offers.size() > TRADE_SLOT_TRADED_COUNT)
-            offers.resize(TRADE_SLOT_TRADED_COUNT);
-        return offers;
-    }
-
-    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce)
+    static uint32 OpenTradeSurplus(Player* bot, Player* owner, bool announce, bool curated)
     {
 #ifndef AC_TRADE_OFFER_GUARD
         if (announce)
@@ -3387,7 +3355,7 @@ namespace
         if (!CanTradeSurplusNow(bot, owner) || bot->GetTradeData() || owner->GetTradeData())
             return 0;
 
-        auto offers = PlanTradeSurplus(bot);
+        auto offers = PlanDelivery(bot, owner, curated);
 
         if (offers.empty())
         {
@@ -3419,6 +3387,8 @@ namespace
         pending.at = uint32(time(nullptr));
         pending.noticeId = ++g_nextTradeNoticeId;
         pending.announceFailure = announce;
+        pending.curated = curated;
+        pending.automatic = !announce;
         pending.offer = std::move(offers);
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
@@ -3429,7 +3399,10 @@ namespace
             return it != g_pendingTrade.end() && it->second.noticeId == noticeId && it->second.applied &&
                    source->GetGUID().GetCounter() == botGuid &&
                    target->GetGUID().GetCounter() == it->second.ownerGuid &&
-                   CanTradeSurplusNow(source, target) && MatchesTradeOffer(source, trade, it->second);
+                   CanTradeSurplusNow(source, target) &&
+                   (!it->second.automatic || (IsTownDeliveryStop(target, source) &&
+                    uint32(time(nullptr)) - it->second.at < Timing::TownOfferTimeout)) &&
+                   MatchesTradeOffer(source, trade, it->second);
         });
 
         return uint32(pending.offer.size());
@@ -4587,37 +4560,67 @@ namespace
     /// The step to the giver stays, as the visual: the companion is seen walking up and
     /// handing in. But a failed step can no longer block the reward - the world may not
     /// agree where the NPC is, and the quest still completes.
-    void TrySellJunk(Player* owner, Player* bot)
+    bool CanManageBags(Player* owner, Player* bot)
     {
-        if (!g_cfg.sellJunk)
-            return;
+        return owner && bot && owner->IsInWorld() && bot->IsInWorld() &&
+               owner->IsAlive() && bot->IsAlive() && bot->GetSession() &&
+               !owner->IsInCombat() && !bot->IsInCombat() &&
+               !owner->GetTradeData() && !bot->GetTradeData() &&
+               !g_pendingTrade.count(bot->GetGUID().GetCounter());
+    }
 
-        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
-            return;
-
-        uint32 const botGuid = bot->GetGUID().GetCounter();
-        uint32 const now = static_cast<uint32>(time(nullptr));
-        uint32& last = g_sellAt[botGuid];
+    uint32 SellManagedJunk(Player* owner, Player* bot)
+    {
+        if (!g_cfg.sellJunk || !CanManageBags(owner, bot) || bot->isMoving())
+            return 0;
+        uint32 const now = uint32(time(nullptr));
+        uint32& last = g_sellAt[bot->GetGUID().GetCounter()];
         if (last && now - last < Timing::SellJunk)
-            return;
-
+            return 0;
+        std::list<Unit*> units;
+        Acore::AnyUnitInObjectRangeCheck check(bot, INTERACTION_DISTANCE);
+        Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+        Cell::VisitObjects(bot, searcher, INTERACTION_DISTANCE);
+        Creature* vendor = nullptr;
+        for (Unit* unit : units)
+            if ((vendor = bot->GetNPCIfCanInteractWith(unit->GetGUID(), UNIT_NPC_FLAG_VENDOR)) &&
+                !vendor->HasFlagsExtra(CREATURE_FLAG_EXTRA_NO_SELL_VENDOR))
+                break;
+            else
+                vendor = nullptr;
+        if (!vendor)
+            return 0;
         last = now;
 
-        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
-        if (!ai)
+        uint32 sold = 0;
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || proto->Quality != ITEM_QUALITY_POOR || !proto->SellPrice ||
+                item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+                return;
+#ifdef MOD_PLAYERBOTS
+            PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+            if (!ai || ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", proto->ItemId)->Get() != ITEM_USAGE_VENDOR)
+                return;
+#else
             return;
-
-        // Before anything is destroyed: wear the upgrades. A full bag of gear it could
-        // simply put on is the most common jam, and equipping frees the slot outright.
-        ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
-
-        // The same command the owner could whisper; it queues onto the bot's own
-        // thread, so calling it from the world tick is safe.
-        ai->HandleCommand(CHAT_MSG_WHISPER, "s vendor", owner);
-
-        if (g_cfg.debug >= 2)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} asked to sell vendor trash ({} free slot(s))",
-                     bot->GetName(), bot->GetFreeInventorySpace());
+#endif
+            auto const guid = item->GetGUID();
+            uint16 const pos = item->GetPos();
+            WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
+            request.VendorGuid = vendor->GetGUID();
+            request.ItemGuid = guid;
+            bot->GetSession()->HandleSellItemOpcode(request);
+            Item* remaining = bot->GetItemByPos(pos);
+            if (!remaining || remaining->GetGUID() != guid)
+                ++sold;
+        });
+        if (sold && g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} confirmed junk stack(s) to {}", bot->GetName(), sold, vendor->GetName());
+        if (sold)
+            g_session[owner->GetGUID().GetCounter()].sold += sold;
+        return sold;
     }
 
     /// Wear upgrades even when the bags are not full.
@@ -4650,26 +4653,28 @@ namespace
     std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
     uint32 TidyInventory(Player* owner, Player* bot);   // defined below, used by the accept path
 
-    /// Post the keep-worthy overflow home instead of binning it. Whites that the tidy
-    /// ladder would destroy and greens the ladder spares both go to the owner: nothing
-    /// with value is lost, the vendor decision stays with the player, and the letter
-    /// works anywhere - unlike "s vendor", which needs a vendor in range.
-    uint32 MailHome(Player* owner, Player* bot, std::vector<Item*>& items)
+    /// Send only stacks already approved by the delivery policy at a mailbox.
+    uint32 MailHome(Player* owner, Player* bot, ObjectGuid mailbox, std::vector<Item*>& items)
     {
         if (items.empty())
             return 0;
 
-        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-
         // The body lists what is inside: a letter worth opening is the point.
-        std::string body = "Loot I could not carry - yours to keep, sell or wear as you like:\n";
+        std::string body = "I set these aside for you:\n";
         for (Item* item : items)
         {
             if (ItemTemplate const* proto = item->GetTemplate())
                 body += "- " + std::string(proto->Name1) + " x" + std::to_string(item->GetCount()) + "\n";
         }
 
-        MailDraft draft(std::string("From ") + bot->GetName(), body);
+        std::string subject = std::string("Companion delivery: ") + bot->GetName();
+        for (Item* item : items)
+            if (!sScriptMgr->OnPlayerCanSendMail(bot, owner->GetGUID(), mailbox, subject, body, 0, 0, item))
+                return 0;
+
+        // Keep the identity prefix server-owned even if another module rewrites subjects.
+        MailDraft draft(std::string("Companion delivery: ") + bot->GetName(), body);
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
 
         uint32 mailed = 0;
         for (Item* item : items)
@@ -4687,8 +4692,10 @@ namespace
             ++mailed;
         }
 
-        draft.SendMailTo(trans, MailReceiver(owner->GetGUID().GetCounter()),
-                         MailSender(MAIL_NORMAL, bot->GetGUID().GetCounter()),
+        // Same-character normal mail cannot be authored by a client. Route any
+        // standard expiry/return to the recipient, never to a recyclable bot.
+        draft.SendMailTo(trans, MailReceiver(owner),
+                         MailSender(MAIL_NORMAL, owner->GetGUID().GetCounter()),
                          MAIL_CHECK_MASK_HAS_BODY);
         CharacterDatabase.CommitTransaction(trans);
 
@@ -4703,20 +4710,62 @@ namespace
 
         return mailed;
     }
-    /// The companion bins grey loot when its bags are full - say so, once per
-    /// couple of minutes, so nothing appears to vanish unexplained.
-    void NotifyJunk(Player* owner, Player* bot, uint32 count)
+    ObjectGuid MailboxNearby(Player* bot)
     {
-        if (!count)
-            return;
+        std::list<GameObject*> objects;
+        Acore::GameObjectInRangeCheck check(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), INTERACTION_DISTANCE);
+        Acore::GameObjectListSearcher<Acore::GameObjectInRangeCheck> searcher(bot, objects, check);
+        Cell::VisitObjects(bot, searcher, INTERACTION_DISTANCE);
+        for (GameObject* object : objects)
+            if (object->GetGoType() == GAMEOBJECT_TYPE_MAILBOX &&
+                bot->GetGameObjectIfCanInteractWith(object->GetGUID(), GAMEOBJECT_TYPE_MAILBOX))
+                return object->GetGUID();
+        return ObjectGuid::Empty;
+    }
 
-        uint32 const now = static_cast<uint32>(time(nullptr));
-        uint32& last = g_junkNoticeAt[bot->GetGUID().GetCounter()];
-        if (last && now - last < Timing::JunkNotice)
+    void TryCuratedMail(Player* owner, Player* bot)
+    {
+        if (!g_cfg.mailHome || !CanManageBags(owner, bot) || owner->isMoving() || bot->isMoving())
             return;
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        uint32 const now = uint32(time(nullptr));
+        uint32& lastMail = g_ownerDeliveryMailAt[ownerGuid];
+        if ((lastMail && now - lastMail < Timing::MailHome) || owner->GetMailSize() >= 90)
+            return;
+#ifdef AC_TRADE_OFFER_GUARD
+        uint32 const lastOffer = g_lastAutoTrade[ownerGuid];
+        if (g_cfg.autoTrade && ((!lastOffer && CanOfferTownDelivery(owner, bot)) || (lastOffer && now - lastOffer < Timing::MailAfterOffer)))
+            return;
+#endif
+        ObjectGuid const mailbox = MailboxNearby(bot);
+        if (!mailbox)
+            return;
+        for (Mail const* mail : owner->GetMails())
+            if (mail->state != MAIL_STATE_DELETED && mail->messageType == MAIL_NORMAL &&
+                mail->sender == ownerGuid && mail->receiver == ownerGuid &&
+                mail->subject.rfind("Companion delivery: ", 0) == 0 && !mail->items.empty())
+                return;
 
-        last = now;
-        SayToOwner(bot, owner, "I cleared some junk out of my bags to make room - nothing worth keeping.", 120);
+        std::vector<Item*> attachments;
+        for (auto const& [guid, quantity] : PlanDelivery(bot, owner, true, /*mail=*/true))
+        {
+            Item* item = bot->GetItemByGuid(guid);
+            if (item && item->CanBeTraded(true) && !item->IsSoulBound() && !item->IsRefundable() && item->GetCount() == quantity)
+                attachments.push_back(item); // no bag splits just to create mail
+            if (attachments.size() == 3)
+                break;
+        }
+        if (attachments.empty())
+            return;
+        uint32& lastPolicyCheck = g_ownerMailPolicyAt[ownerGuid];
+        if (lastPolicyCheck && now - lastPolicyCheck < Timing::MailAfterOffer)
+            return;
+        lastPolicyCheck = now;
+        if (MailHome(owner, bot, mailbox, attachments))
+        {
+            lastMail = now;
+            SayToOwner(bot, owner, "I left a parcel of upgrades or supplies for you. Pick it up at the mailbox when we stop.", 120);
+        }
     }
 
     /// Credit the companion for prerequisites its owner already finished.
@@ -5040,252 +5089,12 @@ namespace
         }
     }
 
-    /// Free bag space on a companion.
-    ///
-    /// Nothing in this fork does it for them: mod-playerbots' sell/repair
-    /// "errands" are not part of a companion's strategy set, and the core has no
-    /// sell API at module level (selling exists only as HandleSellItemOpcode -,
-    /// a vendor interaction plus a packet). So the safe satellite behaviour is to
-    /// destroy genuine junk: Poor quality only, never a quest item, never a quest
-    /// starter, never an item one of the companion's own live quests still wants.
-    /// Returns how many stacks were destroyed.
+    /// Quest pickup may retry after a real vendor sale, never after deletion or mail.
     uint32 TidyInventory(Player* owner, Player* bot)
     {
-        if (!g_cfg.tidyInventory)
+        if (!g_cfg.tidyInventory || bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots + g_cfg.bagMargin)
             return 0;
-
-        // Soft margin: act while there are still a few slots left, not at the wall. A
-        // companion that tidies at zero free slots destroys in a panic; one that tidies
-        // at the margin mails a letter and carries on.
-        if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots + g_cfg.bagMargin)
-            return 0;
-
-        // Item ids the companion's own live quests need: never destroy these.
-        std::set<uint32> wanted;
-        for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
-        {
-            uint32 const questId = bot->GetQuestSlotQuestId(slot);
-            Quest const* quest = questId ? sObjectMgr->GetQuestTemplate(questId) : nullptr;
-            if (!quest)
-                continue;
-
-            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
-                if (quest->RequiredItemId[i])
-                    wanted.insert(quest->RequiredItemId[i]);
-        }
-
-        // Cheapest first: when something has to go, go by vendor value, so the
-        // least valuable junk disappears instead of whatever sat in the first bag
-        // slot.
-        std::vector<std::pair<uint32, uint32>> victims;   // (sell price, item id)
-        std::vector<Item*> postHome;                      // white-tier, goes to the owner
-        std::set<Item*> posted;                           // one pointer, one letter: the three
-                                                          // passes below walk the same slots, and
-                                                          // a white trade good qualifies in all of
-                                                          // them - moving the same Item* twice is
-                                                          // how mail corrupts and worlds crash
-        auto offerPost = [&posted, &postHome](Item* item)
-        {
-            if (postHome.size() >= 12)
-                return;
-
-            if (posted.insert(item).second)
-                postHome.push_back(item);
-        };
-        auto consider = [&wanted, &victims, &postHome, &offerPost](Item* item)
-        {
-            if (!item)
-                return;
-
-            ItemTemplate const* proto = item->GetTemplate();
-            if (!proto || !proto->ItemId)
-                return;
-
-            // Never a container: a bag in the backpack looks like a disposable white item
-            // and destroying one costs more slots than it frees.
-            if (proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->StartQuest)
-                return;                                  // quest item / quest starter
-            if (wanted.count(proto->ItemId))
-                return;                                  // a live quest still needs it
-
-            // Everything below the keep-quality line goes home in a letter - whites
-            // and greys alike, the player can vendor a grey for more than its slot is
-            // worth. Only what a full letter cannot carry (the 12-item cap) falls
-            // through, and a grey's slot is worth more than its copper, so the cap's
-            // greys join the destroy ladder while the cap's whites wait for the next
-            // letter.
-            if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_POOR &&
-                proto->Bonding != BIND_WHEN_PICKED_UP)
-            {
-                if (postHome.size() < 12)                // the mail slot limit
-                    offerPost(item);
-                else if (proto->Quality < g_cfg.itemKeepQuality)
-                    victims.emplace_back(proto->SellPrice, proto->ItemId);
-                return;
-            }
-
-            // The keep-quality rule: at or above it, the item is safe. Default green, so
-            // greys are disposable. This is the knob that stops "inventory is full" being
-            // permanent - a companion that can never shed an item has no way out of a
-            // full bag on its own.
-            if (proto->Quality >= g_cfg.itemKeepQuality)
-                return;
-
-            victims.emplace_back(proto->SellPrice, proto->ItemId);
-        };
-
-        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-
-        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-            if (Bag* bag = bot->GetBagByPos(i))
-                for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                    consider(bot->GetItemByPos(i, j));
-
-        // Nothing but white gear left? Down at the wall the companion cannot
-        // pick up a quest item at all - it cannot even loot the Gold Dust it owes -
-        // which is worse than losing a few copper of vendor trash. Ask playerbots
-        // what it would vendor and bin exactly that; nothing it rates EQUIP,
-        // QUEST, SKILL, DISENCHANT or AH is touched.
-        if (g_cfg.tidyVendorJunk && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots + g_cfg.bagMargin)
-        {
-            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-            {
-                auto considerVendorJunk = [&wanted, &victims, &postHome, &offerPost, ai](Item* item)
-                {
-                    if (!item)
-                        return;
-
-                    ItemTemplate const* proto = item->GetTemplate();
-                    if (!proto || !proto->ItemId)
-                        return;
-
-                    if (proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->StartQuest)
-                        return;
-                    if (wanted.count(proto->ItemId))
-                        return;
-                    if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
-                        proto->Bonding != BIND_WHEN_PICKED_UP)
-                    {
-                        if (postHome.size() < 12)
-                            offerPost(item);
-                        return;
-                    }
-                    if (proto->Quality >= g_cfg.itemKeepQuality)
-                        return;                       // green and better are never binned
-
-                    ItemUsage const usage = ai->GetAiObjectContext()
-                                               ->GetValue<ItemUsage>("item usage", proto->ItemId)
-                                               ->Get();
-                    if (usage != ITEM_USAGE_VENDOR)
-                        return;
-
-                    victims.emplace_back(proto->SellPrice, proto->ItemId);
-                };
-
-                for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-                    considerVendorJunk(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-
-                for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-                    if (Bag* bag = bot->GetBagByPos(i))
-                        for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                            considerVendorJunk(bot->GetItemByPos(i, j));
-            }
-        }
-
-        // Still wedged? Spare consumables and materials are worth a few copper each and
-        // the companion does not craft - down at the wall one of them is worth more as
-        // an empty slot than as an item. Cheapest first, surplus stacks only, and never
-        // the hearthstone, gear or anything a quest needs.
-        if (g_cfg.tidySurplus && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots + g_cfg.bagMargin)
-        {
-            auto considerSurplus = [&wanted, &victims, &postHome, &offerPost](Item* item)
-            {
-                if (!item)
-                    return;
-
-                ItemTemplate const* proto = item->GetTemplate();
-                if (!proto || !proto->ItemId)
-                    return;
-
-                if (proto->Class != ITEM_CLASS_CONSUMABLE &&
-                    proto->Class != ITEM_CLASS_TRADE_GOODS &&
-                    proto->Class != ITEM_CLASS_RECIPE)
-                    return;
-
-                if (proto->StartQuest || wanted.count(proto->ItemId))
-                    return;
-
-                if (g_cfg.mailHome && proto->Quality >= ITEM_QUALITY_NORMAL &&
-                    proto->Bonding != BIND_WHEN_PICKED_UP)
-                {
-                    if (postHome.size() < 12)
-                        offerPost(item);
-                    return;
-                }
-
-                if (proto->Quality >= g_cfg.itemKeepQuality)
-                    return;
-
-                if (item->GetCount() < 2 && proto->Class != ITEM_CLASS_RECIPE)
-                    return;                       // keep the last of anything useful
-
-                victims.emplace_back(proto->SellPrice, proto->ItemId);
-            };
-
-            for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-                considerSurplus(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-
-            for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-                if (Bag* bag = bot->GetBagByPos(i))
-                    for (uint8 j = 0; j < bag->GetBagSize(); ++j)
-                        considerSurplus(bot->GetItemByPos(i, j));
-        }
-
-        std::sort(victims.begin(), victims.end(),
-                  [](std::pair<uint32, uint32> const& a, std::pair<uint32, uint32> const& b)
-                  { return a.first < b.first; });
-
-        // The letter goes first and often enough to matter: posting home frees the same
-        // slots destroying would, and the cooldown keeps the mailbox from filling with
-        // one letter per pass.
-        if (!postHome.empty() && owner)
-        {
-            uint32& lastAt = g_mailAt[bot->GetGUID().GetCounter()];
-            uint32 const nowTs = static_cast<uint32>(time(nullptr));
-
-            if (!lastAt || nowTs - lastAt >= Timing::MailHome)
-            {
-                MailHome(owner, bot, postHome);
-                lastAt = nowTs;
-
-                SayToOwner(bot, owner,
-                           "I posted what I could not carry home to you - the letter is in your mailbox.");
-            }
-        }
-
-        uint32 destroyed = 0;
-        for (auto const& victim : victims)
-        {
-            if (bot->GetFreeInventorySpace() >= g_cfg.keepFreeSlots)
-                break;
-
-            uint32 const entry = victim.second;
-            uint32 const count = bot->GetItemCount(entry);
-            if (!count)
-                continue;
-
-            bot->DestroyItemCount(entry, count, true);
-            ++destroyed;
-            if (owner)
-                g_session[owner->GetGUID().GetCounter()].destroyed += count;
-
-            if (g_cfg.debug >= 1)
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} destroyed {}x item {} to free bag space",
-                         bot->GetName(), count, entry);
-        }
-
-        return destroyed;
+        return SellManagedJunk(owner, bot);
     }
 
     /// Resolve the owner's companion and check it is a live bot we may touch.
@@ -5664,12 +5473,13 @@ namespace
         CatchUpGatherSkill(owner, bot);
         // Learn new supported recipes when attained skill rises, without a button.
         TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);
-        RestockNearVendor(owner, bot);   // near a trade or repair NPC: restock, mend, quietly
+        if (CanManageBags(owner, bot))
+            RestockNearVendor(owner, bot);
         // crafting is the companion's own habit, not a request: every few minutes it
         // turns what its gathering paid for into the useful thing, silently - the
-        // products land in bags, get used in play, and the overflow rides MailHome.
+        // products land in bags; curated surplus may be delivered later.
         // The Produce button stays for the moment the report itself is wanted.
-        if (g_cfg.autoProduce && !bot->IsInCombat() && !owner->IsInCombat() && !bot->GetTradeData())
+        if (g_cfg.autoProduce && CanManageBags(owner, bot))
         {
             uint32& lastAuto = g_lastAutoProduce[botGuid];
             uint32 const now = uint32(time(nullptr));
@@ -5679,19 +5489,31 @@ namespace
                 ProduceForCompanion(bot);
             }
         }
-        // and the hand-over happens on its own too: beside you with something spare,
-        // the companion opens the trade itself - mail stays the fallback for what
-        // cannot wait for a moment together
-        if (g_cfg.autoTrade && CanTradeSurplusNow(bot, owner))
+        if (CanManageBags(owner, bot))
         {
-            uint32& lastAutoTrade = g_lastAutoTrade[botGuid];
+            TryEquipUpgrades(owner, bot);
+            SellManagedJunk(owner, bot);
+            TryCuratedMail(owner, bot);
+            if (g_cfg.tidyInventory && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots)
+            {
+                uint32& lastWarning = g_junkNoticeAt[owner->GetGUID().GetCounter()];
+                uint32 const now = uint32(time(nullptr));
+                if (!lastWarning || now - lastWarning >= Timing::JunkNotice)
+                {
+                    lastWarning = now;
+                    SayToOwner(bot, owner, "My bags are nearly full. I'll sell what I can at the next merchant; ask me for a trade if you need to make room now.", 120);
+                }
+            }
+        }
+        if (g_cfg.autoTrade && CanOfferTownDelivery(owner, bot))
+        {
+            uint32& lastAutoTrade = g_lastAutoTrade[owner->GetGUID().GetCounter()];
             uint32 const now2 = uint32(time(nullptr));
-            if ((!lastAutoTrade || now2 - lastAutoTrade >= 180) &&
-                bot->GetDistance(owner) <= 11.0f && !bot->GetTrader() && !owner->GetTradeData())
+            if ((!lastAutoTrade || now2 - lastAutoTrade >= Timing::TradeDelivery) &&
+                !PlanDelivery(bot, owner, true).empty())
             {
                 lastAutoTrade = now2;
-                if (!OpenTradeSurplus(bot, owner, /*announce=*/false))
-                    lastAutoTrade = 0;      // nothing spare: re-check next pass, silently
+                OpenTradeSurplus(bot, owner, /*announce=*/false, /*curated=*/true);
             }
         }
 #endif
@@ -5708,12 +5530,7 @@ namespace
         if (!inCombat)
             AlignLevel(owner, bot, report);
 
-        // Keep a couple of slots free so quest items can be picked up and
-        // quest source items stored, instead of discovering the shortage only
-        // when an accept is refused.
-        TryEquipUpgrades(owner, bot);                  // better gear goes on as it arrives
-        TrySellJunk(owner, bot);                       // earn coin first
-        NotifyJunk(owner, bot, TidyInventory(owner, bot));    // mail home, then destroy only what is left
+
 
         // A level change is the one thing here that other modules react to
         // (mod-playerbots re-evaluates spells/gear, mod-wowlegends' path rules
@@ -8490,6 +8307,7 @@ public:
             { "professions", HandleProfessionsCommand, SEC_PLAYER, Console::No },
             { "produce", HandleProduceCommand, SEC_PLAYER, Console::No },
             { "trade", HandleTradeCommand, SEC_PLAYER, Console::No },
+            { "delivery", HandleDeliveryCommand, SEC_PLAYER, Console::No },
             { "revive", HandleReviveCommand, SEC_PLAYER, Console::No },
             { "dismiss", HandleDismissCommand, SEC_PLAYER, Console::No },
             { "bind",   HandleBindCommand,   SEC_PLAYER, Console::No },
@@ -9042,6 +8860,79 @@ public:
     /// first, six slots (the trade window's own limit). The owner accepts; the bot's
     /// accept-trade trigger answers on its side. Nothing else in its bags - gear, quest
     /// items, food - is ever offered.
+    static bool HandleDeliveryCommand(ChatHandler* handler, char const* args)
+    {
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player || !g_cfg.enable)
+            return false;
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        std::vector<uint32> bound;
+        if (!FindCompanions(ownerGuid, bound))
+        {
+            handler->SendSysMessage("No companions bound.");
+            return true;
+        }
+        std::string const text = TrimArg(args);
+        if (text == "clear")
+        {
+            g_requestedSupplies.erase(ownerGuid);
+            handler->SendSysMessage("Companion supply requests cleared.");
+            return true;
+        }
+        if (text.rfind("request ", 0) == 0)
+        {
+            std::string const value = text.substr(8);
+            uint32 entry = 0;
+            auto const parsed = std::from_chars(value.data(), value.data() + value.size(), entry);
+            ItemTemplate const* item = parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()
+                ? sObjectMgr->GetItemTemplate(entry) : nullptr;
+            bool supported = false;
+            if (item && item->Class == ITEM_CLASS_CONSUMABLE && player->CanUseItem(item) == EQUIP_ERR_OK)
+                for (uint32 guid : bound)
+                    if (Player* bot = FindCompanionPlayer(guid))
+                        supported = supported || IsCraftedSupply(ClassProfessionPair(bot->getClass()).second, entry);
+            if (!supported)
+            {
+                handler->SendSysMessage("Use an item ID for a consumable you can use that one of your summoned companions can make.");
+                return true;
+            }
+            g_requestedSupplies[ownerGuid].insert(entry);
+            handler->PSendSysMessage("Your companions will set aside spare {} for this login, up to five including what you already have.", item->Name1);
+            return true;
+        }
+        if (text.rfind("collect ", 0) == 0)
+        {
+            uint32 const guid = ResolveCompanion(player, text.substr(8), bound);
+            Player* bot = guid ? FindCompanionPlayer(guid) : nullptr;
+            if (!bot || !CanTradeSurplusNow(bot, player) || bot->GetTradeData() || player->GetTradeData())
+                handler->SendSysMessage("Stand beside a summoned companion when both of you are out of combat and not trading.");
+            else
+                OpenTradeSurplus(bot, player, /*announce=*/true, /*curated=*/true);
+            return true;
+        }
+        if (!text.empty() && text != "preview")
+        {
+            handler->SendSysMessage("Usage: .companionsync delivery [preview|collect <name>|request <item ID>|clear]");
+            return true;
+        }
+        bool found = false;
+        for (uint32 guid : bound)
+        {
+            Player* bot = FindCompanionPlayer(guid);
+            if (!bot || !bot->IsInWorld())
+                continue;
+            for (auto const& [stack, quantity] : PlanDelivery(bot, player, true))
+                if (Item* item = bot->GetItemByGuid(stack))
+                {
+                    found = true;
+                    handler->PSendSysMessage("{}: {} x{} ready for handoff.", bot->GetName(), item->GetTemplate()->Name1, quantity);
+                }
+        }
+        if (!found)
+            handler->SendSysMessage("No clear armor upgrades or requested spare supplies are ready.");
+        return true;
+    }
+
     static bool HandleTradeCommand(ChatHandler* handler, char const* args)
     {
         MarkCommandBurst(handler);
@@ -9102,7 +8993,7 @@ public:
             return true;
         }
 
-        OpenTradeSurplus(bot, player, /*announce=*/true);
+        OpenTradeSurplus(bot, player, /*announce=*/true, /*curated=*/false);
 #endif
 
         return true;
@@ -9113,7 +9004,7 @@ public:
     /// One click makes the companion work its own gathering: smelt its ore, cut its
     /// stones, brew what its herbs are for. Shop-bought reagents are granted in small
     /// stacks (the module standing in for the shopping trip); gathered reagents are
-    /// waited for. Products are used in play and the overflow rides MailHome.
+    /// waited for. Products are used in play and requested surplus can be delivered.
     static bool HandleProduceCommand(ChatHandler* handler, char const* args)
     {
         MarkCommandBurst(handler);
@@ -9792,12 +9683,12 @@ public:
         {
             SessionTally const& tally = last->second;
             if (tally.added + tally.onAccept + tally.completed + tally.handedIn +
-                tally.gathered + tally.mailed + tally.destroyed > 0)
+                tally.gathered + tally.mailed + tally.sold > 0)
             {
-                handler->PSendSysMessage("|cff20ff20Session|r: {} quest(s) accepted, {} completed ({} handed in), {} item(s) gathered, {} posted home in {} letter(s), {} grey item(s) binned.",
+                handler->PSendSysMessage("|cff20ff20Session|r: {} quest(s) accepted, {} completed ({} handed in), {} item(s) gathered, {} posted home in {} letter(s), {} junk stack(s) sold.",
                                          tally.added + tally.onAccept,
                                          tally.completed + tally.handedIn, tally.handedIn,
-                                         tally.gathered, tally.mailed, tally.letters, tally.destroyed);
+                                         tally.gathered, tally.mailed, tally.letters, tally.sold);
             }
         }
 
@@ -10129,6 +10020,11 @@ public:
         g_pinSyncAt.erase(ownerGuid);
         g_pinRevisions.erase(ownerGuid);
         g_pinRequestAt.erase(ownerGuid);
+        g_requestedSupplies.erase(ownerGuid);
+        g_ownerDeliveryMailAt.erase(ownerGuid);
+        g_ownerMailPolicyAt.erase(ownerGuid);
+        g_lastAutoTrade.erase(ownerGuid);
+        g_junkNoticeAt.erase(ownerGuid);
 
         g_sessionRefused.erase(ownerGuid);
         g_whisperQueue.erase(ownerGuid);
@@ -10151,7 +10047,7 @@ public:
         g_session.erase(itr);
 
         if (!tally.added && !tally.onAccept && !tally.completed && !tally.refused && !tally.reopened &&
-            !tally.gathered && !tally.handedIn && !tally.mailed && !tally.destroyed && !tally.levelFrom)
+            !tally.gathered && !tally.handedIn && !tally.mailed && !tally.sold && !tally.levelFrom)
             return;
 
         std::string level;
@@ -10169,8 +10065,8 @@ public:
         if (tally.letters)
             summary += ", " + std::to_string(tally.mailed) + " item(s) posted home in " +
                        std::to_string(tally.letters) + " letter(s)";
-        if (tally.destroyed)
-            summary += ", " + std::to_string(tally.destroyed) + " grey item(s) binned";
+        if (tally.sold)
+            summary += ", " + std::to_string(tally.sold) + " junk stack(s) sold";
         if (level.size())
             summary += level;
 
@@ -10180,9 +10076,9 @@ public:
             ownerGuid, summary, static_cast<uint32>(time(nullptr)));
 
         LOG_INFO("server.loading",
-                 "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground, {} handed in, {} mailed ({} letter(s)), {} destroyed{}",
+                 "[CompanionQuestSync] session: {} - {} quest(s) added ({} on accept), {} completed, {} reopened, {} refused, {} item(s) gathered off the ground, {} handed in, {} mailed ({} letter(s)), {} junk stack(s) sold{}",
                  player->GetName(), tally.added + tally.onAccept, tally.onAccept, tally.completed, tally.reopened,
-                 tally.refused, tally.gathered, tally.handedIn, tally.mailed, tally.letters, tally.destroyed, level);
+                 tally.refused, tally.gathered, tally.handedIn, tally.mailed, tally.letters, tally.sold, level);
     }
     /// Instant mirror: the moment a real player accepts a quest, hand it to the
     /// companion. The 20 s sweep stays as the safety net (logins, level gates,

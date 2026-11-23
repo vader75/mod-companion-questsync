@@ -4,7 +4,8 @@ from pathlib import Path
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'src/mod_companion_questsync.cpp').read_text(encoding='utf-8')
 FILL = SOURCE.split('void ApplyPendingTrades()', 1)[1].split('/// Bring companions', 1)[0]
-PLAN = SOURCE.split('static std::vector<std::pair<ObjectGuid, uint32>> PlanTradeSurplus(Player* bot)\n', 1)[1].split('/// A vendor', 1)[0]
+POLICY = (Path(__file__).resolve().parents[1] / 'src/CuratedDelivery.inc').read_text(encoding='utf-8')
+PLAN = POLICY.split(' PlanDelivery(', 1)[1].split('static bool DeliveryStillValid', 1)[0]
 
 
 class TradeSafetyContract(unittest.TestCase):
@@ -23,7 +24,7 @@ class TradeSafetyContract(unittest.TestCase):
 
     def test_empty_or_invalid_trade_closes_and_automatic_no_op_is_quiet(self):
         self.assertIn('CancelSurplusTrade(bot, owner', FILL)
-        self.assertIn('OpenTradeSurplus(bot, owner, /*announce=*/false)', SOURCE)
+        self.assertIn('OpenTradeSurplus(bot, owner, /*announce=*/false, /*curated=*/true)', SOURCE)
 
     def test_sweep_does_not_touch_replacement_window(self):
         self.assertIn('trade->GetOfferToken() != pending.noticeId', FILL)
@@ -35,10 +36,10 @@ class TradeSafetyContract(unittest.TestCase):
         self.assertIn('CancelSurplusTrade(bot, owner', occupied.split('g_pendingTrade.erase(itr)', 1)[0])
 
     def test_accept_guard_requires_exact_counts_and_preserves_reserve(self):
-        self.assertIn('td->SetOfferGuard(noticeId', PLAN)
+        self.assertIn('td->SetOfferGuard(noticeId', SOURCE)
         self.assertIn('MatchesTradeOffer(bot, trade, pending)', SOURCE)
         self.assertIn('item->GetCount() != count', SOURCE)
-        self.assertIn('bot->GetItemCount(entry, false) < offered + TradeReserveCount', SOURCE)
+        self.assertIn('bot->GetItemCount(entry, false) < count + rule.reserve', POLICY)
 
     def test_split_checks_bag_compatibility_and_failure_retains_cooldown(self):
         self.assertIn('ItemCanGoIntoBag(item->GetTemplate(), bag->GetTemplate())', SOURCE)

@@ -251,19 +251,14 @@ CompanionQuestSync.RespectLegacyBindings = 1
 CompanionQuestSync.NotifySkippedQuests = 2
 CompanionQuestSync.TidyInventory = 1
 #    CompanionQuestSync.MailHome
-#        Description: When the bags run tight, white-and-better items the companion cannot
-#                     use are posted to the owner instead of destroyed. The player keeps the
-#                     loot and the vendor decision; the destroy ladder is then left only with
-#                     true grey trash. Works anywhere - it does not need a vendor in range.
-#        Default:     1 - post home; 0 = destroy whites like the rest
+#        At a reachable mailbox, send a small parcel of clear armor upgrades or
+#        requested supplies. Never sends general overflow. 0 = no automatic mail.
 CompanionQuestSync.MailHome = 1
 CompanionQuestSync.KeepFreeSlots = 2
-# The tidy ladder starts this many slots before the wall (see KeepFreeSlots)
+# Try an eligible merchant sale when a quest pickup needs bag space.
 CompanionQuestSync.BagMargin = 8
 CompanionQuestSync.SellJunk = 1
-CompanionQuestSync.TidyVendorJunk = 1
 CompanionQuestSync.MapPins = 1
-CompanionQuestSync.TidySurplus = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
@@ -277,17 +272,16 @@ CompanionQuestSync.VendorRestock = 1
 
 #    Crafting runs on its own every three minutes per companion, outside combat:
 #    it turns what its gathering paid for into its products, silently - bags,
-#    use in play, overflow to your mailbox. The Produce button still gives the
+#    use in play, curated surplus delivery. The Produce button still gives the
 #    report on demand. 0 = craft only when asked.
 CompanionQuestSync.AutoProduce = 1
 
-#    Beside you with something spare, the companion opens the trade itself every
-#    three minutes - the keep-five reserve is respected, and mail remains the
-#    fallback for what cannot wait. 0 = trade only when asked.
+#    Offer clear upgrades and requested supplies at stationary, out-of-combat
+#    town stops, at most once every ten minutes per owner. 0 = manual trade only.
 CompanionQuestSync.AutoTrade = 1
 CompanionQuestSync.ExtraBagItem = 20400
 CompanionQuestSync.ExtraBags = 4
-CompanionQuestSync.ItemKeepQuality = 2
+
 
 #    CompanionQuestSync.ExtraBagItem / ExtraBags
 #        Give the companion somewhere to put things: any empty bag slot is filled
@@ -295,31 +289,14 @@ CompanionQuestSync.ItemKeepQuality = 2
 #        up to ExtraBags slots. A slot that is already occupied is never touched, so a
 #        bag the player gave the companion stays. 0 for either disables it.
 #
-#    CompanionQuestSync.ItemKeepQuality
-#        Minimum quality worth keeping: 0 poor, 1 common, 2 uncommon (green), 3 rare,
-#        4 epic. Items below it may be sold or binned when the bags are tight; items at
-#        or above it never are. Default 2 - greys and whites are disposable, greens are
-#        not. This is what stops "inventory full" being permanent.
-#
-#    CompanionQuestSync.TidySurplus
-#        Last resort when the bags are completely full and nothing else is left: bin
-#        surplus consumables, trade goods and recipes (cheapest first, never the last
-#        of a stack, never gear, never anything a live quest needs). The companion
-#        does not craft, and an empty slot is worth more than a few copper of water.
-#        Default: 1
-#
+
 #    CompanionQuestSync.MapPins
 #        Enable companion map pins (requires CompanionPins and PinSync) and nearby
 #        movement assistance. Native quest-giver icons show the player's own quests.
 #        Default: 1
 #
-#    CompanionQuestSync.TidyVendorJunk
-#        With zero free bag slots a companion cannot loot a quest item at all, so
-#        quests that need gathering stall completely. With this on, the module asks
-#        playerbots' item-usage value what it would vendor and destroys exactly
-#        that - never anything rated EQUIP, QUEST, SKILL, DISENCHANT or AH, and
-#        never a quest item, quest starter or item a live quest needs.
-#        Default: 1
+#    Older TidyVendorJunk, TidySurplus and ItemKeepQuality settings are ignored.
+#    Automatic cleanup no longer destroys items.
 CompanionQuestSync.AnnounceAtStartup = 1
 CompanionQuestSync.AnnounceOnLogin = 1
 CompanionQuestSync.HeartbeatSeconds = 300
