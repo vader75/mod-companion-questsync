@@ -6,8 +6,7 @@ corner. Everything in it is a button; nothing needs typing except a name.
 It talks to `mod-companion-questsync` over the server's own protocol lines: the server
 answers with system messages prefixed `CSYNC|`, which this addon filters out of the chat
 frame and renders, and the window asks for a refresh with the module's dot-commands.
-The only interface between the two is that closed-form grammar, so a server change
-cannot break the client beyond the payload it already understands.
+Use the addon and server module from the same repository revision when possible.
 
 Requires `mod-companion-questsync` on the server. If nothing arrives 20 seconds after
 login, the addon says so in one line rather than showing an empty window.
@@ -33,8 +32,8 @@ same name when the roster refreshes. The window stays compact even with four com
   trade contains only the selected item. Use **Refresh supplies** to check again.
   Stand nearby, both out of combat, and click **Accept** in the normal trade window.
   These one-off requests never cost trade gold and are not sent by mail.
-  The picker requires a compatible server module. With the
-  [AzerothCore receipt patch](../../README.md#build), the addon tracks the trade from
+  The picker requires a compatible server module and both
+  [AzerothCore trade patches](../../README.md#build). The addon tracks the trade from
   request to receipt. The game can report an in-memory transfer before the save
   finishes; the addon reports completion only after all offered items are accounted
   for and the save is confirmed. If an outcome is incomplete or unconfirmed, check
@@ -50,11 +49,9 @@ The footer is for the whole roster: **Summon missing**, **Dismiss all**, **Refre
 **Group quests**, and **Ground quests**. Roster updates are pushed by the server; the
 addon asks again if its view goes stale.
 
-**Ground quests** is the fallback for a collection quest whose items lie on the ground — oats
-in a field, cloth in a crate. The companion hops to those objects and takes them by itself
-(on a two-second clock, so it is not a wait); the button finishes the ones it cannot reach,
-and only ever collects items that actually lie on the ground. It answers in chat with what it
-gathered or that nothing is owed.
+**Ground quests** fills missing quest items the server indexes as ground loot for
+summoned companions. It is separate from regular looting and does not grant kill credit.
+The result appears in chat.
 
 `+ Add companion` opens the create panel: race and class dropdowns (with pool stock
 counted per combination), a suggested name you can edit, and the server's answer shown
@@ -134,6 +131,4 @@ does not compile at all, which looks exactly like an addon that simply shows not
 
 ## Licence
 
-GNU General Public License, version 2 — the same terms as the module it talks to; see
-[`LICENSE`](../../LICENSE) in the repository root. Note that the server side links against
-`mod-playerbots` (AGPL-3.0), which is why AGPL-3.0 suits a distributed install.
+See the repository's [GPL version 2 licence file](../../LICENSE).

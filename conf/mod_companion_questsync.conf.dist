@@ -2,12 +2,11 @@
 ########################################################################
 # COMPANION QUEST SYNC
 #
-# Keeps a player's companion (the bound bot recorded by mod-wowlegends in
-# `wowlegends_companion`) on the SAME quest log as its owner, and optionally
-# on the same level, so the two can always quest together.
+# Keeps tracked QuestSync companions in step with their owner's eligible
+# quests and, optionally, level. Ownership uses reviewed companion custody.
 #
-# This module only ADDS behaviour: it never patches the core or
-# mod-playerbots. Everything it does goes through public Player/Quest APIs.
+# Companion trade offers require the AzerothCore guard patch; named supply
+# orders also require the receipt patch. See the repository README.
 #
 #    CompanionQuestSync.Enable
 #        1 = the module is active at all (command included).
@@ -119,23 +118,14 @@
 #        Default: 0
 #
 #    CompanionQuestSync.TidyInventory
-#        1 = when the companion's bags are nearly full, destroy its own junk so
-#            quests and quest items can still be picked up. Nothing else frees
-#            space for a companion: mod-playerbots' sell/repair errands are not in
-#            its strategy set and the core has no sell API outside the vendor
-#            opcode. Only Poor-quality items are destroyed, never a quest item,
-#            quest starter, or an item one of its own live quests still wants.
-#        0 = never touch the companion's bags (a full companion then silently
-#            skips quests whose source item cannot be stored).
+#        1 = warn about bag pressure and try an eligible merchant sale when
+#            a quest pickup needs space. Bag cleanup never destroys items.
+#        0 = disable this bag-pressure handling.
 #        Default: 1
 #
 #    CompanionQuestSync.SellJunk
-#        When the companion's bags get tight, ask its own AI to sell what
-#        playerbots rates as vendor trash (item usage VENDOR/AH - useless whites
-#        as well as greys) before the module destroys anything. Real coin instead
-#        of deletion, and the judgement is playerbots', not this module's.
-#        Needs a vendor in interact range; with none it is a no-op, so the module
-#        simply falls through to destroying greys.
+#        Sell eligible grey items rated as vendor junk by Playerbots.
+#        Requires an interactable merchant. Without one, keep the items.
 #        Default: 1
 ##    CompanionQuestSync.KeepFreeSlots
 #        Free bag slots the tidy tries to restore (checked each pass and again
@@ -184,8 +174,8 @@ CompanionQuestSync.PinSyncSeconds = 600
 #                     Only items that lie on the ground are ever granted, so a
 #                     kill-collect quest cannot be finished this way, and only for a
 #                     quest the owner has already been rewarded (the companion is
-#                     catching up, not running ahead). .companionsync catchup, or the
-#                     "Ground quests" button in the window, does it on demand.
+#                     catching up, not running ahead). The manual Ground quests
+#                     button and .companionsync catchup are separate actions.
 #        Default:     0 (off; normal gathering consumes actual world loot)
 CompanionQuestSync.CatchUpGroundItems = 0
 #    CompanionQuestSync.CatchUpIdleSeconds

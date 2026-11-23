@@ -4,8 +4,8 @@ World-map quest markers for WoW 3.3.5a and `mod-companion-questsync`. Enable the
 
 ## Reading the map
 
-- Gold `?`: hand in at this NPC. Green `!`: work remains in this area.
-- Nearby markers share a glyph and counter, without moving hand-ins away from their NPCs. Hover for quests, companion names, and progress. Labels are off by default.
+- Gold `?`: hand in at this NPC or object. Green `!`: work remains in this area.
+- Nearby markers can share a glyph and counter without combining distinct hand-in locations. Hover for quests, companion names, and progress. Labels are off by default.
 - The server uses fixed objective areas instead of switching to the nearest spawns as companions walk.
 
 ## State and recovery
