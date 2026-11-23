@@ -14,14 +14,16 @@ that is switchable off (`RespectLegacyBindings = 0`).
 > [!NOTE]
 > **Companion surplus trading requires an AzerothCore patch.** The
 > [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) applies to
-> both automatic and manual surplus offers. It checks exact stacks
+> automatic and manual surplus offers, including specific-item requests from
+> CompanionSync. It checks exact stacks
 > and the companion's reserve at acceptance, rejects duplicate items before transfer,
 > and prevents bot trades from being accepted during combat.
 >
 > Apply it before building worldserver using the command under [Build](#build).
 > The module installer does not apply it automatically. Without the patch,
 > companion surplus offers are disabled; ordinary trades and the rest of the
-> module still work. No patch to `mod-playerbots` or `mod-wowlegends` is required.
+> module still work. The supply picker uses this same patch unchanged; it does not
+> require a new AzerothCore, `mod-playerbots`, or `mod-wowlegends` patch.
 
 Test plan: [`docs/companion-test-plan.md`](docs/companion-test-plan.md) — a 40-minute
 in-game checklist covering every command in this file.
@@ -223,9 +225,17 @@ Everything in this section is autonomous or one click; nothing needs a command t
 
 ## Commands
 
-In normal play, use the CompanionSync addon's **Supplies** section to see what the
-selected companion can spare or craft, then collect or request that item. The
-commands below remain available for troubleshooting and manual use.
+In [CompanionSync](addon/CompanionSync), select a summoned companion and open their
+**Supplies**. **Collect delivery** asks for the usual curated handoff. Use **Choose
+supply** to see what this companion can spare from their bags or make from a supported
+recipe. **Take** offers the selected item from stock; **Craft** uses carried materials
+to make one standard batch for you. The companion keeps any specialization bonus.
+**Not ready** items can't be ordered; use **Refresh supplies** when things change.
+
+Stand nearby and stay out of combat. Review the normal trade window and click
+**Accept** yourself. Specific-item requests do not charge trade gold, substitute
+another item, or fall back to mail. They are separate from the session-wide
+`delivery request` below. No commands or item IDs are needed for the picker.
 
 Player commands are `SEC_PLAYER`: no RBAC row, no database change. They are not
 available over SOAP, for the same reason `.companion` is not.
@@ -253,7 +263,7 @@ available over SOAP, for the same reason `.companion` is not.
 | `.companionsync summon <name>` | call a companion to your side |
 | `.companionsync dismiss <name>` | send it away, keep the binding |
 | `.companionsync release <name>` | wipe it, return it to the pool, forget it |
-| `.companionsync bind <bot>` | adopt an existing bot as a companion |
+| `.companionsync bind <bot>` | track an online bot you already control through Playerbots |
 | `.companionsync unbind <name>` | stop tracking it without releasing it |
 
 Administrator commands are `SEC_ADMINISTRATOR` and work from the console and over
@@ -297,6 +307,11 @@ The module pushes state to two addons; it never asks the client for anything.
 The addons are `addon/CompanionSync` (the window and the buttons — companion roster, create,
 summon, dismiss, release, **Ground quests**) and `addon/CompanionPins` (titled **Companion Pins**:
 the map markers and the key in the map's corner). Both are client-side only.
+
+CompanionSync 2.5.0's item picker requires the matching server module. It requests
+the selected companion's catalog on demand using `Supply row`, `Supply end`, and
+`Supply result` messages. The roster and map do not request this catalog, and
+CompanionPins does not need an update for the picker.
 
 ## Configuration
 
@@ -401,6 +416,9 @@ released while nobody was looking — and repairs the ones that are safe to repa
 
 - **No `mod-wowlegends` build dependency**: includes core and `mod-playerbots`
   headers only. Companion surplus offers require the core patch noted above.
+- **Playerbots control**: manual binding and specific-item supplies use the existing
+  personal `PlayerbotMgr` to verify that the player controls the live bot. A binding
+  row or shared party alone is not enough. No Playerbots source change is needed.
 - **One optional read**: by default it reads `mod-wowlegends`' binding table so two
   modules never level and quest the same body. `RespectLegacyBindings = 0` removes
   even that, and the module runs on a server where that module is not installed.
@@ -418,6 +436,10 @@ released while nobody was looking — and repairs the ones that are safe to repa
   rather than risking SQL built from a config file.
 - **Bot-session rail** — a binding must resolve to a bot session and must not be the
   owner, so a stale row cannot level or re-quest a real character.
+- **Specific-item trades** recheck current control, binding, exact stacks and bag
+  capacity before transfer. Unbinding or releasing the companion cancels its
+  matching delivery offer. Before spending reagents, the module checks bag space
+  and verifies that the trade can open.
 - **Removals run inline from the command handler**, never from the update tick and
   never within 20 seconds of a summon. This is not a preference: playerbots tears a
   body down in place, and doing it from the tick is what used to kill the process.

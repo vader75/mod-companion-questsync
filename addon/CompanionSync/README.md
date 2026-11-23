@@ -20,13 +20,16 @@ same name when the roster refreshes. The window stays compact even with four com
 - **Quests:** active quest count and a shortcut to the shared CompanionPins map.
 - **Professions:** gathering and crafting progress, with **Train** and **Teach skills**
   scoped to the selected companion.
-- **Supplies:** use **Collect delivery** for the usual curated handoff, or open the
-  item picker for the selected companion. **In bags** shows the amount they can
+- **Supplies:** use **Collect delivery** for the usual curated handoff, or click
+  **Choose supply** for a specific item. **In bags** shows the amount they can
   spare; **Can craft** means they know a supported recipe and have its materials
-  and crafting station. Unready recipes cannot be ordered. An order makes one batch
-  using the companion's carried materials and prepares a trade for that item only.
+  and crafting station. **Not ready** recipes cannot be ordered. Select **Take** for
+  stock or **Craft** to make one batch using the companion's carried materials. The
+  trade contains only the selected item. Use **Refresh supplies** to check again.
   Stand nearby, both out of combat, and click **Accept** in the normal trade window.
   These one-off requests never cost trade gold and are not sent by mail.
+  The picker requires the matching server module and its existing
+  [AzerothCore trade guard](../../README.md#build).
 
 Summon, dismiss, revive and level stay beside the companion's name. **Untrack** and
 **Release** are separate and still ask for confirmation.
