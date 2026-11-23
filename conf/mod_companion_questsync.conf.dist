@@ -309,11 +309,8 @@ CompanionQuestSync.ItemKeepQuality = 2
 #        Default: 1
 #
 #    CompanionQuestSync.MapPins
-#        Push the areas of the companion's open quests onto the owner's world map,
-#        for quests the owner does not hold themselves (the cases where the client
-#        would otherwise never draw them). Best effort: the client is not required to
-#        honour POIs for quests outside its own log, in which case nothing is drawn
-#        and the whisper's map coordinates are the fallback. Sent once per change.
+#        Enable companion map pins (requires CompanionPins and PinSync) and nearby
+#        movement assistance. Native quest-giver icons show the player's own quests.
 #        Default: 1
 #
 #    CompanionQuestSync.TidyVendorJunk

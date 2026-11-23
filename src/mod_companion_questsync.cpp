@@ -43,7 +43,7 @@
 // defined in DBCStores.cpp, id-indexed by the AreaTable's own first column
 extern DBCStorage<AreaTableEntry> sAreaTableStore;
 
-#include "GossipDef.h"   // PlayerTalkClass::SendQuestGiverStatus
+#include "GossipDef.h"
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
@@ -370,7 +370,7 @@ namespace
     std::map<uint32, uint32> g_pinSyncAt;                 // owner guid -> unix time
     std::map<uint32, uint32> g_pinRevisions;              // presence means this client requested v2
     std::map<uint32, uint32> g_pinRequestAt;              // bound repeat requests within a session
-    std::map<uint32, std::set<uint64>> g_markedNpcs;      // owner guid -> npcs this module marked
+
     std::map<std::pair<uint32, uint32>, std::string> g_missingCache;  // (bot, quest) -> owed text
     std::map<std::pair<uint32, uint32>, std::string> g_poiCache;      // (zone, quest) -> "map X, Y"
     std::map<std::pair<uint32, uint32>, uint32> g_extraSince;         // (bot, quest) -> first seen extra
@@ -2317,26 +2317,11 @@ namespace
 
     void WalkToGiver(Player* owner, Player* bot, Creature* npc);  // defined below
 
-    /// Mark the turn-in NPCs where the owner is already done and the companion is not.
-    ///
-    /// The quest-area POI packet has no colour field - the client picks the shading,
-    /// and it only draws areas for quests in its own log. The markers it does take
-    /// from the server are the quest-giver icons, so those get a turn-in status: a
-    /// quest the player has finished but the companion still owes shows up with the
-    /// turn-in icon on that NPC, which is as close to a differently coloured pin as
-    /// this client allows. Only for NPCs the player can already see (80 yd).
-    /// Collect the NPCs this companion still needs, without touching their icons yet.
-    ///
-    /// Marking and clearing in one call is wrong with several companions: the second
-    /// companion's pass would clear the first one's markers, so a giver only one of
-    /// them needs flickered with every sweep. Collect into the owner's union here and
-    /// apply it once with ApplyMarks().
-    void MarkOwnErrands(Player* owner, Player* bot, std::set<uint64>& wanted)
+    /// Keep the nearby movement assist without borrowing the player's quest icon.
+    void AssistNearbyHandIns(Player* owner, Player* bot)
     {
-        if (!g_cfg.mapPins || !owner->PlayerTalkClass)
+        if (!g_cfg.mapPins)
             return;
-
-        std::string marked;
 
         for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
         {
@@ -2371,87 +2356,7 @@ namespace
                 continue;
 
             WalkToGiver(owner, bot, npc);
-
-            wanted.insert(npc->GetGUID().GetRawValue());
-            marked += std::to_string(questId) + ",";
         }
-    }
-
-    /// What this NPC's icon should be for the *owner's own* quest log.
-    ///
-    /// The marker packet is the same one the core uses for the player's own status, so
-    /// writing a marker also overwrites their icon. Both directions have to respect that:
-    /// marking a companion errand on an NPC the player is already using would hide their
-    /// own turn-in, and clearing a marker with "nothing here" wipes a question mark the
-    /// player had earned - which is exactly why a finished quest showed no `?` over the
-    /// giver until the player spoke to it again and the core re-sent the status.
-    uint8 OwnerStatusFor(Player* owner, ObjectGuid guid)
-    {
-        Creature* npc = ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, guid);
-        return npc ? uint8(owner->GetQuestDialogStatus(npc)) : uint8(DIALOG_STATUS_NONE);
-    }
-
-    /// Apply the owner's union of markers, then restore the icons no companion needs.
-    void ApplyMarks(Player* owner, std::set<uint64> const& wanted)
-    {
-        if (!g_cfg.mapPins || !owner->PlayerTalkClass)
-            return;
-
-        uint32 const ownerGuid = owner->GetGUID().GetCounter();
-
-        for (uint64 const guid : wanted)
-        {
-            uint8 const own = OwnerStatusFor(owner, ObjectGuid(guid));
-
-            // nothing of the player's own there: borrow the icon for the companion's errand
-            if (own == uint8(DIALOG_STATUS_NONE))
-                owner->PlayerTalkClass->SendQuestGiverStatus(uint8(DIALOG_STATUS_REWARD), ObjectGuid(guid));
-        }
-
-        std::set<uint64>& previously = g_markedNpcs[ownerGuid];
-        for (uint64 const stale : previously)
-        {
-            if (wanted.count(stale))
-                continue;
-
-            // Put back what the player's own log says, never a flat "nothing here".
-            ObjectGuid const guid(stale);
-            if (!ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, guid))
-                continue;                       // out of sight: the client asks again on approach
-
-            owner->PlayerTalkClass->SendQuestGiverStatus(OwnerStatusFor(owner, guid), guid);
-        }
-
-        previously = wanted;
-
-        if (g_cfg.debug >= 2 && !wanted.empty())
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} turn-in marker(s) on {} map",
-                     uint32(wanted.size()), owner->GetName());
-    }
-
-    /// Put the companion's open quest areas on the owner's map.
-    ///
-    /// The client only asks for quest POIs for quests in its *own* log, so a quest
-    /// the companion is behind on never draws. This pushes the same response the
-    /// query handler would build (QueryHandler.cpp:427) for the companion's open
-    /// quests, one packet, only when the set changes. Experimental by nature: if the
-    /// client ignores POIs for quests it does not hold, the packet is simply dropped
-    /// and the whisper carries map coordinates instead.
-    /// Quest area circles for the owner's map, across every companion at once.
-    ///
-    /// This used to be called once per companion with one bot's quest log, while the
-    /// "already sent" key was stored per owner. With two companions that key alternated
-    /// between their two sets, so the packet was re-sent on nearly every pass and the
-    /// client - which replaces its quest areas on receipt - only ever showed whichever
-    /// companion had passed last. The union is stable, sent once, and shows the whole
-    /// group's work.
-    void SendQuestPins(Player* owner, std::vector<uint32> const& bots)
-    {
-        // Retired: the client renders POI circles only for quests in the player's own
-        // quest log, so the pushed packet's data for companion-held quests was never
-        // drawn - a session with it in place showed no markers at all. The glyph
-        // payload is the only thing that reaches the map for a companion's errands.
-        (void)owner; (void)bots;
     }
 
     /// Position is the other half of a desync: the two logs can match while the
@@ -2548,8 +2453,9 @@ namespace
 
                 std::string const here = MapCoords(spot.x, spot.y, bot->GetZoneId());
                 SayToOwner(bot, owner, "I am at " + spot.name + " with '" + quest->GetTitle() +
-                                      "' ready - handing it in now" +
-                                      (here.empty() ? "." : " (" + here + ")."));
+                                      "' ready to turn in" +
+                                      (here.empty() ? "." : " (" + here + ")."),
+                           45, questId, true);
                 return;
             }
 
@@ -4297,7 +4203,7 @@ namespace
     /// Hand in the companion's own quests even when the player is nowhere near the giver.
     ///
     /// This is the "I cannot speak to the quest giver" case. The turn-in reporter and
-    /// MarkOwnErrands both start from an NPC the *owner* can see, so a companion with a
+    /// movement assist both start from an NPC the *owner* can see, so a companion with a
     /// finished quest and a player across the square got a complaint and nothing else.
     /// Here the giver is found from the quest itself, the companion is stepped beside it
     /// and its own reward action is asked to run - no leading, no standing nearby.
@@ -4360,6 +4266,20 @@ namespace
     }
 
 
+    void LogHandInWait(Player* owner, Player* bot, Quest const* quest, EnderSpot const& spot,
+                       float distance, char const* reason)
+    {
+        if (g_cfg.debug < 2)
+            return;
+
+        uint32 const questId = quest->GetQuestId();
+        LOG_INFO("server.loading",
+                 "[CompanionQuestSync] hand-in waiting: {} quest '{}' ({}) at {} ({}) {:.0f} yd; reason={}, bot_status={}, owner_status={}, owner_rewarded={}",
+                 bot->GetName(), quest->GetTitle(), questId, spot.name, spot.entry, distance, reason,
+                 uint32(bot->GetQuestStatus(questId)), owner ? int32(owner->GetQuestStatus(questId)) : -1,
+                 owner && owner->IsQuestRewarded(questId));
+    }
+
     void DeliverHandIns(Player* owner, Player* bot)
     {
         if (!bot->IsAlive() || bot->IsInCombat() || (owner && owner->IsInCombat()))
@@ -4410,6 +4330,7 @@ namespace
                 if (!nudgedAt || nowTs - nudgedAt >= 180)
                 {
                     nudgedAt = nowTs;
+                    LogHandInWait(owner, bot, quest, spot, dist, "out-of-range");
                     SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' at " +
                                spot.name + " myself, but only up close - lead me within about " +
                                std::to_string(uint32(g_cfg.handInNear)) + " yards of it and I will do the rest.", 90,
@@ -4523,7 +4444,10 @@ namespace
                 uint32 const reward = ChooseRewardIndex(bot, quest);
 
                 if (!bot->CanRewardQuest(quest, reward, false))
-                    continue;                      // the core refuses: say nothing twice
+                {
+                    LogHandInWait(owner, bot, quest, spot, dist, "reward-check");
+                    continue;
+                }
 
                 bot->RewardQuest(quest, reward, giver, true);
                 g_readyAt.erase((uint64(botGuid) << 32) | questId);
@@ -5414,7 +5338,7 @@ namespace
 
     /// Copy the owner's quest log onto the companion. Returns what happened so
     /// both the command output and the debug log can use it.
-    SyncReport SyncCompanionFor(Player* owner, uint32 botGuid, std::set<uint64>& marks)
+    SyncReport SyncCompanionFor(Player* owner, uint32 botGuid)
     {
         // Measured, not guessed: Debug >= 2 logs how long a whole pass takes, which is
         // the number that matters when asking what this module costs the server.
@@ -5807,7 +5731,7 @@ namespace
 
         NudgeForHelp(owner, bot);
         ReportPosition(owner, bot);
-        MarkOwnErrands(owner, bot, marks);
+        AssistNearbyHandIns(owner, bot);
 
         for (uint32 const questId : ownerQuests)
         {
@@ -5977,7 +5901,9 @@ namespace
                 std::vector<std::pair<std::string, std::string>> workLeftSpots;
                 char style = 'g';
 
-                if (bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
+                bool const ready = bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE &&
+                                   DescribeMissingItemsUncached(bot, quest).empty();
+                if (ready)
                 {
                     EnderSpot const& spot = FindQuestEnder(bot, questId);
 
@@ -6045,7 +5971,7 @@ namespace
 
                     // what this companion still owes, as the quest log counts it -
                     // "3/8" after the name, nothing when the quest is ready to hand in
-                    if (bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+                    if (!ready)
                     {
                         std::string owed = OwedText(bot, quest);
                         if (!owed.empty())
@@ -7538,14 +7464,9 @@ namespace
         for (uint32 const botGuid : bots)
             g_multiCompanionBySpeaker[botGuid] = bots.size() > 1;
 
-        // One union of turn-in markers for the owner, applied after every companion has
-        // contributed: applying them per companion let the second pass clear the first
-        // companion's marker, so a giver only one of them needed flickered each sweep.
-        std::set<uint64> marks;
-
         for (uint32 const botGuid : bots)
         {
-            SyncReport const one = SyncCompanionFor(owner, botGuid, marks);
+            SyncReport const one = SyncCompanionFor(owner, botGuid);
 
             // Completion marking happens inside the pass, after the hand-in step that ran at
             // the top of it - so a quest that became complete this pass would otherwise wait
@@ -7572,12 +7493,7 @@ namespace
                 aggregate.lines.push_back(DescribeReport(one));
         }
 
-        ApplyMarks(owner, marks);
-
-        // One payload and one set of quest-area circles for the whole owner, after every
-        // companion has had its pass. Both must aggregate: the client replaces what it
-        // holds on receipt, so per-companion sends would take turns erasing each other.
-        SendQuestPins(owner, bots);
+        // Publish a single addon snapshot after all companion hand-in attempts.
         SendPinSync(owner, false);
         SendCompSync(owner, false);
 
@@ -10213,7 +10129,7 @@ public:
         g_pinSyncAt.erase(ownerGuid);
         g_pinRevisions.erase(ownerGuid);
         g_pinRequestAt.erase(ownerGuid);
-        g_markedNpcs.erase(ownerGuid);
+
         g_sessionRefused.erase(ownerGuid);
         g_whisperQueue.erase(ownerGuid);
         g_lastWhisperAt.erase(ownerGuid);

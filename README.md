@@ -318,7 +318,7 @@ each one. The defaults that matter most:
 | `SellJunk` / `TidyVendorJunk` / `TidySurplus` | 1 / 1 / 1 | what it may sell or destroy to make room |
 | `ItemKeepQuality` | 2 | quality it never destroys (2 = green) |
 | `ExtraBagItem` / `ExtraBags` | 20400 / 4 | bags it hands a companion that has none |
-| `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | quest pins on the owner's map |
+| `MapPins` / `PinSync` / `PinSyncSeconds` | 1 / 1 / 600 | companion quest pins via CompanionPins; native quest-giver icons are unchanged |
 | `GatherCatchUp` | 1 | catch a companion's gathering skill up to what the zone's own nodes ask, once per zone, clamped to its level's tier ceiling; the pair's production half rises with it |
 | `VendorRestock` | 1 | near a trade or repair NPC: shop reagents topped up to a small stock, gear mended at the usual price; at most once every five minutes per companion |
 | `AutoProduce` | 1 | craft what its gathering paid for every three minutes per companion, outside combat, silently; the Produce button gives the report on demand |
