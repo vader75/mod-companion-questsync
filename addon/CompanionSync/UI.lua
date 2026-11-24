@@ -15,7 +15,7 @@ local WIDTH = 680
 local PAD = 16
 local CARD_HEIGHT = 246
 local ROSTER_HEIGHT = 32
-local HEADER_HEIGHT = 62
+local HEADER_HEIGHT = 78         -- Add companion plus one control row, clear of the divider
 local FOOTER_HEIGHT = 90          -- buttons, roster hint, notices and delivery result
 local EMPTY_HEIGHT = 108         -- the "no companions yet" copy needs room of its own
 local ADD_PANEL_HEIGHT = 278      -- race/class, name, pool stock, answer, Create/Cancel
@@ -401,7 +401,7 @@ local function CreateCard()
     card.trainButton = Button(card, "Train", 60, function()
         if card.companion then G.Action("learn", card.companion.name) end
     end, "Teach this companion missing class spells and spend its unspent talents.")
-    card.trainButton:SetPoint("TOPLEFT", 224, -132)
+    card.trainButton:SetPoint("TOPLEFT", 470, -132)
     card.professionsButton = Button(card, "Teach skills", 92, function()
         if card.companion then G.Action("professions", card.companion.name) end
     end, "Teach or update this companion's gathering and crafting professions.")
@@ -437,7 +437,7 @@ local function CreateCard()
         card.engageButton:SetText("Engage: " .. nextPolicy)
         G.Run(".companionsync engage " .. card.companion.name .. " " .. nextPolicy)
     end, "Whether this companion gets into fights at all. Mine = only what you are fighting.", false)
-    card.engageButton:SetPoint("TOPLEFT", 16, -190)
+    card.engageButton:SetPoint("TOPLEFT", 140, -132)
 
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
