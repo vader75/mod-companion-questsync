@@ -63,6 +63,10 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
+#if __has_include("CompanionLootPolicy.h")
+#include "CompanionLootPolicy.h"
+#define CQ_HAS_COMPANION_LOOT_POLICY
+#endif
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
@@ -4637,6 +4641,35 @@ namespace
                !owner->GetTradeData() && !bot->GetTradeData() &&
                !g_pendingTrade.count(bot->GetGUID().GetCounter());
     }
+
+#if defined(CQ_HAS_COMPANION_LOOT_POLICY) && defined(MOD_PLAYERBOTS)
+    bool ReserveCompanionLootSlot(Player* bot, uint32 entry)
+    {
+        constexpr uint32 ReservedSlots = 8;
+        if (!g_cfg.enable || !g_cfg.sellJunk || !bot->GetSession() || !bot->GetSession()->IsBot() ||
+            bot->GetFreeInventorySpace() > ReservedSlots)
+            return false;
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+        // Restrict intake to the explicit junk class, not grey equipment or trade goods.
+        if (!proto || proto->Quality != ITEM_QUALITY_POOR || !proto->SellPrice ||
+            proto->Class != ITEM_CLASS_MISC || proto->SubClass != ITEM_SUBCLASS_JUNK)
+            return false;
+
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        Player* owner = ai ? ai->GetMaster() : nullptr;
+        if (!IsControlledCompanion(bot, owner) || !owner->IsInWorld() ||
+            !bot->GetGroup() || bot->GetGroup() != owner->GetGroup() || !CanReleaseTemplate(bot, owner, proto))
+            return false;
+
+        auto* context = ai->GetAiObjectContext();
+        if (context->GetValue<std::set<uint32>&>("always loot list")->Get().count(entry) ||
+            context->GetValue<ItemUsage>("item usage", entry)->Get() != ITEM_USAGE_VENDOR)
+            return false;
+
+        return HasCurrentCustody(owner->GetGUID().GetCounter(), bot->GetGUID().GetCounter(), true);
+    }
+#endif
 
     uint32 SellManagedJunk(Player* owner, Player* bot)
     {
@@ -9881,6 +9914,9 @@ public:
 
 void Addmod_companion_questsyncScripts()
 {
+#if defined(CQ_HAS_COMPANION_LOOT_POLICY) && defined(MOD_PLAYERBOTS)
+    CompanionLootPolicy::VetoNewStack = ReserveCompanionLootSlot;
+#endif
 #ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
     g_nativeInitializationVetoRegistered = Playerbots::RegisterInitializationVeto(DeferNativeBotInitialization);
     if (!g_nativeInitializationVetoRegistered)

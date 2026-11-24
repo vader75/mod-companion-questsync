@@ -7,6 +7,21 @@ POLICY = (Path(__file__).resolve().parents[1] / 'src/CuratedDelivery.inc').read_
 
 
 class ManagedInventory(unittest.TestCase):
+    def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
+        patch = (Path(__file__).resolve().parents[1] /
+                 'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
+        self.assertLess(patch.index('CanStoreNewItem'), patch.index('VetoNewStack(this,'))
+        self.assertLess(patch.index('VetoNewStack(this,'), patch.index('StoreNewItem(dest, item->itemid, true'))
+        for guard in ('!GetItemByPos(slot.pos)', 'loot->loot_type == LOOT_CORPSE',
+                      '!source->GetCreatureTemplate()->SkinLootId', '!qitem && !conditem && !item->rollWinnerGUID'):
+            self.assertIn(guard, patch)
+        reserve = SOURCE.split('bool ReserveCompanionLootSlot(', 1)[1].split('\n#endif', 1)[0]
+        for guard in ('ReservedSlots = 8', 'GetFreeInventorySpace() > ReservedSlots',
+                      'proto->SubClass != ITEM_SUBCLASS_JUNK', '!= ITEM_USAGE_VENDOR',
+                      'CanReleaseTemplate(bot, owner, proto)', '"always loot list"',
+                      'IsControlledCompanion(bot, owner)', 'HasCurrentCustody('):
+            self.assertIn(guard, reserve)
+
     def test_quest_bag_rescue_only_sells_confirmed_junk(self):
         tidy = SOURCE.split('uint32 TidyInventory(Player* owner, Player* bot)\n', 1)[1].split('/// Resolve the owner', 1)[0]
         self.assertIn('SellManagedJunk(owner, bot)', tidy)

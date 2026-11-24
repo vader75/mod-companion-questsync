@@ -1,0 +1,49 @@
+diff --git a/src/server/game/Entities/Player/CompanionLootPolicy.h b/src/server/game/Entities/Player/CompanionLootPolicy.h
+new file mode 100644
+--- /dev/null
++++ b/src/server/game/Entities/Player/CompanionLootPolicy.h
+@@ -0,0 +1,16 @@
++#ifndef AC_COMPANION_LOOT_POLICY_H
++#define AC_COMPANION_LOOT_POLICY_H
++
++#include "Define.h"
++
++class Player;
++
++namespace CompanionLootPolicy
++{
++    using Veto = bool (*)(Player*, uint32);
++
++    // Installed at script registration, before any map update can store loot.
++    inline Veto VetoNewStack = nullptr;
++}
++
++#endif
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -18,4 +18,5 @@
+ #include "Player.h"
++#include "CompanionLootPolicy.h"
+ #include "AccountMgr.h"
+ #include "AchievementMgr.h"
+ #include "AreaDefines.h"
+@@ -13633,6 +13634,18 @@
+     ItemPosCountVec dest;
+     msg = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, item->count);
+     if (msg == EQUIP_ERR_OK)
+     {
++        // Check the actual storage plan at execution, not the earlier queued loot response.
++        if (CompanionLootPolicy::VetoNewStack && loot->loot_type == LOOT_CORPSE &&
++            GetLootGUID().IsCreature() && !qitem && !conditem && !item->rollWinnerGUID &&
++            std::any_of(dest.begin(), dest.end(), [this](ItemPosCount const& slot) { return !GetItemByPos(slot.pos); }))
++        {
++            // Skinning requires an emptied corpse; don't strand hides behind skipped trash.
++            Creature const* source = GetMap()->GetCreature(GetLootGUID());
++            if (source && !source->GetCreatureTemplate()->SkinLootId &&
++                CompanionLootPolicy::VetoNewStack(this, item->itemid))
++                return nullptr;
++        }
++
+         AllowedLooterSet looters = item->GetAllowedLooters();
+         Item* newitem = StoreNewItem(dest, item->itemid, true, item->randomPropertyId, looters);

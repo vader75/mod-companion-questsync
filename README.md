@@ -52,7 +52,7 @@ Keeper stock stays with the companion. The server can offer curated trades autom
    git clone https://github.com/vader75/mod-companion-questsync.git modules/mod-companion-questsync
    ```
 
-2. For companion trade offers, check and apply the [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) first, then the [trade commit receipt](patches/azerothcore-trade-offer-commit.patch). From the AzerothCore source root, in a shell such as Bash or Git Bash:
+2. For companion trade offers, check and apply the [trade acceptance guard](patches/azerothcore-trade-offer-guard.patch) first, then the [trade commit receipt](patches/azerothcore-trade-offer-commit.patch). The optional [loot reserve patch](patches/azerothcore-companion-loot-reserve.patch) keeps the last eight slots from being used by new stacks of confirmed grey miscellaneous junk from non-skinnable corpses when `SellJunk` is on. It does not change existing inventory or vendor sales. From the AzerothCore source root, in a shell such as Bash or Git Bash:
 
    ```sh
    git apply --check modules/mod-companion-questsync/patches/azerothcore-trade-offer-guard.patch &&
