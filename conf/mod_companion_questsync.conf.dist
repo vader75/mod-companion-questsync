@@ -129,11 +129,13 @@
 #        Default: 1
 #
 #    CompanionQuestSync.TrimSurplus
-#        Once fewer than sixteen bag slots are free, a merchant visit sells the
-#        SPARE trade goods (whole stacks only) back down to a profession budget:
-#        one recipe's worth of a bought reagent, two stacks of a gathered material.
-#        Professions keep what their recipes consume; quest items, containers and
-#        bound gear are never sold. The companion says what it sold and why.
+#        Once fewer than sixteen bag slots are free, the companion clears its pack
+#        the way a player would: spare trade goods (whole stacks) down to a recipe
+#        budget, consumables beyond two stacks, loose bags, and gear it has outgrown.
+#        With no merchant nearby it posts the spare stacks to the owner by mail.
+#        Profession tools, quest items and anything the owner still needs are never
+#        sold; restocking stops while the pack is this tight. It says what it sold.
+#        See docs/companion-bags.md for the full policy.
 #        Default: 1
 #
 #    CompanionQuestSync.LevelGear

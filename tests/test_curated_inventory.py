@@ -51,6 +51,24 @@ class ManagedInventory(unittest.TestCase):
         self.assertIn('ProfessionToolItems(bot->getClass())', trim)
         self.assertIn('tools.count(item->GetEntry())', trim)
 
+    def test_consumables_and_loose_bags_are_capped_like_a_player_would(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        self.assertIn('CompanionConsumableStacks = 2', SOURCE)
+        self.assertIn('keptStacks++ >= CompanionConsumableStacks', trim)
+        self.assertIn('ITEM_CLASS_CONTAINER && proto->SubClass == ITEM_SUBCLASS_CONTAINER', trim)
+
+    def test_restock_stops_buying_into_a_tight_pack(self):
+        restock = SOURCE.split('void RestockNearVendor(', 1)[1].split('/// The highest', 1)[0]
+        self.assertIn('GetFreeInventorySpace() < CompanionBagComfort', restock)
+        self.assertLess(restock.index('GetFreeInventorySpace() < CompanionBagComfort'),
+                        restock.index('StoreNewItem(dest'))
+
+    def test_a_tight_pack_without_a_merchant_posts_spare_home(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        self.assertIn('MailboxNearby(bot)', trim)
+        self.assertLess(trim.index('MailboxNearby(bot)'), trim.index('MailHome(owner, bot, mailbox, attachments)'))
+        self.assertIn('attachments.size() > 3', trim)   # one letter's worth at a time
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
@@ -96,7 +114,8 @@ class ManagedInventory(unittest.TestCase):
         self.assertIn('MailSender(MAIL_NORMAL, owner->GetGUID().GetCounter())', SOURCE)
 
     def test_mail_checks_realm_policy_before_detaching_any_item(self):
-        mail = SOURCE.split('uint32 MailHome(', 1)[1].split('ObjectGuid MailboxNearby(', 1)[0]
+        # rsplit: the file declares MailHome above its use, and the definition is the last one.
+        mail = SOURCE.rsplit('uint32 MailHome(', 1)[1].split('ObjectGuid MailboxNearby(', 1)[0]
         self.assertLess(mail.index('OnPlayerCanSendMail(bot, owner->GetGUID()'), mail.index('MoveItemFromInventory('))
 
     def test_trade_checks_combined_recipient_capacity_and_exact_splits(self):

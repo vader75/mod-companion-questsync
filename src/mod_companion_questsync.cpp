@@ -469,6 +469,7 @@ namespace
     // so a companion is not re-geared every time it dings.
     constexpr uint32 CompanionGearLag = 4;
     constexpr uint32 CompanionGearStep = 5;
+    constexpr uint32 CompanionConsumableStacks = 2;   // what a player carries, not a pallet
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
     struct DeliveryReceipt
@@ -3630,6 +3631,10 @@ namespace
         bool const repaired = RepairNearVendor(bot, now);
         uint32& last = g_lastVendorRestock[botGuid];
         std::string topped;
+        // A pack that is already tight buys nothing: a player would not restock into a full
+        // bag. The trim runs just before this call, so there is space by the next pass.
+        if (bot->GetFreeInventorySpace() < CompanionBagComfort)
+            return;
         if ((!last || now - last >= 300) && VendorNearby(bot, 40.0f))
         {
             last = now;
@@ -4761,6 +4766,9 @@ namespace
         return sold;
     }
 
+    uint32 MailHome(Player* owner, Player* bot, ObjectGuid mailbox, std::vector<Item*>& items);  // defined below
+    ObjectGuid MailboxNearby(Player* bot);                                                    // defined below
+
     /// Sell the *spare* trade goods when the bags are tight.
     ///
     /// Restocking and gathering made a companion's pack a warehouse: every recipe the bot
@@ -4784,6 +4792,98 @@ namespace
         if (last && now - last < 300)
             return 0;
 
+        uint8 const level = bot->GetLevel();
+        std::set<uint32> const tools = ProfessionToolItems(bot->getClass());
+
+        // What a real player keeps: one recipe of a bought reagent, two stacks of a
+        // material, two stacks of a consumable, and no loose bags or outgrown gear.
+        std::map<uint32, std::vector<Item*>> carried;
+        std::vector<Item*> spare;            // consumables, spare containers, outgrown gear
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || !proto->SellPrice)
+                return;
+            if (item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+                return;
+
+            if (proto->Class == ITEM_CLASS_TRADE_GOODS)
+            {
+                if (item->IsSoulBound())     // the companion's own kit, never surplus
+                    return;
+                carried[proto->ItemId].push_back(item);
+                return;
+            }
+            // A loose bag is worth nothing while four are already equipped.
+            if (proto->Class == ITEM_CLASS_CONTAINER && proto->SubClass == ITEM_SUBCLASS_CONTAINER)
+            {
+                spare.push_back(item);
+                return;
+            }
+            // Consumables stack up quietly; two stacks is what a player carries.
+            if (proto->Class == ITEM_CLASS_CONSUMABLE && !item->IsSoulBound())
+            {
+                spare.push_back(item);
+                return;
+            }
+            // Gear it has outgrown. Playerbots auto-stores the piece it replaces, so every
+            // upgrade would otherwise leave the old armour in the pack for good.
+            if (proto->Class != ITEM_CLASS_WEAPON && proto->Class != ITEM_CLASS_ARMOR)
+                return;
+            if (proto->Quality > ITEM_QUALITY_UNCOMMON)
+                return;                      // a lucky blue is not bag filler
+            if (tools.count(item->GetEntry()))
+                return;                      // the pick and the knife are never outgrown
+            if (uint32(proto->RequiredLevel) + 2 >= level)
+                return;                      // still this level's gear, or the owner's gift
+            spare.push_back(item);
+        });
+
+        // Trade goods over budget, keeping the fullest stacks so the budget costs few slots.
+        std::vector<Item*> spareGoods;
+        for (auto& [entry, stacks] : carried)
+        {
+            uint32 const keep = IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep;
+            std::sort(stacks.begin(), stacks.end(),
+                [](Item* a, Item* b) { return a->GetCount() > b->GetCount(); });
+            uint32 kept = 0;
+            for (Item* item : stacks)
+            {
+                if (kept < keep)
+                {
+                    kept += item->GetCount();
+                    continue;
+                }
+                spareGoods.push_back(item);
+            }
+        }
+
+        // Two stacks of a consumable, not the eight that a vendor restock leaves behind.
+        std::map<uint32, std::vector<Item*>> consumables;
+        for (Item* item : spare)
+            if (item->GetTemplate()->Class == ITEM_CLASS_CONSUMABLE)
+                consumables[item->GetTemplate()->ItemId].push_back(item);
+        std::vector<Item*> spareConsumables;
+        for (auto& [entry, stacks] : consumables)
+        {
+            std::sort(stacks.begin(), stacks.end(),
+                [](Item* a, Item* b) { return a->GetCount() > b->GetCount(); });
+            uint32 keptStacks = 0;
+            for (Item* item : stacks)
+                if (keptStacks++ >= CompanionConsumableStacks)
+                    spareConsumables.push_back(item);
+        }
+        spare.erase(std::remove_if(spare.begin(), spare.end(), [&](Item* item)
+        {
+            ItemTemplate const* proto = item->GetTemplate();
+            return proto->Class == ITEM_CLASS_CONSUMABLE &&
+                   std::find(spareConsumables.begin(), spareConsumables.end(), item) != spareConsumables.end();
+        }), spare.end());
+
+        if (spareGoods.empty() && spare.empty())
+            return 0;
+
+        // Sell what a merchant will take; without one, post it home like a player would.
         std::list<Unit*> units;
         Acore::AnyUnitInObjectRangeCheck check(bot, INTERACTION_DISTANCE);
         Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
@@ -4795,80 +4895,36 @@ namespace
                 break;
             else
                 vendor = nullptr;
+
         if (!vendor)
-            return 0;
-
-        // One entry per item id: the stacks it carries, and how many units they hold.
-        std::map<uint32, std::vector<Item*>> carried;
-        std::vector<Item*> outgrown;
-        std::set<uint32> const tools = ProfessionToolItems(bot->getClass());
-        uint8 const level = bot->GetLevel();
-        VisitCarriedItems(bot, [&](Item* item)
         {
-            ItemTemplate const* proto = item->GetTemplate();
-            if (!proto || !proto->SellPrice)
-                return;
-            if (item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
-                return;
-            if (proto->Class == ITEM_CLASS_TRADE_GOODS)
-            {
-                // Soulbound stock is the companion's own kit, never surplus.
-                if (item->IsSoulBound())
-                    return;
-                carried[proto->ItemId].push_back(item);
-                return;
-            }
-            // Gear it has outgrown. Playerbots auto-stores the piece it replaces, so every
-            // upgrade would otherwise leave the old armour in the pack for good.
-            if (proto->Class != ITEM_CLASS_WEAPON && proto->Class != ITEM_CLASS_ARMOR)
-                return;
-            if (proto->Quality > ITEM_QUALITY_UNCOMMON)
-                return;                     // a lucky blue is not bag filler
-            if (tools.count(item->GetEntry()))
-                return;                     // the pick and the knife are never outgrown
-            if (uint32(proto->RequiredLevel) + 2 >= level)
-                return;                     // still this level's gear, or the owner's gift
-            outgrown.push_back(item);
-        });
-        if (carried.empty() && outgrown.empty())
-            return 0;
-
-        last = now;
-        uint32 sold = 0;
-        std::string names;
-        for (auto& [entry, stacks] : carried)
-        {
-            uint32 const keep = IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep;
-            // Keep the fullest stacks first, so the budget is covered by as few slots as
-            // possible and every stack the trim sells is a whole one.
-            std::sort(stacks.begin(), stacks.end(),
-                [](Item* a, Item* b) { return a->GetCount() > b->GetCount(); });
-            uint32 kept = 0;
-            for (Item* item : stacks)
-            {
-                if (kept < keep)
-                {
-                    kept += item->GetCount();
-                    continue;
-                }
-                auto const guid = item->GetGUID();
-                uint16 const pos = item->GetPos();
-                std::string const name = item->GetTemplate()->Name1;
-                WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
-                request.VendorGuid = vendor->GetGUID();
-                request.ItemGuid = guid;
-                bot->GetSession()->HandleSellItemOpcode(request);
-                Item* remaining = bot->GetItemByPos(pos);
-                if (remaining && remaining->GetGUID() == guid)
-                    continue;
-                ++sold;
-                if (names.find(name) == std::string::npos)
-                    names += (names.empty() ? "" : ", ") + name;
-            }
+            ObjectGuid const mailbox = MailboxNearby(bot);
+            if (!mailbox)
+                return 0;
+            std::vector<Item*> attachments;
+            for (Item* item : spareGoods)
+                if (item->CanBeTraded(true) && !item->IsSoulBound() && !item->IsRefundable())
+                    attachments.push_back(item);
+            for (Item* item : spare)
+                if (item->CanBeTraded(true) && !item->IsSoulBound() && !item->IsRefundable() &&
+                    item->GetTemplate()->Class != ITEM_CLASS_CONTAINER)
+                    attachments.push_back(item);
+            if (attachments.empty() || attachments.size() > 3)
+                return 0;
+            last = now;
+            if (!MailHome(owner, bot, mailbox, attachments))
+                return 0;
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} posted {} spare stack(s) home (no merchant nearby)",
+                    bot->GetName(), uint32(attachments.size()));
+            SayToOwner(bot, owner,
+                "My pack was nearly full and no merchant was at hand, so I posted " +
+                std::to_string(attachments.size()) + " spare stack(s) to you - pick them up at the mailbox.", 30);
+            return uint32(attachments.size());
         }
 
-        uint32 gearSold = 0;
-        for (Item* item : outgrown)
+        last = now;
+        auto sell = [&](Item* item) -> bool
         {
             auto const guid = item->GetGUID();
             uint16 const pos = item->GetPos();
@@ -4877,15 +4933,29 @@ namespace
             request.ItemGuid = guid;
             bot->GetSession()->HandleSellItemOpcode(request);
             Item* remaining = bot->GetItemByPos(pos);
-            if (remaining && remaining->GetGUID() == guid)
+            return !remaining || remaining->GetGUID() != guid;
+        };
+
+        uint32 sold = 0;
+        std::string names;
+        for (Item* item : spareGoods)
+        {
+            std::string const name = item->GetTemplate()->Name1;
+            if (!sell(item))
                 continue;
-            ++gearSold;
+            ++sold;
+            if (names.find(name) == std::string::npos)
+                names += (names.empty() ? "" : ", ") + name;
         }
+        uint32 gearSold = 0;
+        for (Item* item : spare)
+            if (sell(item))
+                ++gearSold;
 
         if (!sold && !gearSold)
             return 0;
         if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare trade-good stack(s) and {} outgrown piece(s) to {} (free slots now {})",
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare stack(s) and {} piece(s) to {} (free slots now {})",
                 bot->GetName(), sold, gearSold, vendor->GetName(), bot->GetFreeInventorySpace());
 
         std::string said = "My pack was nearly full, so I sold ";
@@ -4894,7 +4964,7 @@ namespace
         if (sold && gearSold)
             said += " and ";
         if (gearSold)
-            said += std::to_string(gearSold) + " piece(s) of gear I had outgrown";
+            said += std::to_string(gearSold) + " piece(s) of gear and goods I had no use for";
         said += " at the vendor - I kept enough for our recipes.";
         SayToOwner(bot, owner, said, 30);
         return sold + gearSold;
