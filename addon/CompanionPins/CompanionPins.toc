@@ -1,9 +1,9 @@
 ## Interface: 30300
 ## Title: Companion Pins
-## Notes: Companion quest map pins: gold ? ready to hand in, muted ? not ready (requires server support), green ! work left. Hover for each companion's state.
+## Notes: Companion quest map pins: gold ? ready to hand in, muted ? not ready (requires server support), green ! work left. Hover for each companion's state and any missing turn-in items.
 ## Notes-de-DE: Zeichnet Kartenmarkierungen fuer die Quest-Abgabe des Begleiters.
 ## Author: Hermes (for WOW Legends)
-## Version: 1.2.0
+## Version: 1.2.1
 ## SavedVariables: CompanionPinsDB
 ## X-Category: Map
 

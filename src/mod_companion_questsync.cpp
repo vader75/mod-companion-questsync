@@ -405,6 +405,7 @@ namespace
         uint32 revision = 0;
         bool tagged = false;
         bool handInStates = false;
+        bool pinItems = false;
     };
     std::map<uint32, PinStream> g_pinRevisions;           // presence means this client requested v2
     std::map<uint32, uint32> g_pinRequestAt;              // bound repeat requests within a session
@@ -2559,13 +2560,10 @@ namespace
         }
     }
 
-    /// "Large Candle 0/8" - what the companion still owes for a quest, spelled
-    /// out. A bare "missing items" whisper told the player nothing they could act
-    /// on: not which item, not how many are already in the bags.
-    std::string DescribeMissingItemsUncached(Player* bot, Quest const* quest)
+    // Share current bag counts between the hand-in check, whispers and map details.
+    template <typename Visitor>
+    void ForEachMissingRequiredItem(Player* bot, Quest const* quest, Visitor visit)
     {
-        std::string out;
-
         for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
         {
             uint32 const required = quest->RequiredItemCount[i];
@@ -2574,18 +2572,29 @@ namespace
 
             uint32 const itemId = quest->RequiredItemId[i];
             uint32 const have = bot->GetItemCount(itemId);
-            if (have >= required)
-                continue;
+            if (have < required)
+                visit(itemId, have, required);
+        }
+    }
 
-            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
-            std::string const name = proto ? proto->Name1 : ("item " + std::to_string(itemId));
+    std::string RequiredItemName(uint32 itemId)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+        return proto && !proto->Name1.empty() ? proto->Name1 : "item " + std::to_string(itemId);
+    }
 
+    /// "Large Candle 0/8" - what the companion still owes for a quest, spelled
+    /// out. A bare "missing items" whisper told the player nothing they could act
+    /// on: not which item, not how many are already in the bags.
+    std::string DescribeMissingItemsUncached(Player* bot, Quest const* quest)
+    {
+        std::string out;
+        ForEachMissingRequiredItem(bot, quest, [&](uint32 itemId, uint32 have, uint32 required)
+        {
             if (!out.empty())
                 out += ", ";
-
-            out += name + " " + std::to_string(have) + "/" + std::to_string(required);
-        }
-
+            out += RequiredItemName(itemId) + " " + std::to_string(have) + "/" + std::to_string(required);
+        });
         return out;
     }
 
@@ -5718,7 +5727,38 @@ namespace
         return out;
     }
 
-    std::string BuildPinLine(Player* owner)
+    // The per-copy suffix is ~i=have/required/hexname;... . Hex keeps chat escapes
+    // and every pin delimiter inert, including when a revision splits the suffix.
+    std::string PinMissingItems(Player* bot, Quest const* quest)
+    {
+        std::string out;
+        ForEachMissingRequiredItem(bot, quest, [&](uint32 itemId, uint32 have, uint32 required)
+        {
+            constexpr size_t kMaxNameBytes = 48;
+            std::string name = RequiredItemName(itemId);
+            name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; }), name.end());
+            if (name.empty())
+                name = "item " + std::to_string(itemId);
+            if (name.size() > kMaxNameBytes)
+            {
+                size_t cut = kMaxNameBytes - 3;
+                while ((uint8(name[cut]) & 0xC0) == 0x80)
+                    --cut;
+                name.replace(cut, std::string::npos, "...");
+            }
+            out += out.empty() ? "~i=" : ";";
+            out += std::to_string(have) + "/" + std::to_string(required) + "/";
+            constexpr char hex[] = "0123456789abcdef";
+            for (unsigned char c : name)
+            {
+                out += hex[c >> 4];
+                out += hex[c & 15];
+            }
+        });
+        return out;
+    }
+
+    std::string BuildPinLine(Player* owner, bool allowItems = true)
     {
         struct Entry
         {
@@ -5734,6 +5774,7 @@ namespace
         auto const stream = g_pinRevisions.find(owner->GetGUID().GetCounter());
         bool const versioned = stream != g_pinRevisions.end();
         bool const handInStates = versioned && stream->second.handInStates;
+        bool const pinItems = allowItems && handInStates && stream->second.pinItems;
 
         std::vector<uint32> bots;
         if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
@@ -5823,6 +5864,8 @@ namespace
                         if (!owed.empty())
                             title += ":" + owed;
                     }
+                    if (pinItems && style == 'p')
+                        title += PinMissingItems(bot, quest);
 
                     bool merged = false;
                     for (Entry& existing : entries)
@@ -5940,7 +5983,12 @@ namespace
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
-        std::string const payload = BuildPinLine(owner);
+        std::string payload = BuildPinLine(owner);
+        constexpr size_t kChunkBytes = 150;
+        // Optional detail must not push the snapshot past the reader's 512-part cap.
+        // Each non-final chunk can lose at most three bytes to a UTF-8 boundary.
+        if (payload.size() > 512 * (kChunkBytes - 3))
+            payload = BuildPinLine(owner, false);
         std::string& last = g_lastPinSync[ownerGuid];
         uint32 const now = static_cast<uint32>(time(nullptr));
         uint32 const sentAt = g_pinSyncAt[ownerGuid];
@@ -5950,7 +5998,6 @@ namespace
 
         if (auto revision = g_pinRevisions.find(ownerGuid); revision != g_pinRevisions.end())
         {
-            constexpr size_t kChunkBytes = 150;
             std::vector<std::string_view> chunks;
             for (size_t start = 0; start < payload.size(); )
             {
@@ -9052,7 +9099,7 @@ public:
         return true;
     }
 
-    /// .companionsync pins [v2 [epoch [handin]]] - recover a map snapshot, including an empty one.
+    /// .companionsync pins [v2 [epoch [handin [items]]]] - recover a map snapshot, including an empty one.
     static bool HandlePinsCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -9060,7 +9107,8 @@ public:
             return false;
 
         std::string const protocol = TrimArg(args);
-        if (protocol == "v2" || protocol == "v2 epoch" || protocol == "v2 epoch handin")
+        bool const pinItems = protocol == "v2 epoch handin items";
+        if (protocol == "v2" || protocol == "v2 epoch" || protocol == "v2 epoch handin" || pinItems)
         {
             uint32 const ownerGuid = player->GetGUID().GetCounter();
             uint32& last = g_pinRequestAt[ownerGuid];
@@ -9077,9 +9125,12 @@ public:
             if (!stream.epoch)
                 stream.epoch = NextPinEpoch();
             stream.tagged = protocol != "v2";
-            stream.handInStates = protocol == "v2 epoch handin";
+            stream.pinItems = pinItems;
+            stream.handInStates = protocol == "v2 epoch handin" || pinItems;
             if (!stream.handInStates)
                 SendProtocolLine(player, "Pin set handin 1");
+            if (!stream.pinItems)
+                SendProtocolLine(player, "Pin set items 1");
             if (!stream.tagged)
                 SendProtocolLine(player, fmt::format("Pin set session {}", stream.epoch));
             SendPinSync(player, true);

@@ -102,6 +102,7 @@ local lastPayload, lastSnapshotAt, samplePin
 local pending, appliedRevision, legacy
 local supported, lastRequestAt, manualAt, unavailable
 local pinEpoch, tagged, handInAdvertised, handInRequested
+local itemsAdvertised, itemsRequested
 local attempts = 0
 local STALE_AFTER, RETRY_AFTER, ASSEMBLY_TIMEOUT, MAX_ATTEMPTS = 120, 15, 10, 3
 
@@ -129,6 +130,24 @@ local function AcceptEpoch(epoch)
     return true
 end
 
+local function DecodeMissingItems(wire)
+    if not wire or #wire > 6 * 119 then return nil end
+    local items = {}
+    for field in wire:gmatch("[^;]+") do
+        if #items == 6 then break end
+        local have, required, hex = field:match("^(%d+)/(%d+)/(%x+)$")
+        have, required = tonumber(have), tonumber(required)
+        if have and required and have < required and required <= 4294967295 and #hex <= 96 and #hex % 2 == 0 then
+            local name = hex:gsub("%x%x", function(byte) return string.char(tonumber(byte, 16)) end)
+            if not name:find("[%z\1-\31\127]") then
+                items[#items + 1] = "Needs " .. (required - have) .. " × " .. name:gsub("|", "||")
+                    .. " (" .. have .. "/" .. required .. ")"
+            end
+        end
+    end
+    return items
+end
+
 local function SyncPins(payload)
     lastSnapshotAt = time()
     samplePin = nil
@@ -152,10 +171,17 @@ local function SyncPins(payload)
             -- companion and progress together instead of flattening independent lists.
             for raw in (name .. " + "):gmatch("(.-) %+ ") do
                 local segment = raw:gsub("^%s+", ""):gsub("%s+$", "")
+                local items
+                local suffix = segment:find("~i=", 1, true)
+                if suffix then
+                    if style == "p" then items = DecodeMissingItems(segment:sub(suffix + 3)) end
+                    segment = segment:sub(1, suffix - 1)
+                end
                 local owed = segment:match(":([%d/;]+)$")
                 local quest, companion = SplitCompanion(owed and segment:gsub(":[%d/;]+$", "") or segment)
                 if quest and quest ~= "" then
-                    pin.details[#pin.details + 1] = { quest = quest, companion = companion, owed = owed, style = pin.style }
+                    pin.details[#pin.details + 1] = { quest = quest, companion = companion, owed = owed,
+                        style = pin.style, items = items }
                     if companion then companions[companion] = true end
                 end
             end
@@ -186,7 +212,7 @@ local function RequestPins(force, opening)
         if force then Notice("Please wait a few seconds before refreshing again.") end
         return
     end
-    local upgrade = pinEpoch and handInAdvertised and not handInRequested
+    local upgrade = pinEpoch and handInAdvertised and (not handInRequested or (itemsAdvertised and not itemsRequested))
     if not force then
         if not supported or unavailable or CompanionPins.hidden or attempts >= MAX_ATTEMPTS then return end
         if pending and now - pending.at < ASSEMBLY_TIMEOUT then return end
@@ -203,6 +229,10 @@ local function RequestPins(force, opening)
         if handInAdvertised then
             handInRequested = true
             command = command .. " handin"
+            if itemsAdvertised then
+                itemsRequested = true
+                command = command .. " items"
+            end
         end
     end
     SendChatMessage(command, "SAY")
@@ -273,12 +303,15 @@ local function NewPin(index)
                 local detail = row.companion or "Companion"
                 if row.style.glyph == "?" then detail = detail .. " — " .. row.style.label end
                 if row.owed then detail = detail .. "  " .. row.owed:gsub(";", "  ·  ") end
-                titles[title][#titles[title] + 1] = detail
+                titles[title][#titles[title] + 1] = { text = detail, items = row.items }
             end
             for _, title in ipairs(order) do
                 GameTooltip:AddLine(title, 1, 0.92, 0.6, true)
                 for _, detail in ipairs(titles[title]) do
-                    GameTooltip:AddLine("  " .. detail, 0.85, 0.85, 0.85, true)
+                    GameTooltip:AddLine("  " .. detail.text, 0.85, 0.85, 0.85, true)
+                    for _, item in ipairs(detail.items or {}) do
+                        GameTooltip:AddLine("    " .. item, 0.85, 0.85, 0.85, true)
+                    end
                 end
             end
         end
@@ -479,6 +512,10 @@ CompanionPins:SetScript("OnEvent", function(self, event, message)
 
     if text == "Pin set handin 1" then
         handInAdvertised = true
+        return
+    end
+    if text == "Pin set items 1" then
+        itemsAdvertised = true
         return
     end
     local session = text:match("^Pin set session (%d+)$")

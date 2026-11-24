@@ -89,6 +89,47 @@ class CompanionPinsContract(unittest.TestCase):
         self.frame.script_OnUpdate(self.frame, 1)
         self.assertEqual(requests[2], '.companionsync pins v2 epoch handin')
 
+    def test_item_capability_upgrades_existing_hand_in_stream(self):
+        self.lua.execute('WorldMapFrame.IsShown = function() return true end')
+        self.send('CSYNC|Hello 30')
+        self.send('CSYNC|Pin set handin 1')
+        self.send('CSYNC|Pin set session 1000')
+        self.send('CSYNC|Pin set 1 1/1:')
+        g = self.lua.globals()
+        g.now = 115
+        g.CompanionPins_Request()
+        self.assertEqual(g.requests[2], '.companionsync pins v2 epoch handin')
+        self.send('CSYNC|Pin set items 1')
+        self.send('CSYNC|Pin set 1000:2 1/1:')
+        g.now = 130
+        g.CompanionPins_Request()
+        self.assertEqual(g.requests[3], '.companionsync pins v2 epoch handin items')
+
+    def test_missing_items_follow_only_their_pending_companion_on_hover(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send('CSYNC|Pin set items 1')
+        bandana = 'Red Leather Bandana'.encode().hex()
+        rune = 'Étoffe | + = , ;'.encode().hex()
+        payload = ('45,51,h=Stew@Mirdan,z=The Barrens|45,51,u=Stew@Gordan,z=The Barrens|'
+                   f'45,51,p=Stew@Ilyrin:12/15~i=12/15/{bandana} + Stew@Aeron:0/2~i=0/2/{rune};2/2/{bandana}'
+                   ' + Hunt@Kael:0/5,z=The Barrens')
+        parts = [payload[i:i + 150] for i in range(0, len(payload), 150)]
+        for i, chunk in enumerate(parts, 1):
+            self.send(f'CSYNC|Pin set 1000:1 {i}/{len(parts)}:{chunk}')
+        pin, tip = g.CompanionPinsPin1, g.GameTooltip
+        before = len(g.requests)
+        self.assertNotIn('Needs', pin.label.value or '')
+        pin.script_OnEnter(pin)
+        lines = [tip.lines[i] for i in range(1, len(tip.lines) + 1)]
+        self.assertIn('Needs 3 × Red Leather Bandana (12/15)', lines[lines.index('  Ilyrin — work left  12/15') + 1])
+        self.assertIn('Needs 2 × Étoffe || + = , ; (0/2)', lines[lines.index('  Aeron — work left  0/2') + 1])
+        self.assertEqual(sum('Needs' in line for line in lines), 2)
+        g.SlashCmdList.WLPINS('only Gordan')
+        pin.script_OnEnter(pin)
+        self.assertFalse(any('Needs' in tip.lines[i] for i in range(1, len(tip.lines) + 1)))
+        self.assertEqual(len(g.requests), before)
+
     def test_same_ender_retains_each_companions_state_and_recomputes_filtered_style(self):
         self.stub_map()
         g = self.lua.globals()

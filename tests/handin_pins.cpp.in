@@ -10,11 +10,15 @@
 
 using uint16 = unsigned short;
 using uint32 = unsigned int;
+using uint8 = unsigned char;
 using int32 = int;
 enum QuestStatus { QUEST_STATUS_NONE, QUEST_STATUS_INCOMPLETE, QUEST_STATUS_COMPLETE, QUEST_STATUS_FAILED, QUEST_STATUS_REWARDED };
 constexpr uint16 MAX_QUEST_LOG_SIZE = 1;
+constexpr uint8 QUEST_ITEM_OBJECTIVES_COUNT = 6;
 struct Quest
 {
+    uint32 RequiredItemId[QUEST_ITEM_OBJECTIVES_COUNT]{};
+    uint32 RequiredItemCount[QUEST_ITEM_OBJECTIVES_COUNT]{};
     uint32 GetQuestId() const { return 1; }
     std::string GetTitle() const { return "Stew"; }
 };
@@ -43,28 +47,32 @@ struct Player
     uint32 id;
     std::string name;
     QuestStatus status = QUEST_STATUS_INCOMPLETE;
-    bool hasItems = true;
     bool canReward = true;
     WorldObject* giver = nullptr;
+    std::map<uint32, uint32> bags;
 
     Player GetGUID() const { return *this; }
     uint32 GetCounter() const { return id; }
     bool IsInWorld() const { return true; }
     uint32 GetQuestSlotQuestId(uint16) const { return 1; }
     QuestStatus GetQuestStatus(uint32) const { return status; }
+    uint32 GetItemCount(uint32 item) const { return bags.count(item) ? bags.at(item) : 0; }
     std::string GetName() const { return name; }
     bool CanRewardQuest(Quest const*, uint32, bool) const { return canReward; }
     uint32 GetMapId() const { return 0; }
     uint32 GetPhaseMask() const { return 1; }
     float GetDistance(float x, float y, float z) const { return (x - 49) * (x - 49) + (y - 100) * (y - 100) + z * z; }
 };
+struct ItemTemplate { std::string Name1; };
 struct QuestStore {
     Quest quest;
+    std::map<uint32, ItemTemplate> items;
     Quest const* GetQuestTemplate(uint32) const { return &quest; }
+    ItemTemplate const* GetItemTemplate(uint32 id) const { return items.count(id) ? &items.at(id) : nullptr; }
 } store, *sObjectMgr = &store;
 struct WorldMapAreaRow { uint32 mapId; int32 areaId; float x1, x2, y1, y2; };
 std::vector<WorldMapAreaRow> g_worldMapAreas = { { 1, 12, 80, 0, 80, 0 }, { 0, 12, 100, 0, 100, 0 } };
-struct PinStream { bool handInStates; };
+struct PinStream { bool handInStates; bool pinItems = false; };
 std::map<uint32, PinStream> g_pinRevisions;
 std::map<uint32, Player> players;
 bool FindCompanions(uint32, std::vector<uint32>& out)
@@ -73,7 +81,7 @@ bool FindCompanions(uint32, std::vector<uint32>& out)
     return !out.empty();
 }
 Player* FindCompanionPlayer(uint32 id) { return &players.at(id); }
-std::string DescribeMissingItemsUncached(Player* bot, Quest const*) { return bot->hasItems ? "" : "missing"; }
+
 WorldObject* FindInteractableQuestEnder(Player* bot, uint32) { return bot->giver; }
 uint32 ChooseRewardIndex(Player*, Quest const*) { return 0; }
 EnderSpot DescribeQuestEnder(WorldObject* giver) { return giver->spot; }
@@ -121,9 +129,33 @@ int main()
     g_pinRevisions[99] = { true };
     assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy,z=Westfall|"
                                    "45.0000,51.0000,p=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,u=Stew@Charlie,z=Westfall");
+    store.quest.RequiredItemId[0] = 7;
+    store.quest.RequiredItemId[1] = 8;
+    store.quest.RequiredItemCount[0] = 15;
+    store.quest.RequiredItemCount[1] = 2;
+    store.items[7] = { "Red Leather Bandana" };
+    store.items[8] = { "É|+;,=\n" };
+    amy.bags = {{7, 15}, {8, 2}};
+    bob.bags = {{7, 12}, {8, 2}};
+    charlie.bags = amy.bags;
+    assert(BuildPinLine(&owner).find("~i=") == std::string::npos); // Old hand-in client.
+    g_pinRevisions[99].pinItems = true;
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy,z=Westfall|"
+                                   "45.0000,51.0000,p=Stew@Bob:1/3~i=12/15/526564204c6561746865722042616e64616e61,z=Westfall|"
+                                   "45.0000,51.0000,u=Stew@Charlie,z=Westfall");
+    bob.bags[7] = 15;
+    bob.bags[8] = 0;
+    assert(BuildPinLine(&owner).find("p=Stew@Bob:1/3~i=0/2/c3897c2b3b2c3d,z=Westfall") != std::string::npos);
+    store.items[8].Name1 = std::string(44, 'a') + "Éabc";
+    std::string expected = "~i=0/2/";
+    for (int i = 0; i < 44; ++i)
+        expected += "61";
+    assert(BuildPinLine(&owner).find(expected + "2e2e2e,z=Westfall") != std::string::npos);
+    assert(BuildPinLine(&owner, false).find("~i=") == std::string::npos);
+    g_pinRevisions[99].pinItems = false;
     amy.giver = nullptr; // Out of range is not work left and never gold.
     charlie.status = QUEST_STATUS_COMPLETE;
-    charlie.hasItems = false;
+    charlie.bags[7] = 0;
     bob.status = QUEST_STATUS_FAILED;
     assert(BuildPinLine(&owner) == "40,50,g=Stew@Charlie:1/3,z=Westfall|45.0000,51.0000,p=Stew@Charlie:1/3,z=Westfall|"
                                    "45.0000,51.0000,u=Stew@Amy,z=Westfall");

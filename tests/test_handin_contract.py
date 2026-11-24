@@ -16,12 +16,13 @@ class HandInContract(unittest.TestCase):
             self.skipTest('Run in a C++20 developer shell or set CXX to exercise map snapshots.')
         snippets = []
         for first, following in (
+            ('    // Share current bag counts', '    /// A copy can be COMPLETE'),
             ('    bool WmaConvert(', '    /// The zone that owns'),
             ('    struct EnderPin', '    /// "map 52, 34"'),
             ('    std::optional<EnderPin> PlotEnder(EnderSpot const& spot)\n', '    /// content-keyed, bounded by the quests'),
             ('    WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)\n', '    void DeliverHandIns('),
             ('    std::string SafePinName(', '    /// How far each companion'),
-            ('    std::string BuildPinLine(', '    /// Send the pin line'),
+            ('    // The per-copy suffix', '    /// Send the pin line'),
         ):
             start = SOURCE.index(first)
             snippets.append(SOURCE[start:SOURCE.index(following, start)])
@@ -30,7 +31,7 @@ class HandInContract(unittest.TestCase):
             source, exe = Path(tmp) / 'pins.cpp', Path(tmp) / 'pins.exe'
             source.write_text(fixture.replace('@@PRODUCTION@@', '\n'.join(snippets)), encoding='utf-8')
             msvc = Path(compiler).stem.lower() in {'cl', 'clang-cl'}
-            flags = ['/nologo', '/std:c++20', '/EHsc', f'/Fe{exe}'] if msvc else ['-std=c++20', '-o', str(exe)]
+            flags = ['/nologo', '/std:c++20', '/EHsc', '/utf-8', f'/Fe{exe}'] if msvc else ['-std=c++20', '-o', str(exe)]
             for args in ([compiler, *flags, str(source)], [str(exe)]):
                 result = subprocess.run(args, cwd=tmp, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -131,8 +132,11 @@ class HandInContract(unittest.TestCase):
         self.assertIn('if (versioned || MultiCompanionSpeech(bot))', pins)
         self.assertIn('existing.style != style', pins)
         command = SOURCE.split('static bool HandlePinsCommand(', 1)[1].split('uint32 botGuid = 0;', 1)[0]
-        self.assertIn('stream.handInStates = protocol == "v2 epoch handin";', command)
+        self.assertIn('bool const pinItems = protocol == "v2 epoch handin items";', command)
+        self.assertIn('stream.handInStates = protocol == "v2 epoch handin" || pinItems;', command)
+        self.assertIn('stream.pinItems = pinItems;', command)
         self.assertIn('SendProtocolLine(player, "Pin set handin 1");', command)
+        self.assertIn('SendProtocolLine(player, "Pin set items 1");', command)
 
     def test_static_marker_checks_phase_and_converts_in_givers_own_map(self):
         finder = SOURCE.split('EnderSpot FindQuestEnder(', 1)[1].split('std::string MapCoords(', 1)[0]
