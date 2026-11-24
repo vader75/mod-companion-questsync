@@ -897,9 +897,11 @@ function G.Refresh()
 
             if card.roleButton then
                 local role = (G.Roles and G.Roles[companion.name]) or "auto"
-                card.roleButton:SetText("Role: " .. role)
+                local note = G.RoleNotes and G.RoleNotes[companion.name]
+                card.roleButton:SetText("Role: " .. role .. (note and " !" or ""))
                 local text = card.roleButton:GetFontString()
-                if role == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
+                if note then text:SetTextColor(1.0, 0.45, 0.35)
+                elseif role == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
                 else text:SetTextColor(1.0, 0.82, 0.30) end
             end
 

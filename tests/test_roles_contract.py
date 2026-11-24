@@ -45,17 +45,59 @@ class StorageContract(unittest.TestCase):
         self.assertIn('RoleKnown(role) ? role : std::string("auto")', body)
 
 
-class NoBehaviourYet(unittest.TestCase):
-    """Chunk one must not steer anything. If this fails, the strategy layer landed."""
+class StrategyContract(unittest.TestCase):
+    """The point of a role: what the companion is allowed to do in a fight."""
 
-    def test_roles_do_not_steer_combat_yet(self):
-        # the module already uses ChangeStrategy for "+gather"; a role-driven combat edit is
-        # what must not have landed yet, so the check is scoped to the role code itself
-        body = slice_from("    constexpr char const* kCompanionRoles", 4200)
-        self.assertFalse("ChangeStrategy" in body, "a role is already steering strategies")
+    def test_tank_is_allowed_to_taunt(self):
+        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn('if (role == "tank")', body)
+        self.assertIn('{ "tank", BOT_STATE_COMBAT, true }', body)
 
-    def test_documentation_says_so(self):
-        self.assertIn("Nothing yet", DOC)
+    def test_healer_heals_and_drops_tank_and_pull(self):
+        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn('{ "heal", BOT_STATE_COMBAT, true }', body)
+        self.assertIn('{ "tank", BOT_STATE_COMBAT, false }', body)
+        self.assertIn('{ "pull", BOT_STATE_NON_COMBAT, false }', body)
+
+    def test_dps_and_support_cannot_taunt_or_pull(self):
+        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn('if (role == "dps" || role == "support")', body)
+
+    def test_auto_touches_nothing(self):
+        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn("return {};", body)
+        apply_body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        self.assertIn('if (role == "auto")', apply_body)
+
+    def test_an_edit_that_did_not_take_is_verified_then_reported(self):
+        body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        self.assertIn("ai->ChangeStrategy(std::string(edit.add ? \"+\" : \"-\") + edit.name, edit.state);",
+                      body)
+        self.assertIn("if (ai->HasStrategy(edit.name, edit.state) != edit.add)", body)
+
+    def test_the_role_is_re_asserted_because_playerbots_resets_strategies(self):
+        body = slice_from("    void ReconcileRoles(Player* owner)")
+        self.assertIn("kRoleReassertSeconds", body)
+        self.assertIn("ApplyRoleStrategies(bot)", body)
+        self.assertIn("kRoleReassertSeconds = 60", SOURCE)
+        self.assertIn("ReconcileRoles(player);", SOURCE)
+
+    def test_role_state_is_purged_with_the_bot_guid(self):
+        body = slice_from("void PurgeCompanionState(", 2600)
+        self.assertIn("g_roleNotes.erase(botGuid);", body)
+        self.assertIn("g_roleApplyAt.erase(botGuid);", body)
+
+    def test_it_only_ever_edits_an_owned_companions_ai(self):
+        body = slice_from("    void ReconcileRoles(Player* owner)")
+        self.assertIn("IsControlledCompanion(bot, owner)", body)
+
+    def test_a_shortfall_is_named_not_swallowed(self):
+        body = slice_from("    static bool HandleRoleCommand")
+        self.assertIn("this class has no {} strategy", body)
+        self.assertIn('line += ":na";', SOURCE)
+
+    def test_documentation_reflects_that_it_is_live(self):
+        self.assertIn("Each role is translated into strategy edits", DOC)
         self.assertIn("no setter", DOC)
 
 
@@ -77,7 +119,7 @@ class CommandContract(unittest.TestCase):
         self.assertIn("you have no companion called", body)
 
     def test_change_is_echoed_to_the_addon(self):
-        body = slice_from("    static bool HandleRoleCommand")
+        body = slice_from("    static bool HandleRoleCommand", 4000)
         self.assertIn('SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));', body)
 
 
@@ -99,7 +141,7 @@ class SyncContract(unittest.TestCase):
 class AddonContract(unittest.TestCase):
     def test_roles_line_is_parsed(self):
         self.assertIn('text:match("^Roles (.*)$")', CORE)
-        self.assertIn('pair:match("^(.-)=(%a+)$")', CORE)
+        self.assertIn('pair:match("^(.-)=(%a+)(.*)$")', CORE)
 
     def test_each_card_can_set_its_own_role(self):
         self.assertIn("card.roleButton", UI)
@@ -107,6 +149,10 @@ class AddonContract(unittest.TestCase):
 
     def test_the_button_shows_the_stored_role_not_the_last_click(self):
         self.assertIn('local role = (G.Roles and G.Roles[companion.name]) or "auto"', UI)
+
+    def test_a_shortfall_is_marked_on_the_card(self):
+        self.assertIn('G.RoleNotes[name] = true', CORE)
+        self.assertIn('(note and " !" or "")', UI)
 
     def test_the_cycle_covers_every_role(self):
         self.assertIn('local ORDER = { "auto", "tank", "healer", "dps", "support" }', UI)

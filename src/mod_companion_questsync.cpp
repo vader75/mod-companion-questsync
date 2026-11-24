@@ -552,6 +552,9 @@ namespace
     std::map<std::pair<uint32, uint32>, uint32> g_vanishLogged;      // (bot, quest) -> unix time
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
     std::map<uint32, std::string> g_formation;                     // owner guid -> formation preset
+    std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategies this class lacks
+    std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
+    uint32 constexpr kRoleReassertSeconds = 60;   // playerbots drops strategies on spec/level change
 
     bool AnyPlayerInWorld()
     {
@@ -867,6 +870,8 @@ namespace
         // Level latches live in the same pooled key space: a recycled guid must not
         // inherit "already taught" or "already geared" from the body that had it first,
         // or a fresh companion silently skips its spell, talent and profession catch-up.
+        g_roleNotes.erase(botGuid);
+        g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
         g_trimAt.erase(botGuid);
@@ -1083,6 +1088,75 @@ namespace
         return CompanionRole(botGuid) == wanted;
     }
 
+    /// What a role asks of playerbots, as strategy edits.
+    ///
+    /// The names are playerbots' own and they are class-specific: a priest has no "tank"
+    /// strategy and a warrior has no "heal". Asking for one is not an error - it simply
+    /// comes back absent, which ApplyRoleStrategies reports instead of hiding.
+    struct RoleStrategyEdit
+    {
+        char const* name;
+        BotState state;
+        bool add;
+    };
+
+    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role)
+    {
+        if (role == "tank")
+            return { { "tank", BOT_STATE_COMBAT, true } };
+
+        if (role == "healer")
+            return { { "heal", BOT_STATE_COMBAT, true },
+                     { "tank", BOT_STATE_COMBAT, false },
+                     { "pull", BOT_STATE_NON_COMBAT, false } };
+
+        if (role == "dps" || role == "support")
+            return { { "tank", BOT_STATE_COMBAT, false },
+                     { "pull", BOT_STATE_NON_COMBAT, false } };
+
+        return {};   // auto: the module keeps its hands off this companion entirely
+    }
+
+    /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
+    /// can say "no tank strategy for this class" rather than showing a control that lies.
+    ///
+    /// Removals cannot fail in a way worth reporting: a strategy the class does not have is
+    /// already absent, which is what the role asked for.
+    std::string ApplyRoleStrategies(Player* bot)
+    {
+        std::string missed;
+        if (!bot || !bot->IsInWorld())
+            return missed;
+
+        std::string const role = CompanionRole(bot->GetGUID().GetCounter());
+        if (role == "auto")
+            return missed;
+
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai)
+            return missed;
+
+        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role))
+        {
+            bool const present = ai->HasStrategy(edit.name, edit.state);
+            if (edit.add == present)
+                continue;
+
+            ai->ChangeStrategy(std::string(edit.add ? "+" : "-") + edit.name, edit.state);
+
+            // a "+tank" that leaves the strategy absent means this class has no such
+            // strategy - worth saying out loud, because the player asked for it
+            if (ai->HasStrategy(edit.name, edit.state) != edit.add)
+            {
+                if (!missed.empty())
+                    missed += ",";
+                missed += edit.name;
+            }
+        }
+
+        return missed;
+    }
+
     bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
     {
         bots.clear();
@@ -1156,8 +1230,45 @@ namespace
             if (!line.empty())
                 line += "|";
             line += name + "=" + CompanionRole(botGuid);
+            auto const note = g_roleNotes.find(botGuid);
+            if (note != g_roleNotes.end() && !note->second.empty())
+                line += ":na";       // this class cannot honour part of the role
         }
         return line;
+    }
+
+    /// Re-assert every owned companion's role, throttled.
+    ///
+    /// A one-shot apply silently lapses: playerbots resets strategies when the spec or level
+    /// changes, and the companion then quietly goes back to taunting. Re-asserting on a slow
+    /// cadence is what makes the role a standing instruction instead of a gesture.
+    void ReconcileRoles(Player* owner)
+    {
+        if (!owner || !owner->IsInWorld() || !RoleColumnPresent())
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !IsControlledCompanion(bot, owner))
+                continue;
+
+            uint32& at = g_roleApplyAt[botGuid];
+            if (at && now - at < kRoleReassertSeconds)
+                continue;
+
+            at = now;
+            std::string const missed = ApplyRoleStrategies(bot);
+            if (missed.empty())
+                g_roleNotes.erase(botGuid);
+            else
+                g_roleNotes[botGuid] = missed;
+        }
     }
 
     static Player* FindDeliveryOwner(uint32 ownerGuid)
@@ -8162,6 +8273,7 @@ public:
                 // Transport has its own cadence even when quest auto-sync is disabled.
                 SendHeartbeat(player);
                 ApplyFormation(player);   // spacing only; combat hands movement back
+                ReconcileRoles(player);
 
                 std::vector<uint32> bots;
                 if (!FindCompanions(player->GetGUID().GetCounter(), bots))
@@ -8808,6 +8920,25 @@ public:
         }
 
         handler->PSendSysMessage("|cff20ff20{}|r is now |cffffffff{}|r.", a[0], role);
+
+        Player* bot = FindCompanionPlayer(botGuid);
+        if (!bot || !bot->IsInWorld())
+        {
+            handler->PSendSysMessage("  It applies the moment {} is summoned.", a[0]);
+        }
+        else if (std::string const missed = ApplyRoleStrategies(bot); !missed.empty())
+        {
+            g_roleNotes[botGuid] = missed;
+            handler->PSendSysMessage("  |cffffd200this class has no {} strategy|r, so that part of "
+                                     "the role is not in force - it will fight, just not that way.",
+                                     missed);
+        }
+        else
+        {
+            g_roleNotes.erase(botGuid);
+        }
+        g_roleApplyAt[botGuid] = static_cast<uint32>(time(nullptr));
+
         SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
         return true;
     }

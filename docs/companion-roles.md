@@ -28,29 +28,42 @@ What the module can actually do is control the strategies a companion runs and w
 allowed to engage. The role is the record those decisions will read, which is why it is
 stored here and not in the bot.
 
-## What a role does today
+## What a role does
 
-Nothing yet, and that is deliberate: every role behaves exactly like `auto` until the next
-two layers land. Recording intent first means the behaviour can be introduced against a
-value you have already set, rather than guessing.
+Each role is translated into strategy edits on that companion's own AI, applied when the
+role is set, when the companion arrives, and re-asserted every minute:
 
-Coming, in order:
+| Role | Edits |
+|---|---|
+| `tank` | `+tank` in combat — it is allowed to taunt and hold the fight |
+| `healer` | `+heal` in combat, `-tank` and `-pull` — it heals, never taunts, never pulls |
+| `dps` | `-tank`, `-pull` — contributes damage, cannot taunt or pull off you |
+| `support` | `-tank`, `-pull` — as `dps`, but expected to be buffing and following your target |
+| `auto` | nothing at all |
 
-1. **Strategies** — `tank` gains `+tank`; `healer` gains `+heal` and drops `tank`/`pull`;
-   `dps` and `support` drop `tank`/`pull` so they cannot taunt or pull off you. Applied on
-   summon, login, role change and re-asserted periodically, because playerbots resets
-   strategies on spec and level changes. Strategy names are class-specific: anything the
-   class does not have is reported on the card instead of silently ignored.
-2. **Etiquette** — per-companion engagement policy (auto / your target only / when I am hit
-   / never), so "don't compete with me" holds even for classes without a clean strategy split.
+The re-assert matters: playerbots resets a bot's strategies when its spec or level changes,
+so a one-shot apply would quietly lapse and the companion would go back to taunting.
+
+### When a class cannot honour the role
+
+The strategy names are playerbots' own and they are class-specific — a warrior has no
+`heal`, a priest has no `tank`. Every add is verified afterwards, and a role the class
+cannot fully satisfy is marked on the card (`Role: healer !`) and said plainly in chat:
+
+> this class has no heal strategy, so that part of the role is not in force — it will
+> fight, just not that way.
+
+A failure to establish part of a role is reported, never swallowed.
 
 Known gaps, so nobody expects them:
 
 - **Pet taunt** (Growl) is not covered by dropping the `tank` strategy.
-- **Threat** from a DPS companion still accumulates; etiquette can delay engagement, not
-  erase threat.
-- A companion whose spec contradicts its role (a protector warrior marked `dps`) will lose
-  the tank strategy but will not suddenly deal damage like a real DPS.
+- **Threat** from a DPS companion still accumulates; a role can stop taunts and pulls, not
+  the threat a fight generates.
+- A companion whose spec contradicts its role (a protector warrior marked `dps`) loses the
+  tank strategy but will not suddenly deal damage like a real DPS.
+- **Etiquette** (engage only on your target, only when you hold aggro) is the next layer and
+  is not in yet — today a `dps` companion still joins any fight the pitch-in rules allow.
 
 ## Setting it up
 
