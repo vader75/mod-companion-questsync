@@ -3082,6 +3082,18 @@ namespace
         }
     }
 
+    /// The tool items a companion's two professions depend on. A bag cleanup must never
+    /// sell them: a pick and a knife are "outgrown" by every measure except usefulness.
+    static std::set<uint32> ProfessionToolItems(uint8 cls)
+    {
+        std::set<uint32> items;
+        auto const pair = ClassProfessionPair(cls);
+        for (uint16 const skill : { pair.first, pair.second })
+            if (uint32 const tool = ProfessionOf(skill).tool)
+                items.insert(tool);
+        return items;
+    }
+
     /// The skill ceiling a trainer would sell at this level - the classic tiers.
     static uint32 ProfessionCap(uint8 level)
     {
@@ -4788,19 +4800,37 @@ namespace
 
         // One entry per item id: the stacks it carries, and how many units they hold.
         std::map<uint32, std::vector<Item*>> carried;
+        std::vector<Item*> outgrown;
+        std::set<uint32> const tools = ProfessionToolItems(bot->getClass());
+        uint8 const level = bot->GetLevel();
         VisitCarriedItems(bot, [&](Item* item)
         {
             ItemTemplate const* proto = item->GetTemplate();
-            if (!proto || proto->Class != ITEM_CLASS_TRADE_GOODS || !proto->SellPrice)
+            if (!proto || !proto->SellPrice)
                 return;
             if (item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
                 return;
-            // Soulbound stock is the companion's own kit, never surplus.
-            if (item->IsSoulBound())
+            if (proto->Class == ITEM_CLASS_TRADE_GOODS)
+            {
+                // Soulbound stock is the companion's own kit, never surplus.
+                if (item->IsSoulBound())
+                    return;
+                carried[proto->ItemId].push_back(item);
                 return;
-            carried[proto->ItemId].push_back(item);
+            }
+            // Gear it has outgrown. Playerbots auto-stores the piece it replaces, so every
+            // upgrade would otherwise leave the old armour in the pack for good.
+            if (proto->Class != ITEM_CLASS_WEAPON && proto->Class != ITEM_CLASS_ARMOR)
+                return;
+            if (proto->Quality > ITEM_QUALITY_UNCOMMON)
+                return;                     // a lucky blue is not bag filler
+            if (tools.count(item->GetEntry()))
+                return;                     // the pick and the knife are never outgrown
+            if (uint32(proto->RequiredLevel) + 2 >= level)
+                return;                     // still this level's gear, or the owner's gift
+            outgrown.push_back(item);
         });
-        if (carried.empty())
+        if (carried.empty() && outgrown.empty())
             return 0;
 
         last = now;
@@ -4837,15 +4867,37 @@ namespace
             }
         }
 
-        if (!sold)
+        uint32 gearSold = 0;
+        for (Item* item : outgrown)
+        {
+            auto const guid = item->GetGUID();
+            uint16 const pos = item->GetPos();
+            WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
+            request.VendorGuid = vendor->GetGUID();
+            request.ItemGuid = guid;
+            bot->GetSession()->HandleSellItemOpcode(request);
+            Item* remaining = bot->GetItemByPos(pos);
+            if (remaining && remaining->GetGUID() == guid)
+                continue;
+            ++gearSold;
+        }
+
+        if (!sold && !gearSold)
             return 0;
         if (g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare trade-good stack(s) to {} (free slots now {})",
-                bot->GetName(), sold, vendor->GetName(), bot->GetFreeInventorySpace());
-        SayToOwner(bot, owner,
-            "My pack was nearly full, so I sold " + std::to_string(sold) + " spare stack(s) of " + names +
-            " at the vendor - I kept enough for our recipes.", 30);
-        return sold;
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare trade-good stack(s) and {} outgrown piece(s) to {} (free slots now {})",
+                bot->GetName(), sold, gearSold, vendor->GetName(), bot->GetFreeInventorySpace());
+
+        std::string said = "My pack was nearly full, so I sold ";
+        if (sold)
+            said += std::to_string(sold) + " spare stack(s) of " + names;
+        if (sold && gearSold)
+            said += " and ";
+        if (gearSold)
+            said += std::to_string(gearSold) + " piece(s) of gear I had outgrown";
+        said += " at the vendor - I kept enough for our recipes.";
+        SayToOwner(bot, owner, said, 30);
+        return sold + gearSold;
     }
 
     /// Wear upgrades even when the bags are not full.

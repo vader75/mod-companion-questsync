@@ -41,6 +41,16 @@ class ManagedInventory(unittest.TestCase):
         # Re-gearing happens on claim and on the periodic pass, not only when asked.
         self.assertGreaterEqual(SOURCE.count('RefreshLevelGear('), 3)
 
+    def test_outgrown_gear_is_sold_instead_of_staying_in_the_bag(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        # Playerbots auto-stores the piece it replaces, so the bag would keep every old set.
+        for guard in ('ITEM_CLASS_WEAPON', 'ITEM_CLASS_ARMOR',
+                      'RequiredLevel) + 2 >= level', 'Quality > ITEM_QUALITY_UNCOMMON'):
+            self.assertIn(guard, trim)
+        # A profession tool is never outgrown: the companion still needs its pick and knife.
+        self.assertIn('ProfessionToolItems(bot->getClass())', trim)
+        self.assertIn('tools.count(item->GetEntry())', trim)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
