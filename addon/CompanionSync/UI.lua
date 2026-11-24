@@ -407,6 +407,22 @@ local function CreateCard()
     end, "Teach or update this companion's gathering and crafting professions.")
     card.professionsButton:SetPoint("LEFT", card.trainButton, "RIGHT", 6, 0)
 
+    -- The role is recorded intent, nothing more yet: it decides which strategies the module
+    -- will hand this companion later, and "auto" means it keeps its hands off entirely.
+    card.roleButton = Button(card, "Role: auto", 118, function()
+        if not card.companion then return end
+        local ORDER = { "auto", "tank", "healer", "dps", "support" }
+        local current = (G.Roles and G.Roles[card.companion.name]) or "auto"
+        local at = 1
+        for i, role in ipairs(ORDER) do if role == current then at = i end end
+        local nextRole = ORDER[(at % #ORDER) + 1]
+        G.Roles = G.Roles or {}
+        G.Roles[card.companion.name] = nextRole
+        card.roleButton:SetText("Role: " .. nextRole)
+        G.Run(".companionsync role " .. card.companion.name .. " " .. nextRole)
+    end, "What this companion is for. Auto leaves it entirely to its own AI.", false)
+    card.roleButton:SetPoint("TOPLEFT", 16, -132)
+
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
         if CanSupply(companion) then G.CollectDelivery(companion.name) end
@@ -877,6 +893,14 @@ function G.Refresh()
             else
                 card.trainButton:Hide()
                 card.professionsButton:Hide()
+            end
+
+            if card.roleButton then
+                local role = (G.Roles and G.Roles[companion.name]) or "auto"
+                card.roleButton:SetText("Role: " .. role)
+                local text = card.roleButton:GetFontString()
+                if role == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
+                else text:SetTextColor(1.0, 0.82, 0.30) end
             end
 
             card.primary:SetText(online and "Dismiss" or "Summon")

@@ -606,6 +606,17 @@ listener:SetScript("OnEvent", function(_, event, message)
         ProtocolActivity()
         return
     end
+    local roles = text:match("^Roles (.*)$")
+    if roles then
+        G.Roles = {}
+        for pair in roles:gmatch("[^|]+") do
+            local name, role = pair:match("^(.-)=(%a+)$")
+            if name then G.Roles[name] = role end
+        end
+        ProtocolActivity()
+        if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+        return
+    end
     local formation = text:match("^Formation (%a+)$")
     if formation then
         G.Formation = formation

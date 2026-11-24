@@ -1010,6 +1010,79 @@ namespace
             "SELECT 1 FROM cq_companion_custody WHERE bot_guid = {} AND tracking = {}", botGuid, uint32(tracking)));
     }
 
+    // ------------------------------------------------------------------ roles
+    //
+    // A role is the player's statement of intent for one companion. playerbots derives its
+    // own BotRoles from the talent spec and offers no setter (AiFactory does the assigning),
+    // so this is the module's record - it is what later decides which strategies a companion
+    // gets and how it is allowed to engage. "auto" keeps the module's hands off entirely.
+    constexpr char const* kCompanionRoles[] = { "auto", "tank", "healer", "dps", "support" };
+
+    std::atomic<int> g_roleColumn{0};   // 0 unknown, 1 present, -1 missing
+
+    bool RoleColumnPresent()
+    {
+        int state = g_roleColumn.load();
+        if (state)
+            return state > 0;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name = 'role'");
+        state = (row && row->Fetch()[0].Get<uint64>() != 0) ? 1 : -1;
+        g_roleColumn = state;
+
+        if (state < 0)
+            LOG_WARN("server.loading", "[CompanionQuestSync] cq_companion_custody has no role column; "
+                                       "companion roles stay unavailable until sql/companion-roles.sql is imported");
+        return state > 0;
+    }
+
+    bool RoleKnown(std::string const& role)
+    {
+        for (char const* known : kCompanionRoles)
+            if (role == known)
+                return true;
+        return false;
+    }
+
+    std::string RoleOrAuto(std::string role)
+    {
+        std::transform(role.begin(), role.end(), role.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        return RoleKnown(role) ? role : std::string("auto");
+    }
+
+    /// The stored role for a body: "auto" when the row predates the column or says nothing.
+    std::string CompanionRole(uint32 botGuid)
+    {
+        if (!RoleColumnPresent())
+            return "auto";
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT role FROM cq_companion_custody WHERE bot_guid = {} AND module = 'cq' LIMIT 1", botGuid);
+        if (!row)
+            return "auto";
+
+        Field* field = row->Fetch();
+        if (field[0].IsNull())
+            return "auto";
+        return RoleOrAuto(field[0].Get<std::string>());
+    }
+
+    /// Store a role, then read it back: a write that did not land must not look like one that did.
+    bool SetCompanionRole(uint32 ownerGuid, uint32 botGuid, std::string const& role)
+    {
+        if (!RoleColumnPresent() || !HasCurrentCustody(ownerGuid, botGuid, false))
+            return false;
+
+        std::string const wanted = RoleOrAuto(role);
+        CharacterDatabase.DirectExecute(
+            "UPDATE cq_companion_custody SET role = '{}' WHERE bot_guid = {} AND owner_guid = {} "
+            "AND module = 'cq' AND state = 'owned'", wanted, botGuid, ownerGuid);
+        return CompanionRole(botGuid) == wanted;
+    }
+
     bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
     {
         bots.clear();
@@ -1057,6 +1130,34 @@ namespace
     {
         Player* body = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid));
         return body && body->GetSession() && body->GetSession()->IsBot() ? body : nullptr;
+    }
+
+    /// `Roles Vorrin=tank|Branros=auto` - the addon's view of what each companion is for.
+    std::string RoleLine(uint32 ownerGuid)
+    {
+        std::vector<uint32> bots;
+        if (!RoleColumnPresent() || !FindCompanions(ownerGuid, bots))
+            return std::string();
+
+        std::string line;
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            std::string name = bot ? bot->GetName() : std::string();
+            if (name.empty())
+            {
+                QueryResult row = CharacterDatabase.Query("SELECT name FROM characters WHERE guid = {}", botGuid);
+                if (!row)
+                    continue;
+                name = row->Fetch()[0].Get<std::string>();
+            }
+            if (name.find('|') != std::string::npos || name.find('=') != std::string::npos)
+                continue;                        // a separator in a name would split the line
+            if (!line.empty())
+                line += "|";
+            line += name + "=" + CompanionRole(botGuid);
+        }
+        return line;
     }
 
     static Player* FindDeliveryOwner(uint32 ownerGuid)
@@ -6484,6 +6585,8 @@ namespace
         SendProtocolLine(owner, fmt::format("Sync capabilities 1 {} {}",
             kAddonHeartbeatSeconds, g_cfg.allowCreate ? 1 : 0));
         SendProtocolLine(owner, "Formation " + FormationFor(owner));
+        if (std::string const roles = RoleLine(owner->GetGUID().GetCounter()); !roles.empty())
+            SendProtocolLine(owner, "Roles " + roles);
 #ifdef AC_TRADE_OFFER_COMMIT
         SendProtocolLine(owner, "Delivery receipts 1");
 #endif
@@ -8654,6 +8757,61 @@ public:
         }
     }
 
+    /// .companionsync role <companion> [auto|tank|healer|dps|support]
+    ///
+    /// Records intent per companion. Nothing about movement or combat changes yet: "auto"
+    /// and every other role behave identically until the strategy and etiquette layers land,
+    /// which is deliberate - the record is worth having before it starts steering anything.
+    static bool HandleRoleCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        std::vector<std::string> const a = SplitArgs(args, 2);
+
+        if (a.size() < 2)
+        {
+            std::string const line = RoleLine(ownerGuid);
+            handler->PSendSysMessage("|cffff8000role|r: {}. Use role <companion> auto | tank | healer | dps | support.",
+                                     line.empty() ? "no companions with roles yet" : line);
+            return true;
+        }
+
+        std::string const role = FormationLower(a[1]);
+        if (!RoleKnown(role))
+        {
+            handler->PSendSysMessage("|cffff8000role|r: '{}' is not one of auto, tank, healer, dps, support.", a[1]);
+            return true;
+        }
+
+        uint32 const botGuid = ResolveOwnedCompanion(ownerGuid, a[0]);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000role|r: you have no companion called '{}'.", a[0]);
+            return true;
+        }
+
+        if (!RoleColumnPresent())
+        {
+            handler->PSendSysMessage("|cffff8000role|r: roles are not set up yet on this realm "
+                                     "(import sql/companion-roles.sql).");
+            return true;
+        }
+
+        if (!SetCompanionRole(ownerGuid, botGuid, role))
+        {
+            handler->PSendSysMessage("|cffff8000role|r: could not store {} as {}.", a[0], role);
+            return true;
+        }
+
+        handler->PSendSysMessage("|cff20ff20{}|r is now |cffffffff{}|r.", a[0], role);
+        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        return true;
+    }
+
     /// .companionsync formation [off|tight|loose|spread]
     ///
     /// Per owner per session: the preset is spacing behind *you*, so it is not a property
@@ -8760,6 +8918,7 @@ public:
         static ChatCommandTable companionSyncTable =
         {
             { "formation", HandleFormationCommand, SEC_PLAYER, Console::No },
+            { "role",      HandleRoleCommand,      SEC_PLAYER, Console::No },
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
