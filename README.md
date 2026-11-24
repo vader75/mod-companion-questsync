@@ -121,12 +121,12 @@ All module keys below use the `CompanionQuestSync.` prefix. The [config template
 | Setting | Shipped default | What to check |
 | --- | --- | --- |
 | `Enable` / `AutoSync` / `IntervalSeconds` | `1` / `1` / `30` | Enable the module and set how often it reconciles existing quests. |
-| `LevelMode` | `1` | Raise only. `0` leaves levels alone; `2` can also lower them. |
+| `LevelMode` | `1` | Raise only, in both modes: `0` leaves levels alone, `2` keeps the companion level with you by raising it. Neither demotes. |
 | `SyncCompletion` / `ForceAccept` | `1` / `0` | Recheck companion completion. Leave `ForceAccept=0` to respect eligibility. |
 | `DropExtraBotQuests` / `DropExtraGraceSeconds` | `1` / `120` | **Can remove companion-only quests** after the grace period. Set `DropExtraBotQuests=0` if you want to keep those quests. `DropFailedBotQuests` is off by default. |
 | `RequireGrouped` | `0` | Set to `1` to limit quest sync to grouped companions, not general upkeep. |
 | `HandInMode` / `HandInDelaySeconds` | `1` / `20` | `0` disables module hand-ins; `1` uses native interaction; `2` also gives a travel reminder. `HandInNearDistance` controls the reminder threshold, not native interaction range. |
-| `MapPins` / `PinSync` | `1` / `1` | Enable companion markers; install CompanionPins on the client to see them. |
+| `MapPins` / `PinSync` | `1` / `1` | `MapPins` pushes the markers, `PinSync` governs the protocol; both must be on. Install CompanionPins on the client to see them. |
 | `AllowCreate` / `PoolAccountType` | `1` / `2` | Player-side claims need reviewed stock on eligible AddClass accounts. Disabling player creation is not a substitute for guarding all allocators. |
 | `AutoProduce` / `AutoTrade` / `MailHome` | `1` / `1` / `1` | Background crafting, guarded town trades, and curated mail are separate switches. `AutoTrade=0` leaves manual offers available on a patched build. |
 

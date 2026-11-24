@@ -26,7 +26,9 @@
 #    CompanionQuestSync.LevelMode
 #        0 = never touch the companion's level.
 #        1 = raise the companion to the owner's level (never lower it).
-#        2 = make the companion exactly the owner's level (raise and lower).
+#        2 = keep the companion level with the owner by raising it, exactly as 1 does.
+#            Neither mode demotes: GiveLevel downwards strips spell ranks and can
+#            strand talent points, so a companion that earned a level keeps it.
 #        Quests gate on quest_template.MinLevel, so a companion below its
 #        owner's level simply cannot take the owner's quests - this is the
 #        switch that fixes that. Raising a companion can make its own quests
@@ -115,6 +117,8 @@
 #            with the companion's name.
 #        2 = the above, plus a heartbeat line per window (see HeartbeatSeconds):
 #            passes, adds, completions, drops and whether the two logs line up.
+#        3 = the above, plus per-pass timing and note-priority arbitration. Noisy;
+#            use it to find why a specific pass acted or stayed silent.
 #        Default: 0
 #
 #    CompanionQuestSync.TidyInventory

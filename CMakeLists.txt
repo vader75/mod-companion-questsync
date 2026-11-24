@@ -5,9 +5,11 @@
 # .conf.dist into the server's module config directory.
 #
 # The playerbots integration (sell vendor trash, wear upgrades, item-usage verdict)
-# is compiled only when mod-playerbots is present: the modules build defines
-# MOD_PLAYERBOTS for every module in that case. Without it the module still builds
-# and still syncs quests — it just cannot ask the bot's own AI to tidy its bags.
+# is compiled only when MOD_PLAYERBOTS is defined, which the modules build sets when
+# mod-playerbots is present. The playerbots HEADERS are still included unconditionally
+# (ItemUsageValue.h, PlayerbotAI.h, Playerbots.h), so a build without that module's
+# source on the include path will not compile: keep mod-playerbots checked out beside
+# this module even if you leave the AI-backed behaviour compiled out.
 
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src")
 

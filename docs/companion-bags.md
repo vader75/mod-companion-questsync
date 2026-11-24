@@ -27,7 +27,7 @@ in `src/mod_companion_questsync.cpp` next to the policies that use them.
 | Profession tools (pick, knife) | Never sold | Matched by item id from the same table that grants them |
 | Quest items, keys, containers in use | Never sold | Guarded by `CanReleaseItem` and the quest-need lookups |
 | Items in a trade window, refundable items | Never touched | Selling mid-trade corrupted stacks before; refundables are the owner's purchase |
-| Bags tight, no merchant nearby | Spare stacks posted to the owner by mail, one letter at a time | A player would bank or mail, not stand there holding it |
+| Bags tight, no merchant nearby | Spare stacks posted to the owner by mail, twelve to a letter | A player would bank or mail, not stand there holding it |
 | Bags tight near a merchant | Restocking stops until the pack is under control | Never buy into a wall |
 | Kit lags the level raised for it | Equipment slots re-geared incrementally at claim and every 5 levels | A pool body is a level-1 starter; Playerbots dresses it for its real level |
 

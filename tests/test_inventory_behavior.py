@@ -21,6 +21,11 @@ class InventoryBehavior(unittest.TestCase):
     def test_cpp_policies_with_permutations_expiry_and_transaction_outcomes(self):
         compiler = os.environ.get('CXX') or shutil.which('cl') or shutil.which('c++')
         if not compiler:
+            # This is one of only two tests that compile and run the module's own code; a
+            # suite that silently skips it says nothing about behaviour. Set CQ_REQUIRE_CXX=1
+            # in CI so a missing toolchain fails the run instead of hiding behind a skip.
+            if os.environ.get('CQ_REQUIRE_CXX'):
+                self.fail('No C++ compiler: set CXX or CQ_REQUIRE_CXX=0 to allow skipping.')
             self.skipTest('Run in a C++20 developer shell or set CXX to exercise inventory policies.')
         fixture = Path(__file__).with_name('inventory_behavior.cpp.in').read_text(encoding='utf-8')
         snippets = {
