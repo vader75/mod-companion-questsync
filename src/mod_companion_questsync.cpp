@@ -134,6 +134,7 @@ namespace
         uint32 notifySkipped    = 1;   // 0 off, 1 class/race only, 2 all refusals
         bool tidyInventory     = true;
         bool sellJunk          = true;      // confirmed junk only, at a vendor
+        bool trimSurplus       = true;      // spare trade goods, at a vendor, only when bags are tight
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -456,6 +457,12 @@ namespace
     };
     constexpr uint32 TradeReserveCount = 5;
     constexpr uint32 CompanionBagReserve = 8;
+    // A companion with room in its pack is not shopped from. Below the comfort line a
+    // vendor visit sells the *spare* trade goods back down to a recipe budget, so bags
+    // stop being a warehouse without the professions losing what they need to craft.
+    constexpr uint32 CompanionBagComfort = 16;
+    constexpr uint32 CompanionReagentKeep = 5;   // one recipe's worth of a bought reagent
+    constexpr uint32 CompanionMatKeep = 10;      // two stacks of a gathered material
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
     struct DeliveryReceipt
@@ -521,6 +528,7 @@ namespace
 
     std::map<uint32, std::vector<PendingNotice>> g_pendingNotices;  // bot guid -> lines
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
+    std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_equipAt;           // bot guid -> unix time
     std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
@@ -654,6 +662,7 @@ namespace
         g_cfg.notifySkipped      = sConfigMgr->GetOption<uint32>("CompanionQuestSync.NotifySkippedQuests", 2);
         g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
         g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
+        g_cfg.trimSurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TrimSurplus", true);
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
 
@@ -4732,6 +4741,105 @@ namespace
         return sold;
     }
 
+    /// Sell the *spare* trade goods when the bags are tight.
+    ///
+    /// Restocking and gathering made a companion's pack a warehouse: every recipe the bot
+    /// knows contributed a stack, and nothing ever left. Selling the greys did not help,
+    /// because the hoard was trade goods, which the professions genuinely need. The budget
+    /// below is what a craft consumes (one recipe of a bought reagent, two stacks of a
+    /// material), so the trim frees slots without taking the profession's supply with it.
+    /// It runs only below CompanionBagComfort, so a companion with room is never sold from,
+    /// and never touches quest items, containers, bound gear or anything the player is
+    /// about to trade.
+    uint32 SellBagSurplus(Player* owner, Player* bot)
+    {
+        if (!g_cfg.trimSurplus || !CanManageBags(owner, bot) || bot->isMoving() || bot->IsInCombat())
+            return 0;
+        // A pack with room is left alone: this is a bag rescue, not an economy pass.
+        if (bot->GetFreeInventorySpace() >= CompanionBagComfort)
+            return 0;
+
+        uint32 const now = uint32(time(nullptr));
+        uint32& last = g_trimAt[bot->GetGUID().GetCounter()];
+        if (last && now - last < 300)
+            return 0;
+
+        std::list<Unit*> units;
+        Acore::AnyUnitInObjectRangeCheck check(bot, INTERACTION_DISTANCE);
+        Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+        Cell::VisitObjects(bot, searcher, INTERACTION_DISTANCE);
+        Creature* vendor = nullptr;
+        for (Unit* unit : units)
+            if ((vendor = bot->GetNPCIfCanInteractWith(unit->GetGUID(), UNIT_NPC_FLAG_VENDOR)) &&
+                !vendor->HasFlagsExtra(CREATURE_FLAG_EXTRA_NO_SELL_VENDOR))
+                break;
+            else
+                vendor = nullptr;
+        if (!vendor)
+            return 0;
+
+        // One entry per item id: the stacks it carries, and how many units they hold.
+        std::map<uint32, std::vector<Item*>> carried;
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || proto->Class != ITEM_CLASS_TRADE_GOODS || !proto->SellPrice)
+                return;
+            if (item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+                return;
+            // Soulbound stock is the companion's own kit, never surplus.
+            if (item->IsSoulBound())
+                return;
+            carried[proto->ItemId].push_back(item);
+        });
+        if (carried.empty())
+            return 0;
+
+        last = now;
+        uint32 sold = 0;
+        std::string names;
+        for (auto& [entry, stacks] : carried)
+        {
+            uint32 const keep = IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep;
+            // Keep the fullest stacks first, so the budget is covered by as few slots as
+            // possible and every stack the trim sells is a whole one.
+            std::sort(stacks.begin(), stacks.end(),
+                [](Item* a, Item* b) { return a->GetCount() > b->GetCount(); });
+            uint32 kept = 0;
+            for (Item* item : stacks)
+            {
+                if (kept < keep)
+                {
+                    kept += item->GetCount();
+                    continue;
+                }
+                auto const guid = item->GetGUID();
+                uint16 const pos = item->GetPos();
+                std::string const name = item->GetTemplate()->Name1;
+                WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
+                request.VendorGuid = vendor->GetGUID();
+                request.ItemGuid = guid;
+                bot->GetSession()->HandleSellItemOpcode(request);
+                Item* remaining = bot->GetItemByPos(pos);
+                if (remaining && remaining->GetGUID() == guid)
+                    continue;
+                ++sold;
+                if (names.find(name) == std::string::npos)
+                    names += (names.empty() ? "" : ", ") + name;
+            }
+        }
+
+        if (!sold)
+            return 0;
+        if (g_cfg.debug >= 1)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare trade-good stack(s) to {} (free slots now {})",
+                bot->GetName(), sold, vendor->GetName(), bot->GetFreeInventorySpace());
+        SayToOwner(bot, owner,
+            "My pack was nearly full, so I sold " + std::to_string(sold) + " spare stack(s) of " + names +
+            " at the vendor - I kept enough for our recipes.", 30);
+        return sold;
+    }
+
     /// Wear upgrades even when the bags are not full.
     ///
     /// playerbots has the judgement - "equip upgrade" compares what the companion carries
@@ -5567,8 +5675,13 @@ namespace
         CatchUpGatherSkill(owner, bot);
         // Learn new supported recipes when attained skill rises, without a button.
         TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);
+        // Bags first: a pack that is nearly full is trimmed back to the recipe budget
+        // before anything else is put into it, so restocking never spends into a wall.
         if (CanManageBags(owner, bot))
+        {
+            SellBagSurplus(owner, bot);
             RestockNearVendor(owner, bot);
+        }
         // crafting is the companion's own habit, not a request: every few minutes it
         // turns what its gathering paid for into the useful thing, silently - the
         // products land in bags; curated surplus may be delivered later.

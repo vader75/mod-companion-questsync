@@ -127,6 +127,14 @@
 #        Sell eligible grey items rated as vendor junk by Playerbots.
 #        Requires an interactable merchant. Without one, keep the items.
 #        Default: 1
+#
+#    CompanionQuestSync.TrimSurplus
+#        Once fewer than sixteen bag slots are free, a merchant visit sells the
+#        SPARE trade goods (whole stacks only) back down to a profession budget:
+#        one recipe's worth of a bought reagent, two stacks of a gathered material.
+#        Professions keep what their recipes consume; quest items, containers and
+#        bound gear are never sold. The companion says what it sold and why.
+#        Default: 1
 ##    CompanionQuestSync.KeepFreeSlots
 #        Free bag slots the tidy tries to restore (checked each pass and again
 #        when an accept is refused for lack of space).
@@ -237,6 +245,9 @@ CompanionQuestSync.KeepFreeSlots = 2
 # Try an eligible merchant sale when a quest pickup needs bag space.
 CompanionQuestSync.BagMargin = 8
 CompanionQuestSync.SellJunk = 1
+# Sell spare trade goods (whole stacks) at a merchant once fewer than 16 bag slots
+# are free, keeping one recipe's worth of reagents and two stacks of any material.
+CompanionQuestSync.TrimSurplus = 1
 CompanionQuestSync.MapPins = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to

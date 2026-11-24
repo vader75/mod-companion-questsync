@@ -14,6 +14,19 @@ class ManagedInventory(unittest.TestCase):
         self.assertLess(restock.index('CompanionBagReserve + newSlots'), restock.index('StoreNewItem(dest'))
         self.assertIn('!bot->GetItemByPos(slot.pos)', restock)
 
+    def test_bag_pressure_sells_surplus_above_the_recipe_budget(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        # A healthy companion is never sold from: the trim only runs below the comfort line.
+        self.assertLess(trim.index('GetFreeInventorySpace() >= CompanionBagComfort'), trim.index('HandleSellItemOpcode'))
+        # Professions survive the trim: one recipe's worth of a vendor reagent, two stacks of a material.
+        self.assertIn('IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep', trim)
+        self.assertLess(trim.index('kept < keep'), trim.index('HandleSellItemOpcode'))
+        # Nothing the player handed over deliberately, or anything bound, is sold.
+        for guard in ('ITEM_CLASS_TRADE_GOODS', 'IsInTrade()', 'IsRefundable()', 'CanReleaseItem(bot, owner, item)'):
+            self.assertIn(guard, trim)
+        for constant in ('CompanionBagComfort = 16', 'CompanionReagentKeep = 5', 'CompanionMatKeep = 10'):
+            self.assertIn(constant, SOURCE)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
