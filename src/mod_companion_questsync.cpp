@@ -135,6 +135,7 @@ namespace
         bool tidyInventory     = true;
         bool sellJunk          = true;      // confirmed junk only, at a vendor
         bool trimSurplus       = true;      // spare trade goods, at a vendor, only when bags are tight
+        bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -463,6 +464,11 @@ namespace
     constexpr uint32 CompanionBagComfort = 16;
     constexpr uint32 CompanionReagentKeep = 5;   // one recipe's worth of a bought reagent
     constexpr uint32 CompanionMatKeep = 10;      // two stacks of a gathered material
+    // A pool body is a level-1 starter; its kit has to catch up with the level the module
+    // gives it. Below this gap the kit is left alone, and a fresh pass waits for a step
+    // so a companion is not re-geared every time it dings.
+    constexpr uint32 CompanionGearLag = 4;
+    constexpr uint32 CompanionGearStep = 5;
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
     struct DeliveryReceipt
@@ -529,6 +535,7 @@ namespace
     std::map<uint32, std::vector<PendingNotice>> g_pendingNotices;  // bot guid -> lines
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
+    std::unordered_map<uint32, uint32> g_gearLevel;         // bot guid -> level the kit was built for
     std::unordered_map<uint32, uint32> g_equipAt;           // bot guid -> unix time
     std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
@@ -663,6 +670,7 @@ namespace
         g_cfg.tidyInventory      = sConfigMgr->GetOption<bool>("CompanionQuestSync.TidyInventory", true);
         g_cfg.sellJunk           = sConfigMgr->GetOption<bool>("CompanionQuestSync.SellJunk", true);
         g_cfg.trimSurplus        = sConfigMgr->GetOption<bool>("CompanionQuestSync.TrimSurplus", true);
+        g_cfg.levelGear           = sConfigMgr->GetOption<bool>("CompanionQuestSync.LevelGear", true);
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
 
@@ -4867,6 +4875,82 @@ namespace
             LOG_INFO("server.loading", "[CompanionQuestSync] {} asked to wear any upgrade it is carrying", bot->GetName());
     }
 
+    uint32 DescribeGearItemLevel(Player* bot);   // defined below, read before the re-gear
+
+    /// Bring a companion's kit up to the level the module gave it.
+    ///
+    /// A pool body arrives as a level-1 starter, and raising its level left the gear behind:
+    /// a level-14 companion was still swinging a Worn Battleaxe in Rusted Chain, because the
+    /// dress pass only fills empty slots out of its own bag and `equip upgrade` only swaps
+    /// what the bag happens to hold. Playerbots already knows how to dress a bot of a given
+    /// level, so a kit that lags is rebuilt incrementally - slots are upgraded, nothing is
+    /// re-rolled wholesale, and the bag, quest items and profession tools are untouched.
+    uint32 RefreshLevelGear(Player* owner, Player* bot)
+    {
+        if (!g_cfg.levelGear || !bot || !bot->IsInWorld() || !bot->IsAlive() ||
+            bot->IsInCombat() || !bot->GetSession() || bot->GetTradeData())
+            return 0;
+
+        uint8 const level = bot->GetLevel();
+        if (level < 5)
+            return 0;                       // under five the starter outfit *is* the level
+
+        uint32 pieces = 0;
+        uint32 itemLevelSum = 0;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            {
+                ++pieces;
+                itemLevelSum += item->GetTemplate()->ItemLevel;
+            }
+        uint32 const average = pieces ? itemLevelSum / pieces : 0;
+        // A kit that already matches the level is left exactly as it is.
+        if (pieces && average + CompanionGearLag >= level)
+            return 0;
+        // The factory unequips before it equips, so it needs room to work in.
+        if (bot->GetFreeInventorySpace() < CompanionBagReserve)
+            return 0;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32& lastLevel = g_gearLevel[botGuid];
+        if (lastLevel && level < lastLevel + CompanionGearStep)
+            return 0;
+        lastLevel = level;
+
+        uint32 const before = DescribeGearItemLevel(bot);
+#ifdef MOD_PLAYERBOTS
+        PlayerbotFactory factory(bot, level);
+        factory.InitEquipment(/*incremental=*/true);
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
+#endif
+        uint32 const after = DescribeGearItemLevel(bot);
+        if (after == before)
+            return 0;
+
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {} (item level {} -> {})",
+                 bot->GetName(), uint32(level), before, after);
+        SayToOwner(bot, owner,
+                   "I traded my starter kit for what a level " + std::to_string(level) +
+                   " can carry - average item level " + std::to_string(before) + " to " + std::to_string(after) + ".",
+                   30);
+        return after - before;
+    }
+
+    /// Average item level of what the companion wears, over the pieces it actually has.
+    uint32 DescribeGearItemLevel(Player* bot)
+    {
+        uint32 pieces = 0;
+        uint32 sum = 0;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            {
+                ++pieces;
+                sum += item->GetTemplate()->ItemLevel;
+            }
+        return pieces ? sum / pieces : 0;
+    }
+
     std::string DescribeMissingItems(Player* bot, Quest const* quest);  // defined below
     uint32 TidyInventory(Player* owner, Player* bot);   // defined below, used by the accept path
 
@@ -5699,6 +5783,9 @@ namespace
         if (CanManageBags(owner, bot))
         {
             TryEquipUpgrades(owner, bot);
+            // A kit that never caught up with the level is corrected here, so companions
+            // claimed before this existed heal themselves instead of staying in starters.
+            RefreshLevelGear(owner, bot);
             SellManagedJunk(owner, bot);
             if (g_cfg.tidyInventory && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots)
             {
@@ -7026,6 +7113,9 @@ namespace
 
                         EnsureBags(master, fresh);
                         EnsureStartingGear(master, fresh);
+                        // A starter body arrives dressed for level 1; give it the kit its
+                        // level has earned before the owner ever sees it standing there.
+                        RefreshLevelGear(master, fresh);
 
                         LOG_INFO("server.loading", "[CompanionQuestSync] {} dressed at spawn: {}",
                                  pending.name, DescribeGear(fresh));

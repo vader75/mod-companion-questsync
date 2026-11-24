@@ -27,6 +27,20 @@ class ManagedInventory(unittest.TestCase):
         for constant in ('CompanionBagComfort = 16', 'CompanionReagentKeep = 5', 'CompanionMatKeep = 10'):
             self.assertIn(constant, SOURCE)
 
+    def test_level_gear_refreshes_a_kit_that_lags_the_level(self):
+        refresh = SOURCE.split('uint32 RefreshLevelGear(', 1)[1].split('/// ', 1)[0]
+        # A kit that matches the level is never touched; only a lagging one is re-geared.
+        self.assertIn('average + CompanionGearLag >= level', refresh)
+        self.assertIn('CompanionGearLag = 4', SOURCE)
+        # The factory needs inventory room for the swap and a real level to dress for.
+        self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', refresh)
+        self.assertIn('level < 5', refresh)
+        # Incremental: upgrade slots only, never a bare re-roll over the whole character.
+        self.assertIn('InitEquipment(/*incremental=*/true)', refresh)
+        self.assertIn('CompanionQuestSync.LevelGear', SOURCE)
+        # Re-gearing happens on claim and on the periodic pass, not only when asked.
+        self.assertGreaterEqual(SOURCE.count('RefreshLevelGear('), 3)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')

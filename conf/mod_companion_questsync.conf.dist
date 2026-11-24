@@ -135,6 +135,13 @@
 #        Professions keep what their recipes consume; quest items, containers and
 #        bound gear are never sold. The companion says what it sold and why.
 #        Default: 1
+#
+#    CompanionQuestSync.LevelGear
+#        A pool body is a level-1 starter; when its kit lags the level the
+#        module gave it by more than 4, Playerbots rebuilds the equipment slots
+#        incrementally (upgrades only, bag and quest items untouched), at claim
+#        and again every 5 levels. Set 0 to keep whatever the body arrived in.
+#        Default: 1
 ##    CompanionQuestSync.KeepFreeSlots
 #        Free bag slots the tidy tries to restore (checked each pass and again
 #        when an accept is refused for lack of space).
@@ -248,6 +255,7 @@ CompanionQuestSync.SellJunk = 1
 # Sell spare trade goods (whole stacks) at a merchant once fewer than 16 bag slots
 # are free, keeping one recipe's worth of reagents and two stacks of any material.
 CompanionQuestSync.TrimSurplus = 1
+CompanionQuestSync.LevelGear = 1
 CompanionQuestSync.MapPins = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
