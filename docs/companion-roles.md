@@ -87,8 +87,36 @@ Known gaps, so nobody expects them:
   the threat a fight generates.
 - A companion whose spec contradicts its role (a protector warrior marked `dps`) loses the
   tank strategy but will not suddenly deal damage like a real DPS.
-- **Etiquette** (engage only on your target, only when you hold aggro) is the next layer and
-  is not in yet — today a `dps` companion still joins any fight the pitch-in rules allow.
+- **Engagement is not threat.** `mine` keeps a companion off targets you have not chosen; it
+  cannot stop the threat that fighting alongside you generates.
+
+## Engagement: whether it gets into a fight at all
+
+A role says what a companion may do *in* a fight. Engagement says whether it enters one,
+and it is set per companion too:
+
+```
+.companionsync engage Vorrin mine
+.companionsync engage Branros never
+.companionsync engage                 # what every companion is set to
+```
+
+| Policy | Behaviour |
+|---|---|
+| `auto` | default — playerbots decides, exactly as before |
+| `mine` | **it fights only what you are fighting** — you pick the target, it follows; it never starts one |
+| `joined` | it joins fights you are already in, and starts none |
+| `never` | stays out of combat; nothing here stops it defending itself |
+
+`mine` is implemented by holding the companion in playerbots' passive strategy and pointing
+it at your target when you have one, so the two cannot diverge: if you switch targets, so
+does it; if you stop fighting, so does it.
+
+**If the build cannot do it, the card says so.** The lever is playerbots' passive strategy,
+and this core's headers are mangled in places, so the module *probes* for the strategy the
+first time it is needed. A build without it gets a warning in the log and
+`|cffffd200no passive strategy in this build|r` in chat when you set a policy — rather than
+a button that quietly does nothing.
 
 ## Setting it up
 

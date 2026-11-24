@@ -423,6 +423,22 @@ local function CreateCard()
     end, "What this companion is for. Auto leaves it entirely to its own AI.", false)
     card.roleButton:SetPoint("TOPLEFT", 16, -132)
 
+    -- Engagement is a different question from role: the role says what it may do in a fight,
+    -- this says whether it gets into one. "mine" hands target selection to the player.
+    card.engageButton = Button(card, "Engage: auto", 150, function()
+        if not card.companion then return end
+        local ORDER = { "auto", "mine", "joined", "never" }
+        local current = (G.Engage and G.Engage[card.companion.name]) or "auto"
+        local at = 1
+        for i, policy in ipairs(ORDER) do if policy == current then at = i end end
+        local nextPolicy = ORDER[(at % #ORDER) + 1]
+        G.Engage = G.Engage or {}
+        G.Engage[card.companion.name] = nextPolicy
+        card.engageButton:SetText("Engage: " .. nextPolicy)
+        G.Run(".companionsync engage " .. card.companion.name .. " " .. nextPolicy)
+    end, "Whether this companion gets into fights at all. Mine = only what you are fighting.", false)
+    card.engageButton:SetPoint("TOPLEFT", 16, -190)
+
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
         if CanSupply(companion) then G.CollectDelivery(companion.name) end
@@ -893,6 +909,14 @@ function G.Refresh()
             else
                 card.trainButton:Hide()
                 card.professionsButton:Hide()
+            end
+
+            if card.engageButton then
+                local policy = (G.Engage and G.Engage[companion.name]) or "auto"
+                card.engageButton:SetText("Engage: " .. policy)
+                local text = card.engageButton:GetFontString()
+                if policy == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
+                else text:SetTextColor(0.72, 0.82, 1.0) end
             end
 
             if card.roleButton then

@@ -156,7 +156,7 @@ class SyncContract(unittest.TestCase):
 class AddonContract(unittest.TestCase):
     def test_roles_line_is_parsed(self):
         self.assertIn('text:match("^Roles (.*)$")', CORE)
-        self.assertIn('pair:match("^(.-)=(%a+)(.*)$")', CORE)
+        self.assertIn('pair:match("^(.-)=(.*)$")', CORE)
 
     def test_each_card_can_set_its_own_role(self):
         self.assertIn("card.roleButton", UI)
@@ -171,6 +171,67 @@ class AddonContract(unittest.TestCase):
 
     def test_the_cycle_covers_every_role(self):
         self.assertIn('local ORDER = { "auto", "tank", "healer", "dps", "support" }', UI)
+
+
+
+class EngagementContract(unittest.TestCase):
+    """Whether it gets into a fight: the part a class's strategies cannot express."""
+
+    def test_four_policies_and_auto_is_one_of_them(self):
+        self.assertIn('kEngagePolicies[] = { "auto", "mine", "joined", "never" }', SOURCE)
+
+    def test_policy_is_held_with_the_passive_strategy(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn('"+passive"', body)
+        self.assertIn('"-passive"', body)
+
+    def test_mine_points_the_bot_at_the_owners_target(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn('policy == "mine"', body)
+        self.assertIn("bot->GetVictim() != ownerTarget", body)
+        self.assertIn('ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner)', body)
+
+    def test_joined_lifts_passive_only_while_the_owner_fights(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn('policy == "joined" && !ownerFighting', body)
+
+    def test_never_stays_passive(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn('policy == "never"', body)
+
+    def test_auto_touches_nothing(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertLess(body.index('if (policy == "auto")'), body.index("ChangeStrategy"))
+
+    def test_an_unavailable_strategy_is_probed_once_and_reported(self):
+        body = slice_from("    bool PassiveStrategyUsable(Player* bot)")
+        self.assertIn('ai->HasStrategy("passive", BOT_STATE_NON_COMBAT)', body)
+        self.assertIn("g_passiveStrategy", body)
+        cmd = slice_from("    static bool HandleEngageCommand", 5200)
+        self.assertIn("this build cannot hold companions out of fights", cmd)
+
+    def test_policy_is_stored_and_read_back(self):
+        body = slice_from("    bool SetCompanionEngage(")
+        self.assertIn("return CompanionEngage(botGuid) == wanted;", body)
+        self.assertIn("ADD COLUMN engage VARCHAR(8) NOT NULL DEFAULT 'auto'",
+                      (ROOT / "sql" / "companion-engage.sql").read_text(encoding="utf-8"))
+
+    def test_it_is_purged_with_the_bot_guid(self):
+        body = slice_from("void PurgeCompanionState(", 3000)
+        self.assertIn("g_engageNotes.erase(botGuid);", body)
+
+    def test_tick_applies_it_to_every_owner(self):
+        self.assertIn("ReconcileEngagement(player);", SOURCE)
+        body = slice_from("    void ReconcileEngagement(Player* owner)")
+        self.assertIn("ApplyEngagement(owner, bot)", body)
+
+    def test_addon_card_offers_the_policy(self):
+        self.assertIn("card.engageButton", UI)
+        self.assertIn('G.Run(".companionsync engage " .. card.companion.name .. " " .. nextPolicy)', UI)
+        self.assertIn('G.Engage = G.Engage or {}', UI)
+
+    def test_addon_parses_role_slash_policy(self):
+        self.assertIn('local role, policy, flag = rest:match("^(%a+)/?(%a*)(.*)$")', CORE)
 
 
 if __name__ == "__main__":

@@ -553,6 +553,9 @@ namespace
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
     std::map<uint32, std::string> g_formation;                     // owner guid -> formation preset
     std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategies this class lacks
+    std::map<uint32, std::string> g_engageNotes;  // bot guid -> why engagement control is unavailable
+    std::atomic<int> g_engageColumn{0};           // 0 unknown, 1 present, -1 missing
+    std::atomic<int> g_passiveStrategy{0};        // 0 unprobed, 1 usable, -1 not in this build
     std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
     uint32 constexpr kRoleReassertSeconds = 60;   // playerbots drops strategies on spec/level change
 
@@ -871,6 +874,7 @@ namespace
         // inherit "already taught" or "already geared" from the body that had it first,
         // or a fresh companion silently skips its spell, talent and profession catch-up.
         g_roleNotes.erase(botGuid);
+        g_engageNotes.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
@@ -1157,6 +1161,155 @@ namespace
         return missed;
     }
 
+    // --------------------------------------------------------------- engagement
+    //
+    // The role decides what a companion may do *in* a fight; the engagement policy decides
+    // whether it gets into one at all:
+    //
+    //   auto    the module keeps out of it (playerbots' own behaviour)
+    //   mine    it fights only what you are fighting - you pick the target, it follows
+    //   joined  it joins fights you are already in, and never starts one
+    //   never   it stays out of combat entirely; nothing here stops it defending itself
+    //
+    // The lever is playerbots' passive strategy, which keeps a bot following without
+    // engaging. This core's headers are mangled in places, so the name is *probed* rather
+    // than assumed: if the build has no passive strategy, the card says engagement control
+    // is unavailable instead of drawing a control that does nothing.
+    constexpr char const* kEngagePolicies[] = { "auto", "mine", "joined", "never" };
+
+    bool EngagePolicyKnown(std::string const& policy)
+    {
+        for (char const* known : kEngagePolicies)
+            if (policy == known)
+                return true;
+        return false;
+    }
+
+    std::string EngageOrAuto(std::string policy)
+    {
+        std::transform(policy.begin(), policy.end(), policy.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        return EngagePolicyKnown(policy) ? policy : std::string("auto");
+    }
+
+    bool EngageColumnPresent()
+    {
+        int state = g_engageColumn.load();
+        if (state)
+            return state > 0;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name = 'engage'");
+        state = (row && row->Fetch()[0].Get<uint64>() != 0) ? 1 : -1;
+        g_engageColumn = state;
+        if (state < 0)
+            LOG_WARN("server.loading", "[CompanionQuestSync] cq_companion_custody has no engage column; "
+                                       "engagement policies stay unavailable until sql/companion-engage.sql is imported");
+        return state > 0;
+    }
+
+    std::string CompanionEngage(uint32 botGuid)
+    {
+        if (!EngageColumnPresent())
+            return "auto";
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT engage FROM cq_companion_custody WHERE bot_guid = {} AND module = 'cq' LIMIT 1", botGuid);
+        if (!row)
+            return "auto";
+
+        Field* field = row->Fetch();
+        return field[0].IsNull() ? std::string("auto") : EngageOrAuto(field[0].Get<std::string>());
+    }
+
+    bool SetCompanionEngage(uint32 ownerGuid, uint32 botGuid, std::string const& policy)
+    {
+        if (!EngageColumnPresent() || !HasCurrentCustody(ownerGuid, botGuid, false))
+            return false;
+
+        std::string const wanted = EngageOrAuto(policy);
+        CharacterDatabase.DirectExecute(
+            "UPDATE cq_companion_custody SET engage = '{}' WHERE bot_guid = {} AND owner_guid = {} "
+            "AND module = 'cq' AND state = 'owned'", wanted, botGuid, ownerGuid);
+        return CompanionEngage(botGuid) == wanted;
+    }
+
+    /// Is playerbots' passive strategy usable here? Probed once, with the answer remembered:
+    /// a build without it cannot be given engagement control, and pretending otherwise would
+    /// be the kind of silent no-op this module keeps out.
+    bool PassiveStrategyUsable(Player* bot)
+    {
+        int state = g_passiveStrategy.load();
+        if (!state)
+        {
+            PlayerbotAI* ai = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+            bool usable = false;
+            if (ai)
+            {
+                ai->ChangeStrategy("+passive", BOT_STATE_NON_COMBAT);
+                usable = ai->HasStrategy("passive", BOT_STATE_NON_COMBAT);
+                if (usable)
+                    ai->ChangeStrategy("-passive", BOT_STATE_NON_COMBAT);
+            }
+            state = usable ? 1 : -1;
+            g_passiveStrategy = state;
+            if (state < 0)
+                LOG_WARN("server.loading", "[CompanionQuestSync] this playerbots build has no passive strategy; "
+                                           "companion engagement policies are unavailable");
+        }
+        return state > 0;
+    }
+
+    /// Hold a companion to its engagement policy. Runs on the fast tick; every branch is a
+    /// no-op for "auto", which is what keeps the setting honest.
+    void ApplyEngagement(Player* owner, Player* bot)
+    {
+        if (!owner || !bot || !EngageColumnPresent())
+            return;
+
+        std::string const policy = CompanionEngage(bot->GetGUID().GetCounter());
+        if (policy == "auto")
+            return;
+
+        if (!PassiveStrategyUsable(bot))
+        {
+            g_engageNotes[bot->GetGUID().GetCounter()] = "no passive strategy in this build";
+            return;
+        }
+
+        g_engageNotes.erase(bot->GetGUID().GetCounter());
+
+        if (!bot->IsAlive() || !owner->IsAlive() || bot->GetMapId() != owner->GetMapId())
+            return;
+
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai)
+            return;
+
+        Unit* ownerTarget = owner->GetSelectedUnit();
+        bool const ownerFighting = owner->IsInCombat();
+        bool const ownerHitsSomething = ownerTarget && ownerTarget->IsAlive() &&
+                                        owner->IsValidAttackTarget(ownerTarget);
+
+        // "never" and "joined" are the same edit and differ only in when it is lifted:
+        // never stays passive, joined becomes active the moment the owner is in combat.
+        bool const wantPassive = policy == "never" || policy == "mine" ||
+                                 (policy == "joined" && !ownerFighting);
+
+        bool const passive = ai->HasStrategy("passive", BOT_STATE_COMBAT);
+        if (wantPassive != passive)
+        {
+            ai->ChangeStrategy(wantPassive ? "+passive" : "-passive", BOT_STATE_COMBAT);
+            ai->ChangeStrategy(wantPassive ? "+passive" : "-passive", BOT_STATE_NON_COMBAT);
+        }
+
+        // "mine" is the only policy where the module names the target: the bot stays passive
+        // and is pointed at exactly what the owner is fighting.
+        if (policy == "mine" && ownerHitsSomething && bot->GetVictim() != ownerTarget)
+            ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner);
+    }
+
     bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
     {
         bots.clear();
@@ -1230,6 +1383,8 @@ namespace
             if (!line.empty())
                 line += "|";
             line += name + "=" + CompanionRole(botGuid);
+            if (std::string const policy = CompanionEngage(botGuid); policy != "auto")
+                line += "/" + policy;
             auto const note = g_roleNotes.find(botGuid);
             if (note != g_roleNotes.end() && !note->second.empty())
                 line += ":na";       // this class cannot honour part of the role
@@ -1269,6 +1424,22 @@ namespace
             else
                 g_roleNotes[botGuid] = missed;
         }
+    }
+
+    /// Hold every owned companion to its engagement policy. Cheap: one map lookup, and
+    /// nothing at all for "auto".
+    void ReconcileEngagement(Player* owner)
+    {
+        if (!owner || !owner->IsInWorld() || !EngageColumnPresent())
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return;
+
+        for (uint32 const botGuid : bots)
+            if (Player* bot = FindCompanionPlayer(botGuid))
+                ApplyEngagement(owner, bot);
     }
 
     static Player* FindDeliveryOwner(uint32 ownerGuid)
@@ -8274,6 +8445,7 @@ public:
                 SendHeartbeat(player);
                 ApplyFormation(player);   // spacing only; combat hands movement back
                 ReconcileRoles(player);
+                ReconcileEngagement(player);
 
                 std::vector<uint32> bots;
                 if (!FindCompanions(player->GetGUID().GetCounter(), bots))
@@ -8943,6 +9115,87 @@ public:
         return true;
     }
 
+    /// .companionsync engage <companion> [auto|mine|joined|never]
+    ///
+    /// Whether the companion gets into a fight at all. "mine" hands target selection to the
+    /// player: the bot only ever attacks what the player is attacking.
+    static bool HandleEngageCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        std::vector<std::string> const a = SplitArgs(args, 2);
+
+        if (a.size() < 2)
+        {
+            std::string line;
+            std::vector<uint32> bots;
+            if (FindCompanions(ownerGuid, bots))
+                for (uint32 const botGuid : bots)
+                {
+                    Player* bot = FindCompanionPlayer(botGuid);
+                    std::string name = bot ? bot->GetName() : std::string("a companion");
+                    if (!line.empty())
+                        line += "|";
+                    line += name + "=" + CompanionEngage(botGuid);
+                }
+            handler->PSendSysMessage("|cffff8000engage|r: {}. Use engage <companion> auto | mine | joined | never.",
+                                     line.empty() ? "auto everywhere" : line);
+            return true;
+        }
+
+        std::string const policy = EngageOrAuto(a[1]);
+        if (FormationLower(a[1]) != policy)
+        {
+            handler->PSendSysMessage("|cffff8000engage|r: '{}' is not one of auto, mine, joined, never.", a[1]);
+            return true;
+        }
+
+        uint32 const botGuid = ResolveOwnedCompanion(ownerGuid, a[0]);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000engage|r: you have no companion called '{}'.", a[0]);
+            return true;
+        }
+
+        if (!SetCompanionEngage(ownerGuid, botGuid, policy))
+        {
+            handler->PSendSysMessage("|cffff8000engage|r: could not store that (is sql/companion-engage.sql imported?).");
+            return true;
+        }
+
+        switch (policy[0])
+        {
+            case 'a':
+                handler->PSendSysMessage("|cff20ff20{}|r fights as its own AI sees fit again.", a[0]);
+                break;
+            case 'm':
+                handler->PSendSysMessage("|cff20ff20{}|r will fight only what |cffffffffyou|r are fighting.", a[0]);
+                break;
+            case 'j':
+                handler->PSendSysMessage("|cff20ff20{}|r joins fights you are already in, and starts none.", a[0]);
+                break;
+            default:
+                handler->PSendSysMessage("|cff20ff20{}|r stays out of combat (it will still defend itself).", a[0]);
+                break;
+        }
+
+        if (Player* bot = FindCompanionPlayer(botGuid))
+        {
+            ApplyEngagement(player, bot);
+            auto const note = g_engageNotes.find(botGuid);
+            if (note != g_engageNotes.end())
+                handler->PSendSysMessage("  |cffffd200{}|r - this build cannot hold companions out of fights.",
+                                         note->second);
+        }
+
+        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        return true;
+    }
+
     /// .companionsync formation [off|tight|loose|spread]
     ///
     /// Per owner per session: the preset is spacing behind *you*, so it is not a property
@@ -9050,6 +9303,7 @@ public:
         {
             { "formation", HandleFormationCommand, SEC_PLAYER, Console::No },
             { "role",      HandleRoleCommand,      SEC_PLAYER, Console::No },
+            { "engage",    HandleEngageCommand,    SEC_PLAYER, Console::No },
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },

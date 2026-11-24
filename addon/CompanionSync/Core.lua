@@ -608,13 +608,15 @@ listener:SetScript("OnEvent", function(_, event, message)
     end
     local roles = text:match("^Roles (.*)$")
     if roles then
-        G.Roles, G.RoleNotes = {}, {}
+        G.Roles, G.RoleNotes, G.Engage = {}, {}, {}
         for pair in roles:gmatch("[^|]+") do
-            local name, role, flag = pair:match("^(.-)=(%a+)(.*)$")
+            local name, rest = pair:match("^(.-)=(.*)$")
             if name then
+                -- name=role[ /policy][:na]; ":na" means this class cannot honour part of the
+                -- role, and the card says so instead of pretending the role took
+                local role, policy, flag = rest:match("^(%a+)/?(%a*)(.*)$")
                 G.Roles[name] = role
-                -- ":na" means this class cannot honour part of the role (no tank strategy,
-                -- no heal) - the card says so instead of pretending the role took
+                if policy ~= "" then G.Engage[name] = policy end
                 if flag == ":na" then G.RoleNotes[name] = true end
             end
         end
