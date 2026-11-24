@@ -38,8 +38,11 @@ class ManagedInventory(unittest.TestCase):
         # Incremental: upgrade slots only, never a bare re-roll over the whole character.
         self.assertIn('InitEquipment(/*incremental=*/true)', refresh)
         self.assertIn('CompanionQuestSync.LevelGear', SOURCE)
-        # Re-gearing happens on claim and on the periodic pass, not only when asked.
-        self.assertGreaterEqual(SOURCE.count('RefreshLevelGear('), 3)
+        # Re-gearing happens on claim and on the periodic pass, anchored on the call sites
+        # themselves - counting the name also counted the definition.
+        self.assertIn('RefreshLevelGear(master, fresh);', SOURCE)
+        periodic = SOURCE.split('SellManagedJunk(owner, bot);', 1)[1]
+        self.assertIn('RefreshLevelGear(owner, bot);', periodic)
 
     def test_outgrown_gear_is_sold_instead_of_staying_in_the_bag(self):
         trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
@@ -66,15 +69,19 @@ class ManagedInventory(unittest.TestCase):
     def test_a_tight_pack_without_a_merchant_posts_spare_home(self):
         trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
         self.assertIn('MailboxNearby(bot)', trim)
-        self.assertLess(trim.index('MailboxNearby(bot)'), trim.index('MailHome(owner, bot, mailbox, attachments)'))
-        self.assertIn('attachments.size() > 3', trim)   # one letter's worth at a time
+        self.assertLess(trim.index('MailboxNearby(bot)'), trim.index('MailHome(owner, bot, mailbox, letter)'))
+        # Several letters are fine; a single-letter-or-nothing rule stranded every full bag.
+        self.assertIn('kMailAttachments = 12', trim)
+        self.assertLess(trim.index('last = now;'), trim.index('MailHome(owner, bot, mailbox, letter)'))
 
     def test_a_companion_hired_high_is_taught_its_level(self):
         catch_up = SOURCE.split('void EnsureLevelProgress(', 1)[1].split('/// ', 1)[0]
         # Nothing a trainer sells before five, and the sync is idempotent per level.
         self.assertIn('level < 5', catch_up)
-        self.assertIn('g_taughtLevel[bot->GetGUID().GetCounter()]', catch_up)
-        self.assertIn('taught == level', catch_up)
+        self.assertIn('if (g_taughtLevel[botGuid] == level)', catch_up)
+        # The latch lands after the teaching: a pass that could not teach must retry.
+        self.assertLess(catch_up.index('TeachProfessions(bot, owner)'),
+                        catch_up.index('g_taughtLevel[botGuid] = level;'))
         # Spells and talents come from the trainer sync; professions from the pair sync.
         self.assertIn('TeachTrainerContent(bot, owner)', catch_up)
         self.assertIn('TeachProfessions(bot, owner)', catch_up)
@@ -114,7 +121,7 @@ class ManagedInventory(unittest.TestCase):
         self.assertNotIn('DestroyItemCount', tidy)
         self.assertNotIn('MailHome(', tidy)
         self.assertNotIn('"s vendor"', SOURCE)
-        sell = SOURCE.split('uint32 SellManagedJunk(', 1)[1].split('void TryEquipUpgrades(', 1)[0]
+        sell = SOURCE.split('uint32 SellManagedJunk(', 1)[1].split('/// Sell the *spare* trade goods', 1)[0]
         self.assertIn('proto->Quality != ITEM_QUALITY_POOR', sell)
         self.assertIn('!= ITEM_USAGE_VENDOR', sell)
         self.assertIn('HandleSellItemOpcode(request)', sell)
@@ -164,3 +171,30 @@ class ManagedInventory(unittest.TestCase):
         curated = POLICY.split('if (curated)', 1)[1].split('for (uint32 reagent', 1)[0]
         self.assertIn('!desired->second.count(entry)', curated)
         self.assertIn('ITEM_CLASS_CONSUMABLE', curated)
+
+    def test_pooled_guids_do_not_inherit_level_latches(self):
+        purge = SOURCE.split('void PurgeCompanionState(', 1)[1].split('bool g_custodyReady', 1)[0]
+        # Bot guids are pooled: an inherited latch means a fresh companion silently skips
+        # its spell, talent and profession catch-up, or waits a level to be re-geared.
+        for latch in ('g_taughtLevel.erase(botGuid)', 'g_gearLevel.erase(botGuid)',
+                      'g_trimAt.erase(botGuid)', 'g_lastAutoProduce.erase(botGuid)',
+                      'g_deadNoticeAt.erase(botGuid)', 'EraseByBot(g_missingCache, botGuid)'):
+            self.assertIn(latch, purge)
+
+    def test_restock_and_trim_share_one_recipe_budget(self):
+        restock = SOURCE.split('void RestockNearVendor(', 1)[1].split('/// The highest', 1)[0]
+        self.assertIn('uint32 const want = CompanionReagentKeep;', restock)
+        self.assertNotIn('uint32 const want = 5;', restock)
+
+    def test_a_loose_empty_bag_is_spare_and_a_full_one_is_not(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        # Containers are refused by CanReleaseItem, so this branch has to run before it.
+        self.assertLess(trim.index('ITEM_CLASS_CONTAINER && proto->SubClass == ITEM_SUBCLASS_CONTAINER'),
+                        trim.index('if (!CanReleaseItem(bot, owner, item))'))
+        self.assertIn('bag->IsEmpty()', trim)
+        self.assertIn('Bag* bag = item->ToBag();', trim)
+
+    def test_trim_sales_reach_the_session_tally(self):
+        trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
+        self.assertIn('itr->second.sold += sold + gearSold;', trim)
+        self.assertIn('itr->second.mailed += posted;', trim)

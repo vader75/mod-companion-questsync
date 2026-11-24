@@ -13,6 +13,9 @@ class HandInContract(unittest.TestCase):
     def test_cpp_map_snapshot_keeps_each_copy_and_omits_unmappable_or_inactive_quests(self):
         compiler = os.environ.get('CXX') or shutil.which('cl') or shutil.which('c++')
         if not compiler:
+            # See test_inventory_behavior: the only compiled tests must not vanish quietly.
+            if os.environ.get('CQ_REQUIRE_CXX'):
+                self.fail('No C++ compiler: set CXX or CQ_REQUIRE_CXX=0 to allow skipping.')
             self.skipTest('Run in a C++20 developer shell or set CXX to exercise map snapshots.')
         snippets = []
         for first, following in (
@@ -101,7 +104,7 @@ class HandInContract(unittest.TestCase):
         self.assertIn('ready ? FindReadyQuestEnder(bot, quest) : nullptr', pins)
 
     def test_reward_refusal_is_logged_at_the_existing_attempt_cadence(self):
-        turnin = SOURCE.split('void DeliverHandIns(', 1)[1].split('bot->RewardQuest(', 1)[0]
+        turnin = SOURCE.split('void DeliverHandIns(', 1)[1].split('bool CanManageBags(', 1)[0]
         self.assertIn('LogHandInWait(owner, bot, quest, spot, dist, "reward-check")', turnin)
         self.assertLess(turnin.index('Timing::RewardProd'), turnin.index('"reward-check"'))
 
@@ -154,3 +157,36 @@ class HandInContract(unittest.TestCase):
         self.assertIn('FindReadyQuestEnder(bot, quest)', report)
         self.assertIn('giver->GetGUID()', report)
         self.assertIn('giver->GetGUID() != entry->readyGiver', SOURCE)
+
+    def test_one_quest_at_one_place_is_one_pin(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        # Two companions, one ready and one short of items, used to draw a gold and a grey
+        # pin on the same tile for the same quest. Same quest + same place = one marker.
+        self.assertIn('existing.questId == questId', pins)
+        self.assertIn("c == 'h' ? 3 : c == 'u' ? 2 : c == 'p' ? 1 : 0", pins)
+        self.assertIn('uint32 questId;', pins)
+
+    def test_pin_fields_are_sanitised_and_cut_on_character_boundaries(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        # The zone travels on the wire like a name, so it gets the same separator filter.
+        self.assertIn(',z=" + SafePinName(entry.zone, false)', pins)
+        self.assertIn('title = TruncateUtf8(title, 20) + ".."', pins)
+        self.assertIn('out = TruncateUtf8(out, 12)', SOURCE)
+        helper = SOURCE.split('inline std::string TruncateUtf8(', 1)[1].split('/// A companion name', 1)[0]
+        self.assertIn('& 0xC0) == 0x80', helper)      # continuation bytes
+        self.assertIn('& 0x80', helper)               # a dangling lead byte
+
+    def test_an_empty_title_still_produces_a_pin(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        self.assertIn('title = "quest " + std::to_string(questId);', pins)
+
+    def test_a_blocked_reward_stops_re_inviting_the_player(self):
+        turnin = SOURCE.split('void DeliverHandIns(', 1)[1].split('bool CanManageBags(', 1)[0]
+        # The invitation marker survives a refused reward; it is cleared only once the
+        # quest has actually left the log, or the player is re-invited on every pass.
+        self.assertLess(turnin.index('HandleQuestgiverChooseRewardOpcode(request);'),
+                        turnin.index('g_readyAt.erase(readyKey);'))
+
+    def test_map_pins_setting_actually_gates_map_pins(self):
+        sync = SOURCE.split('void SendPinSync(', 1)[1].split('std::string& last = g_lastPinSync', 1)[0]
+        self.assertIn('!g_cfg.mapPins', sync)

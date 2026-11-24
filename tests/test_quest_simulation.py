@@ -88,7 +88,7 @@ class QuestSimulation(unittest.TestCase):
         self.assertIn('CanInteractWithQuestGiver(candidate)', ender)
         self.assertIn('CreatureListSearcher', ender)
         self.assertIn('GameObjectListSearcher', ender)
-        turnin = section('void DeliverHandIns(', 'void TidyInventory(')
+        turnin = section('void DeliverHandIns(', 'bool CanManageBags(')
         gate = turnin.index('if (!giver)')
         reward = turnin.index('HandleQuestgiverChooseRewardOpcode(')
         self.assertIn('continue;', turnin[gate:reward])

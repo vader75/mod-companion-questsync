@@ -858,6 +858,16 @@ namespace
         EraseByBot(g_addedCount, botGuid);
         EraseByBot(g_vanishLogged, botGuid);
         EraseByBot(g_extraSince, botGuid);
+
+        // Level latches live in the same pooled key space: a recycled guid must not
+        // inherit "already taught" or "already geared" from the body that had it first,
+        // or a fresh companion silently skips its spell, talent and profession catch-up.
+        g_taughtLevel.erase(botGuid);
+        g_gearLevel.erase(botGuid);
+        g_trimAt.erase(botGuid);
+        g_lastAutoProduce.erase(botGuid);
+        g_deadNoticeAt.erase(botGuid);
+        EraseByBot(g_missingCache, botGuid);
     }
 
     bool g_custodyReady = false;
@@ -3244,13 +3254,16 @@ namespace
         if (level < 5)
             return;                       // nothing a trainer sells below five
 
-        uint32& taught = g_taughtLevel[bot->GetGUID().GetCounter()];
-        if (taught == level)
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        if (g_taughtLevel[botGuid] == level)
             return;
-        taught = level;
 
         TeachTrainerContent(bot, owner);  // weapon skills, class spells, talent points
         TeachProfessions(bot, owner);     // both professions at the tier cap, tools, recipes
+
+        // Latch only once it has run: a pass that could not teach (a trade open, the
+        // trainer sync refused) must get another try at this level, not the next one.
+        g_taughtLevel[botGuid] = level;
     }
 
     /// Gathered materials eligible for surplus trade. Crafting checks its actual
@@ -3675,7 +3688,7 @@ namespace
 
             for (uint32 const item : reagents)
             {
-                uint32 const want = 5;
+                uint32 const want = CompanionReagentKeep;
                 uint32 const have = bot->GetItemCount(item);
                 if (have >= want)
                     continue;
@@ -4635,8 +4648,9 @@ namespace
 
                 if (!ownerAtGiver && nowTs - readyAt < g_cfg.handInDelaySeconds)
                     continue;
-
-                g_readyAt.erase(readyKey);
+                // Deliberately NOT erased here. Clearing the marker before the reward
+                // attempt made a blocked reward (full bags) re-announce "ready to hand
+                // in" on every pass, forever. It is cleared once the quest leaves the log.
             }
 
             uint32& prodAt = g_rewardProdAt[{ botGuid, questId }];
@@ -4663,6 +4677,8 @@ namespace
             bot->GetSession()->HandleQuestgiverChooseRewardOpcode(request);
             if (bot->FindQuestSlot(questId) < MAX_QUEST_LOG_SIZE)
                 continue;
+
+            g_readyAt.erase(readyKey);   // handed in: the invitation has served its purpose
             g_readyAt.erase((uint64(botGuid) << 32) | questId);
             ++g_session[ownerGuid].handedIn;
 
@@ -4837,7 +4853,21 @@ namespace
             ItemTemplate const* proto = item->GetTemplate();
             if (!proto || !proto->SellPrice)
                 return;
-            if (item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+            if (item->IsInTrade() || item->IsRefundable())
+                return;
+
+            // A loose bag is worth nothing: four are worn and CanReleaseItem refuses
+            // containers by design, so this rule owns the class itself. Only an EMPTY
+            // bag is spare - one holding things is carrying them for the companion.
+            if (proto->Class == ITEM_CLASS_CONTAINER && proto->SubClass == ITEM_SUBCLASS_CONTAINER)
+            {
+                Bag* bag = item->ToBag();
+                if (!bag || bag->IsEmpty())
+                    spare.push_back(item);
+                return;
+            }
+
+            if (!CanReleaseItem(bot, owner, item))
                 return;
 
             if (proto->Class == ITEM_CLASS_TRADE_GOODS)
@@ -4845,12 +4875,6 @@ namespace
                 if (item->IsSoulBound())     // the companion's own kit, never surplus
                     return;
                 carried[proto->ItemId].push_back(item);
-                return;
-            }
-            // A loose bag is worth nothing while four are already equipped.
-            if (proto->Class == ITEM_CLASS_CONTAINER && proto->SubClass == ITEM_SUBCLASS_CONTAINER)
-            {
-                spare.push_back(item);
                 return;
             }
             // Consumables stack up quietly; two stacks is what a player carries.
@@ -4934,6 +4958,7 @@ namespace
             ObjectGuid const mailbox = MailboxNearby(bot);
             if (!mailbox)
                 return 0;
+
             std::vector<Item*> attachments;
             for (Item* item : spareGoods)
                 if (item->CanBeTraded(true) && !item->IsSoulBound() && !item->IsRefundable())
@@ -4942,20 +4967,38 @@ namespace
                 if (item->CanBeTraded(true) && !item->IsSoulBound() && !item->IsRefundable() &&
                     item->GetTemplate()->Class != ITEM_CLASS_CONTAINER)
                     attachments.push_back(item);
-            if (attachments.empty() || attachments.size() > 3)
+            if (attachments.empty())
                 return 0;
+
+            // Every attempt is throttled, so a mailbox that refuses cannot be retried
+            // once per pass. A letter carries twelve stacks; several letters are fine -
+            // demanding a single small letter was why a full bag could never be rescued.
             last = now;
-            if (!MailHome(owner, bot, mailbox, attachments))
+            constexpr size_t kMailAttachments = 12;
+            uint32 posted = 0;
+            for (size_t i = 0; i < attachments.size(); i += kMailAttachments)
+            {
+                std::vector<Item*> letter(attachments.begin() + i,
+                    attachments.begin() + std::min(i + kMailAttachments, attachments.size()));
+                if (!MailHome(owner, bot, mailbox, letter))
+                    break;
+                posted += uint32(letter.size());
+            }
+            if (!posted)
                 return 0;
+            if (auto itr = g_session.find(owner->GetGUID().GetCounter()); itr != g_session.end())
+                itr->second.mailed += posted;
             if (g_cfg.debug >= 1)
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} posted {} spare stack(s) home (no merchant nearby)",
-                    bot->GetName(), uint32(attachments.size()));
+                    bot->GetName(), posted);
             SayToOwner(bot, owner,
                 "My pack was nearly full and no merchant was at hand, so I posted " +
-                std::to_string(attachments.size()) + " spare stack(s) to you - pick them up at the mailbox.", 30);
-            return uint32(attachments.size());
+                std::to_string(posted) + " spare stack(s) to you - pick them up at the mailbox.", 30);
+            return posted;
         }
 
+        // Set before the first sale: a merchant that refuses every item must not be
+        // re-searched on every pass for the same result.
         last = now;
         auto sell = [&](Item* item) -> bool
         {
@@ -4987,6 +5030,8 @@ namespace
 
         if (!sold && !gearSold)
             return 0;
+        if (auto itr = g_session.find(owner->GetGUID().GetCounter()); itr != g_session.end())
+            itr->second.sold += sold + gearSold;
         if (g_cfg.debug >= 1)
             LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} spare stack(s) and {} piece(s) to {} (free slots now {})",
                 bot->GetName(), sold, gearSold, vendor->GetName(), bot->GetFreeInventorySpace());
@@ -5067,10 +5112,9 @@ namespace
             return 0;
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
-        uint32& lastLevel = g_gearLevel[botGuid];
+        uint32 const lastLevel = g_gearLevel[botGuid];
         if (lastLevel && level < lastLevel + CompanionGearStep)
             return 0;
-        lastLevel = level;
 
         uint32 const before = DescribeGearItemLevel(bot);
 #ifdef MOD_PLAYERBOTS
@@ -5079,6 +5123,11 @@ namespace
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
 #endif
+        // Latched here, after the attempt but before the verdict: the preconditions
+        // above (bags, trade, combat) still retry on the next pass, while a generator
+        // that produced nothing does not run again for another five levels.
+        g_gearLevel[botGuid] = level;
+
         uint32 const after = DescribeGearItemLevel(bot);
         if (after == before)
             return 0;
@@ -5918,6 +5967,9 @@ namespace
         // before anything else is put into it, so restocking never spends into a wall.
         if (CanManageBags(owner, bot))
         {
+            // Wear what the pack already holds before judging it spare: an upgrade
+            // sold by the trim is worse than one worn, and the trim runs first here.
+            TryEquipUpgrades(owner, bot);
             SellBagSurplus(owner, bot);
             RestockNearVendor(owner, bot);
         }
@@ -5937,7 +5989,6 @@ namespace
         }
         if (CanManageBags(owner, bot))
         {
-            TryEquipUpgrades(owner, bot);
             // A kit that never caught up with the level is corrected here, so companions
             // claimed before this existed heal themselves instead of staying in starters.
             RefreshLevelGear(owner, bot);
@@ -6061,6 +6112,20 @@ namespace
     /// Entries sharing a coordinate are merged into one marker with both quest names,
     /// because a hand-in both companions need is one place to walk to, not two pins on
     /// the same tile.
+    /// Cut a string to at most maxBytes without splitting a UTF-8 character. The pin
+    /// grammar and the chat frame both render bytes, and half a character is visible.
+    inline std::string TruncateUtf8(std::string const& text, size_t maxBytes)
+    {
+        if (text.size() <= maxBytes)
+            return text;
+        std::string out = text.substr(0, maxBytes);
+        while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80)
+            out.pop_back();                                  // drop continuation bytes
+        if (!out.empty() && (static_cast<unsigned char>(out.back()) & 0x80))
+            out.pop_back();                                  // drop a dangling lead byte
+        return out;
+    }
+
     /// A companion name as the pin grammar can survive it.
     ///
     /// Keep actual character names intact on pins: the core limits characters, not
@@ -6083,7 +6148,7 @@ namespace
         }
 
         if (shortField && out.size() > 12)
-            out = out.substr(0, 12);
+            out = TruncateUtf8(out, 12);
 
         return out;
     }
@@ -6163,6 +6228,7 @@ namespace
             std::string numbers;
             char style;
             std::string title;
+            uint32 questId;
             std::string zone;   // the giver's zone, named by the SERVER: the client's own
                                 // location is not the pin's location, and guessing it was
                                 // how pins ended up stamped with the wrong map
@@ -6247,9 +6313,13 @@ namespace
                     if (numbers.empty())
                         continue;
 
+                    // A missing template title must not delete the pin: the addon needs a
+                    // non-empty label, and "quest 65" is more useful than nothing.
                     std::string title = quest->GetTitle();
+                    if (title.empty())
+                        title = "quest " + std::to_string(questId);
                     if (title.size() > 22)
-                        title = title.substr(0, 20) + "..";
+                        title = TruncateUtf8(title, 20) + "..";
 
                     // a title cannot carry the separators, or the addon would split it
                     std::replace(title.begin(), title.end(), '|', '/');
@@ -6273,7 +6343,25 @@ namespace
                     bool merged = false;
                     for (Entry& existing : entries)
                     {
-                        if (existing.numbers != numbers || existing.zone != zoneName || existing.style != style)
+                        if (existing.numbers != numbers || existing.zone != zoneName)
+                            continue;
+
+                        // The same quest at the same place is one marker, not two: two
+                        // companions, one ready to hand in and one short of items, used to
+                        // draw a gold pin and a grey pin on the same tile. Keep the strongest
+                        // state (h > u > p) and let the names share the label.
+                        if (existing.questId == questId)
+                        {
+                            auto const rank = [](char c) { return c == 'h' ? 3 : c == 'u' ? 2 : c == 'p' ? 1 : 0; };
+                            if (rank(style) > rank(existing.style))
+                                existing.style = style;
+                            if (existing.title.find(title) == std::string::npos)
+                                existing.title += " + " + title;
+                            merged = true;
+                            break;
+                        }
+
+                        if (existing.style != style)
                             continue;
 
                         // Every owner reads on the pin: the client gives the names their
@@ -6286,7 +6374,7 @@ namespace
                     }
 
                     if (!merged)
-                        entries.push_back({ numbers, style, title, zoneName });
+                        entries.push_back({ numbers, style, title, questId, zoneName });
                 }
             }
         }
@@ -6303,8 +6391,11 @@ namespace
 
             line += entry.numbers + "," + entry.style + "=" + entry.title;
 
+            // The zone is the only other field written to the wire: it goes through the
+            // same separator filter as names, or a comma in a zone name re-parses as the
+            // next field and the pin lands on the wrong map.
             if (!entry.zone.empty())
-                line += ",z=" + entry.zone;
+                line += ",z=" + SafePinName(entry.zone, false);
         }
 
         return line;
@@ -6382,7 +6473,10 @@ namespace
 
     void SendPinSync(Player* owner, bool force = false)
     {
-        if (!g_cfg.pinSync || !owner)
+        // MapPins is the switch the config documents: PinSync governs the protocol,
+        // MapPins whether the markers are pushed at all. Reading it nowhere made the
+        // documented setting a no-op.
+        if (!g_cfg.pinSync || !g_cfg.mapPins || !owner)
             return;
 
         uint32 const ownerGuid = owner->GetGUID().GetCounter();
@@ -9849,7 +9943,7 @@ public:
         // player - and then the player's own quests can be refused for being
         // below its level. Name it, because it reads like a sync failure.
         if (g_cfg.levelMode == 1 && bot->GetLevel() > player->GetLevel())
-            handler->PSendSysMessage("  |cffffd200level mode 1|r lets the companion sit above you; quests capped below its level ({} - against {} now) are refused. |cffffff00LevelMode 2|r pins both levels instead.",
+            handler->PSendSysMessage("  |cffffd200level mode 1|r lets the companion sit above you; quests capped below its level ({} - against {} now) are refused. |cffffff00LevelMode 2|r would have kept them level - it raises, and never demotes.",
                                      uint32(bot->GetLevel()), uint32(player->GetLevel()));
 
         return true;
