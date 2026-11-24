@@ -79,19 +79,19 @@ Keep the layers separate so each feature is a small addition:
 
 ### Sequenced work, smallest first
 
-1. **Ship what is built**: `auto` reverts the ledger and releases the stance. (done, awaiting a
-   restart - it fixes the auto bug you found)
-2. **Make `mine` event-driven**: pin the target on change only; keep `passive` strictly for
-   "you are not fighting". Removes per-tick command spam and the last tug-of-war.
-3. **`.companionsync inspect [name]`**: role, policy, ledger contents, per-class capability
-   notes, and probe results for the strategies of interest. Read-only, cheap, and it turns the
-   next bug report into text.
-4. **Per-class translation table**: data, not if-chains - forms (druid), presence (DK), auras
-   (paladin), totems (shaman), pets (hunter, warlock), with an honest note when a class cannot
-   honour a role.
-5. **`quiet`** on `dps`/`support`: `+threat`, for the case where dropping taunts is not enough.
-6. **Pet etiquette**: Growl/Torment off for non-tank roles. This is the one gap the current
-   architecture cannot express at all, because it is a pet ability rather than a strategy.
+1. **Done** - `auto` reverts the ledger and releases the stance.
+2. **Done** - `mine` pins the target on change only, through the AI's own input
+   (`DoSpecificAction("attack my target")`), never a whisper per tick.
+3. **Done** - `.companionsync inspect [name]`: role, engagement, quiet, active strategies,
+   ledger contents, and every reason something is missing.
+4. **Done** - the role table is data (`kClassRules`), so a class is a row: druid forms are two
+   rows with spell requirements, and the result is checked rather than assumed.
+5. **Done** - `quiet` on `dps`/`support` adds playerbots' `threat` strategy, per companion and
+   off by default.
+6. **Done** - pet taunts (Growl, Torment, Suffering, Anguish) are turned off for anything that
+   is not tanking, and only the abilities this module turned off are turned back on.
 
-Items 2 and 3 together remove most of the remaining "why is it doing that" surface; 4 is the
-one that pays off for every future class.
+What is left is not plumbing but judgement: threat values are playerbots' own, and the model
+still cannot express "help only when I am below half health" without an event. Everything the
+module does now goes through the three levers in order - input, then strategy, then stance -
+and every edit is written down and reversible.

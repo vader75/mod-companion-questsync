@@ -439,6 +439,17 @@ local function CreateCard()
     end, "Whether this companion gets into fights at all. Mine = only what you are fighting.", false)
     card.engageButton:SetPoint("TOPLEFT", 140, -132)
 
+    -- Quiet is the threat lever: "it will not taunt" is not "it will not pull aggro".
+    card.quietButton = Button(card, "Quiet: off", 120, function()
+        if not card.companion then return end
+        local on = not (G.Quiet and G.Quiet[card.companion.name])
+        G.Quiet = G.Quiet or {}
+        G.Quiet[card.companion.name] = on or nil
+        card.quietButton:SetText("Quiet: " .. (on and "on" or "off"))
+        G.Run(".companionsync quiet " .. card.companion.name .. (on and " on" or " off"))
+    end, "Hold threat down at the cost of damage. For dps and support roles.", false)
+    card.quietButton:SetPoint("TOPLEFT", 300, -132)
+
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
         if CanSupply(companion) then G.CollectDelivery(companion.name) end
@@ -909,6 +920,14 @@ function G.Refresh()
             else
                 card.trainButton:Hide()
                 card.professionsButton:Hide()
+            end
+
+            if card.quietButton then
+                local quiet = G.Quiet and G.Quiet[companion.name]
+                card.quietButton:SetText("Quiet: " .. (quiet and "on" or "off"))
+                local text = card.quietButton:GetFontString()
+                if quiet then text:SetTextColor(1.0, 0.82, 0.30)
+                else text:SetTextColor(0.62, 0.62, 0.66) end
             end
 
             if card.engageButton then

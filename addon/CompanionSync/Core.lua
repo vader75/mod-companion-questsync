@@ -608,7 +608,7 @@ listener:SetScript("OnEvent", function(_, event, message)
     end
     local roles = text:match("^Roles (.*)$")
     if roles then
-        G.Roles, G.RoleNotes, G.Engage = {}, {}, {}
+        G.Roles, G.RoleNotes, G.Engage, G.Quiet = {}, {}, {}, {}
         for pair in roles:gmatch("[^|]+") do
             local name, rest = pair:match("^(.-)=(.*)$")
             if name then
@@ -617,7 +617,10 @@ listener:SetScript("OnEvent", function(_, event, message)
                 local role, policy, flag = rest:match("^(%a+)/?(%a*)(.*)$")
                 G.Roles[name] = role
                 if policy ~= "" then G.Engage[name] = policy end
-                if flag == ":na" then G.RoleNotes[name] = true end
+                local flags = flag or ""
+                -- ":na" = this class cannot honour part of the role; ":q" = quiet (threat down)
+                if flags:find(":na") then G.RoleNotes[name] = true end
+                if flags:find(":q") then G.Quiet[name] = true end
             end
         end
         ProtocolActivity()

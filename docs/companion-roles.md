@@ -37,7 +37,7 @@ role is set, when the companion arrives, and re-asserted every minute:
 |---|---|
 | `tank` | `+tank` in combat — it is allowed to taunt and hold the fight |
 | `healer` | `+heal` in combat, `-tank` and `-pull` — it heals, never taunts, never pulls |
-| `dps` | `-tank`, `-pull` — contributes damage, cannot taunt or pull off you |
+| `dps` | `-tank`, `-pull` — contributes damage, cannot taunt or pull off you; `+threat` when `quiet` is on |
 | `support` | `-tank`, `-pull` — as `dps`, but expected to be buffing and following your target |
 | `auto` | nothing at all |
 
@@ -94,6 +94,31 @@ Known gaps, so nobody expects them:
   tank strategy but will not suddenly deal damage like a real DPS.
 - **Engagement is not threat.** `mine` keeps a companion off targets you have not chosen; it
   cannot stop the threat that fighting alongside you generates.
+
+## Quiet: hold the threat down
+
+"Will not taunt" is not "will not pull aggro": a companion's damage builds threat on its own.
+`quiet` turns on playerbots' `threat` strategy for a companion whose role is `dps` or
+`support`:
+
+```
+.companionsync quiet Vorrin on
+.companionsync quiet Branros off
+```
+
+Off by default, because it costs damage. On the card it is the third control on the role row.
+
+## Inspecting a companion
+
+```
+.companionsync inspect            # every companion
+.companionsync inspect Vorrin
+```
+
+Prints what the module actually believes: role, engagement, quiet, the strategies that are
+*active* on that bot (`tank`, `pull`, `heal`, `threat`, `passive`, `bear`, `cat`), the exact
+edits it has made (its ledger), and any reason something is missing - a strategy the class does
+not have, an engagement lever this build lacks, pet taunts turned off.
 
 ## Engagement: whether it gets into a fight at all
 

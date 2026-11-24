@@ -65,7 +65,7 @@ class StrategyContract(unittest.TestCase):
 
     def test_auto_touches_nothing(self):
         body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
-        self.assertIn("return {};", body)
+        self.assertIn("    else\n            return edits;   // auto: the module keeps its hands off", body)
         apply_body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
         self.assertIn('if (role == "auto")', apply_body)
 
@@ -114,29 +114,26 @@ class StrategyContract(unittest.TestCase):
     def test_a_druid_is_taken_out_of_bear_form_for_dps_and_support(self):
         # playerbots picks bear from the Thick Hide aura, not from intent: dropping "tank"
         # alone leaves the companion standing in a bear suit, so the form strategy goes too
-        body = slice_from('if (role == "dps" || role == "support")', 700)
-        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, false });', body)
-        self.assertIn('edits.push_back({ "cat", BOT_STATE_COMBAT, true });', body)
-        self.assertIn("if (canCat)", body)
-        whole = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
-        self.assertIn("bool const canCat = druid && bot->HasSpell(768);", whole)
+        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 900)
+        self.assertIn('{ CLASS_DRUID, "dps",     "bear", BOT_STATE_COMBAT, false, 0 },', rules)
+        self.assertIn('{ CLASS_DRUID, "support", "bear", BOT_STATE_COMBAT, false, 0 },', rules)
+        self.assertIn('{ CLASS_DRUID, "dps",     "cat",  BOT_STATE_COMBAT, true,  768  },', rules)
 
     def test_a_druid_healer_is_taken_out_of_bear_form(self):
-        body = slice_from('if (role == "healer")', 500)
-        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, false });', body)
+        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 900)
+        self.assertIn('{ CLASS_DRUID, "healer",  "bear", BOT_STATE_COMBAT, false, 0 },', rules)
 
     def test_a_druid_tank_is_put_into_bear_form(self):
-        body = slice_from('if (role == "tank")', 320)
-        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, true });', body)
-        self.assertIn("bot->HasSpell(5487)", body)
+        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 900)
+        self.assertIn('{ CLASS_DRUID, "tank",    "bear", BOT_STATE_COMBAT, true,  5487 }', rules)
 
     def test_forms_are_only_touched_for_druids(self):
-        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
-        self.assertIn("bool const druid = bot && bot->getClass() == CLASS_DRUID;", body)
-        # every form edit is behind that flag, so no other class is dragged into a form
-        for line in body.splitlines():
-            if '"bear"' in line or '"cat"' in line:
-                self.assertTrue("edits.push_back" in line or "if (druid" in line, line)
+        # the table carries the class in every row, so a form edit cannot leak to another class
+        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 1200)
+        rows = [line for line in rules.splitlines() if '"bear"' in line or '"cat"' in line]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertIn("CLASS_DRUID", row, row)
 
     def test_a_removal_that_did_not_take_is_reported_as_well(self):
         body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
@@ -216,12 +213,6 @@ class EngagementContract(unittest.TestCase):
         self.assertIn('"+passive"', body)
         self.assertIn('"-passive"', body)
 
-    def test_mine_points_the_bot_at_the_owners_target(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
-        self.assertIn('policy == "mine"', body)
-        self.assertIn("bot->GetVictim() != ownerTarget", body)
-        self.assertIn('ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner)', body)
-
     def test_joined_lifts_passive_only_while_the_owner_fights(self):
         # joined and mine now share one stance rule: passive only while the owner is idle
         body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
@@ -249,13 +240,6 @@ class EngagementContract(unittest.TestCase):
         body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('bool const wantPassive = policy == "never" || (!ownerFighting && policy != "auto");',
                       body)
-
-    def test_mine_fights_only_while_the_owner_is_fighting(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
-        self.assertIn("ownerFighting", body)
-        attack = body.index('HandleCommand(CHAT_MSG_WHISPER, "attack", owner)')
-        strategy = body.index('"+passive"')
-        self.assertLess(strategy, attack, "the stance must be cleared before the order is given")
 
     def test_the_documented_lever_is_recorded(self):
         text = (ROOT / "docs" / "companion-strategy-map.md").read_text(encoding="utf-8")

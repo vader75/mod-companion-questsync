@@ -71,6 +71,8 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #endif
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
+#include "Pet.h"             // pet autocasts: Growl and Torment are what taunt for us
+#include "SpellMgr.h"        // naming a pet ability we turn off
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
 #ifdef MOD_PLAYERBOTS
 #include "PlayerbotMgr.h"
@@ -565,6 +567,9 @@ namespace
     std::set<uint32> g_passiveHeld;               // bots we have put into the passive stance
     std::atomic<int> g_engageColumn{0};           // 0 unknown, 1 present, -1 missing
     std::atomic<int> g_passiveStrategy{0};        // 0 unprobed, 1 usable, -1 not in this build
+    std::atomic<int> g_quietColumn{0};            // 0 unknown, 1 present, -1 missing
+    std::map<uint32, uint32> g_pinnedTarget;      // bot guid -> owner target we pointed it at
+    std::map<uint32, std::vector<uint32>> g_petTauntOff;   // bot guid -> pet autocasts we turned off
     std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
     uint32 constexpr kRoleReassertSeconds = 60;   // playerbots drops strategies on spec/level change
 
@@ -888,6 +893,8 @@ namespace
         // and with it the strategy set - when the bot is next summoned
         g_roleApplied.erase(botGuid);
         g_passiveHeld.erase(botGuid);
+        g_pinnedTarget.erase(botGuid);
+        g_petTauntOff.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
@@ -1105,11 +1112,8 @@ namespace
         return CompanionRole(botGuid) == wanted;
     }
 
-    /// What a role asks of playerbots, as strategy edits.
-    ///
-    /// The names are playerbots' own and they are class-specific: a priest has no "tank"
-    /// strategy and a warrior has no "heal". Asking for one is not an error - it simply
-    /// comes back absent, which ApplyRoleStrategies reports instead of hiding.
+    bool CompanionQuiet(uint32 botGuid);
+
     struct RoleStrategyEdit
     {
         char const* name;
@@ -1117,47 +1121,65 @@ namespace
         bool add;
     };
 
-    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role, Player* bot)
+    /// One row of the translation table: a class-specific lever for one role.
+    ///
+    /// The druid form bug is what this table exists for. The flat role table asked every class
+    /// the same question and got a wrong answer for druids, whose form comes from a talent aura
+    /// rather than from intent. Adding a class now means adding rows, not branches.
+    struct ClassRule
     {
-        // A druid is the one class where the form is decided by a talent aura, not by what the
-        // player wants: playerbots puts any feral druid carrying Thick Hide into bear form for
-        // good, so dropping "tank" leaves it standing in a bear suit, holding threat by
-        // proximity. The form strategy itself has to go.
-        bool const druid = bot && bot->getClass() == CLASS_DRUID;
-        bool const canCat = druid && bot->HasSpell(768);        // Cat Form
+        uint8 klass;
+        char const* role;        // which role the row applies to
+        char const* strategy;
+        BotState state;
+        bool add;
+        uint32 needsSpell;       // 0 = no requirement, otherwise the bot must know this spell
+    };
+
+    ClassRule constexpr kClassRules[] = {
+        // druids: bear form is chosen from the Thick Hide aura, so it has to be taken away
+        // explicitly, and cat form has to be asked for
+        { CLASS_DRUID, "dps",     "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DRUID, "support", "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DRUID, "healer",  "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DRUID, "tank",    "bear", BOT_STATE_COMBAT, true,  5487 },   // Bear Form
+        { CLASS_DRUID, "dps",     "cat",  BOT_STATE_COMBAT, true,  768  },   // Cat Form
+        { CLASS_DRUID, "support", "cat",  BOT_STATE_COMBAT, true,  768  },
+    };
+
+    /// What a role asks of playerbots, as strategy edits: the flat part every class shares,
+    /// then whatever this class needs on top, then the quiet flag.
+    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role, Player* bot, bool quiet)
+    {
+        std::vector<RoleStrategyEdit> edits;
 
         if (role == "tank")
+            edits.push_back({ "tank", BOT_STATE_COMBAT, true });
+        else if (role == "healer")
         {
-            std::vector<RoleStrategyEdit> edits = { { "tank", BOT_STATE_COMBAT, true } };
-            if (druid && bot->HasSpell(5487))                    // Bear Form
-                edits.push_back({ "bear", BOT_STATE_COMBAT, true });
-            return edits;
+            edits.push_back({ "heal", BOT_STATE_COMBAT, true });
+            edits.push_back({ "tank", BOT_STATE_COMBAT, false });
+            edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
-
-        if (role == "healer")
+        else if (role == "dps" || role == "support")
         {
-            std::vector<RoleStrategyEdit> edits = { { "heal", BOT_STATE_COMBAT, true },
-                                                    { "tank", BOT_STATE_COMBAT, false },
-                                                    { "pull", BOT_STATE_NON_COMBAT, false } };
-            if (druid)
-                edits.push_back({ "bear", BOT_STATE_COMBAT, false });
-            return edits;
+            edits.push_back({ "tank", BOT_STATE_COMBAT, false });
+            edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
+        else
+            return edits;   // auto: the module keeps its hands off this companion entirely
 
-        if (role == "dps" || role == "support")
-        {
-            std::vector<RoleStrategyEdit> edits = { { "tank", BOT_STATE_COMBAT, false },
-                                                    { "pull", BOT_STATE_NON_COMBAT, false } };
-            if (druid)
-            {
-                edits.push_back({ "bear", BOT_STATE_COMBAT, false });
-                if (canCat)
-                    edits.push_back({ "cat", BOT_STATE_COMBAT, true });
-            }
-            return edits;
-        }
+        if (bot)
+            for (ClassRule const& rule : kClassRules)
+                if (bot->getClass() == rule.klass && role == rule.role &&
+                    (!rule.needsSpell || bot->HasSpell(rule.needsSpell)))
+                    edits.push_back({ rule.strategy, rule.state, rule.add });
 
-        return {};   // auto: the module keeps its hands off this companion entirely
+        // "quiet" is the threat lever: dropping taunts is not the same as not generating threat
+        if (quiet && (role == "dps" || role == "support"))
+            edits.push_back({ "threat", BOT_STATE_COMBAT, true });
+
+        return edits;
     }
 
     void RevertRoleStrategies(Player* bot);
@@ -1190,7 +1212,9 @@ namespace
 
         std::vector<AppliedEdit> applied;
 
-        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot))
+        bool const quiet = CompanionQuiet(botGuid);
+
+        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot, quiet))
         {
             bool const present = ai->HasStrategy(edit.name, edit.state);
             if (edit.add == present)
@@ -1234,6 +1258,108 @@ namespace
                 ai->ChangeStrategy(std::string(edit.added ? "-" : "+") + edit.name, BotState(edit.state));
 
         g_roleApplied.erase(mine);
+    }
+
+    // --------------------------------------------------------------- quiet
+    //
+    // Threat is not taunts. Dropping "tank" stops the companion grabbing aggro deliberately,
+    // but its damage still builds threat; playerbots' own "threat" strategy is the lever that
+    // makes it quieter. Off by default, because it costs damage.
+    bool QuietColumnPresent()
+    {
+        int state = g_quietColumn.load();
+        if (state)
+            return state > 0;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name = 'quiet'");
+        state = (row && row->Fetch()[0].Get<uint64>() != 0) ? 1 : -1;
+        g_quietColumn = state;
+        if (state < 0)
+            LOG_WARN("server.loading", "[CompanionQuestSync] cq_companion_custody has no quiet column; "
+                                       "the quiet flag stays off until sql/companion-quiet.sql is imported");
+        return state > 0;
+    }
+
+    bool CompanionQuiet(uint32 botGuid)
+    {
+        if (!QuietColumnPresent())
+            return false;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT quiet FROM cq_companion_custody WHERE bot_guid = {} AND module = 'cq' LIMIT 1", botGuid);
+        if (!row)
+            return false;
+
+        Field* field = row->Fetch();
+        return !field[0].IsNull() && field[0].Get<uint8>() != 0;
+    }
+
+    bool SetCompanionQuiet(uint32 ownerGuid, uint32 botGuid, bool quiet)
+    {
+        if (!QuietColumnPresent() || !HasCurrentCustody(ownerGuid, botGuid, false))
+            return false;
+
+        CharacterDatabase.DirectExecute(
+            "UPDATE cq_companion_custody SET quiet = {} WHERE bot_guid = {} AND owner_guid = {} "
+            "AND module = 'cq' AND state = 'owned'", quiet ? 1 : 0, botGuid, ownerGuid);
+        return CompanionQuiet(botGuid) == quiet;
+    }
+
+    // --------------------------------------------------------------- pets
+    //
+    // A hunter pet or a voidwalker taunts with an ability, not a strategy, so the tank/dps split
+    // cannot reach it. The module turns those autocasts off for anything that is not tanking,
+    // and only ever turns back on what it turned off.
+    bool IsTauntAbility(uint32 spellId)
+    {
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+        if (!info || !info->SpellName[0])
+            return false;
+
+        std::string const name = info->SpellName[0];
+        return name == "Growl" || name == "Torment" || name == "Suffering" || name == "Anguish";
+    }
+
+    void ReconcilePetTaunt(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string const role = CompanionRole(botGuid);
+        std::vector<uint32>& off = g_petTauntOff[botGuid];
+
+        Pet* pet = bot->GetPet();
+        if (!pet)
+        {
+            off.clear();
+            return;
+        }
+
+        // tanking keeps its taunt; auto means the module never touched it
+        if (role == "tank" || role == "auto")
+        {
+            for (uint32 const spellId : off)
+                if (SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId))
+                    pet->ToggleAutocast(info, true);
+            off.clear();
+            return;
+        }
+
+        for (uint8 i = 0; i < pet->GetPetAutoSpellSize(); ++i)
+        {
+            uint32 const spellId = pet->GetPetAutoSpellOnPos(i);
+            if (!IsTauntAbility(spellId) || std::find(off.begin(), off.end(), spellId) != off.end())
+                continue;
+
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId))
+            {
+                pet->ToggleAutocast(info, false);
+                off.push_back(spellId);
+            }
+        }
     }
 
     // --------------------------------------------------------------- engagement
@@ -1367,6 +1493,7 @@ namespace
             // putting the setting back to auto must not leave the bot in the stance we put it
             // in: a stuck passive is a companion that ignores every order to fight
             ReleasePassive(bot);
+            g_pinnedTarget.erase(botGuid);
             return;
         }
 
@@ -1412,10 +1539,26 @@ namespace
         else
             g_passiveHeld.erase(botGuid);
 
-        // "mine" is the only policy where the module names the target: the bot stays passive
-        // and is pointed at exactly what the owner is fighting.
-        if (policy == "mine" && ownerHitsSomething && bot->GetVictim() != ownerTarget)
-            ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner);
+        // "mine" is the only policy where the module names the target. It does so on *change*,
+        // not on every tick: "attack my target" persists its intent in the AI's prioritized
+        // targets, so repeating it is noise that fights the AI's own targeting.
+        if (policy == "mine")
+        {
+            uint32 const wantTarget = (ownerFighting && ownerHitsSomething)
+                                          ? ownerTarget->GetGUID().GetCounter()
+                                          : 0;
+            uint32& pinned = g_pinnedTarget[botGuid];
+            if (wantTarget != pinned)
+            {
+                pinned = wantTarget;
+                if (wantTarget)
+                    ai->DoSpecificAction("attack my target");
+            }
+        }
+        else if (g_pinnedTarget.erase(botGuid))
+        {
+            // the policy changed away from mine: stop pinning anything
+        }
     }
 
     bool FindCompanions(uint32 ownerGuid, std::vector<uint32>& bots)
@@ -1493,6 +1636,8 @@ namespace
             line += name + "=" + CompanionRole(botGuid);
             if (std::string const policy = CompanionEngage(botGuid); policy != "auto")
                 line += "/" + policy;
+            if (CompanionQuiet(botGuid))
+                line += ":q";
             auto const note = g_roleNotes.find(botGuid);
             if (note != g_roleNotes.end() && !note->second.empty())
                 line += ":na";       // this class cannot honour part of the role
@@ -1526,6 +1671,7 @@ namespace
                 continue;
 
             at = now;
+            ReconcilePetTaunt(bot);
             std::string const missed = ApplyRoleStrategies(bot);
             if (missed.empty())
                 g_roleNotes.erase(botGuid);
@@ -9223,6 +9369,176 @@ public:
         return true;
     }
 
+    /// .companionsync quiet <companion> [on|off]
+    ///
+    /// Threat is not taunts: a companion that cannot taunt still builds threat with its damage.
+    /// "quiet" enables playerbots' own threat reduction, at the price of damage, so it is off
+    /// unless asked for.
+    static bool HandleQuietCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        std::vector<std::string> const a = SplitArgs(args, 2);
+
+        if (a.size() < 2)
+        {
+            handler->PSendSysMessage("|cffff8000quiet|r: use quiet <companion> on | off.");
+            return true;
+        }
+
+        std::string const wanted = FormationLower(a[1]);
+        if (wanted != "on" && wanted != "off")
+        {
+            handler->PSendSysMessage("|cffff8000quiet|r: '{}' is not on or off.", a[1]);
+            return true;
+        }
+
+        uint32 const botGuid = ResolveOwnedCompanion(ownerGuid, a[0]);
+        if (!botGuid)
+        {
+            handler->PSendSysMessage("|cffff8000quiet|r: you have no companion called '{}'.", a[0]);
+            return true;
+        }
+
+        bool const on = wanted == "on";
+        if (!SetCompanionQuiet(ownerGuid, botGuid, on))
+        {
+            handler->PSendSysMessage("|cffff8000quiet|r: could not store that (is sql/companion-quiet.sql imported?).");
+            return true;
+        }
+
+        if (Player* bot = FindCompanionPlayer(botGuid))
+        {
+            if (std::string const missed = ApplyRoleStrategies(bot); !missed.empty())
+                g_roleNotes[botGuid] = missed;
+            g_roleApplyAt[botGuid] = static_cast<uint32>(time(nullptr));
+        }
+
+        handler->PSendSysMessage("|cff20ff20{}|r is {}quiet.{}", a[0], on ? "|cffffffff" : "",
+                                 on ? "|r It will work at holding threat down, and hit softer."
+                                    : "|r It fights at full strength.");
+        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        return true;
+    }
+
+    /// .companionsync inspect [companion]
+    ///
+    /// Everything this module believes about a companion, in one place: the setting, the
+    /// strategies that are actually active, what it has edited, and why anything is missing.
+    /// Written because every bug so far was diagnosed by reading playerbots' source.
+    static std::string StrategySnapshot(PlayerbotAI* ai)
+    {
+        struct Probe
+        {
+            char const* name;
+            BotState state;
+        };
+
+        Probe const probes[] = {
+            { "tank",    BOT_STATE_COMBAT },
+            { "pull",    BOT_STATE_NON_COMBAT },
+            { "heal",    BOT_STATE_COMBAT },
+            { "threat",  BOT_STATE_COMBAT },
+            { "passive", BOT_STATE_COMBAT },
+            { "bear",    BOT_STATE_COMBAT },
+            { "cat",     BOT_STATE_COMBAT },
+        };
+
+        std::string out;
+        for (Probe const& probe : probes)
+        {
+            if (!out.empty())
+                out += "  ";
+            out += std::string(probe.name) + (ai->HasStrategy(probe.name, probe.state) ? "=on" : "=off");
+        }
+        return out;
+    }
+
+    static std::string LedgerSnapshot(uint32 botGuid)
+    {
+        auto const mine = g_roleApplied.find(botGuid);
+        if (mine == g_roleApplied.end() || mine->second.empty())
+            return "none";
+
+        std::string out;
+        for (AppliedEdit const& edit : mine->second)
+        {
+            if (!out.empty())
+                out += ", ";
+            out += std::string(edit.added ? "+" : "-") + edit.name;
+        }
+        return out;
+    }
+
+    static bool HandleInspectCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        std::vector<std::string> const a = SplitArgs(args, 1);
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(ownerGuid, bots))
+        {
+            handler->PSendSysMessage("|cffff8000inspect|r: you have no companions.");
+            return true;
+        }
+
+        uint32 onlyGuid = 0;
+        if (!a.empty() && !a[0].empty())
+        {
+            onlyGuid = ResolveOwnedCompanion(ownerGuid, a[0]);
+            if (!onlyGuid)
+            {
+                handler->PSendSysMessage("|cffff8000inspect|r: you have no companion called '{}'.", a[0]);
+                return true;
+            }
+        }
+
+        for (uint32 const botGuid : bots)
+        {
+            if (onlyGuid && botGuid != onlyGuid)
+                continue;
+
+            Player* bot = FindCompanionPlayer(botGuid);
+            std::string const name = bot ? bot->GetName() : std::string("(not summoned)");
+            handler->PSendSysMessage("|cffffd200{}|r  role |cffffffff{}|r  engage |cffffffff{}|r  quiet {}",
+                                     name, CompanionRole(botGuid), CompanionEngage(botGuid),
+                                     CompanionQuiet(botGuid) ? "|cffffffffon|r" : "off");
+
+            PlayerbotAI* ai = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+            if (ai)
+                handler->PSendSysMessage("  active: {}", StrategySnapshot(ai));
+            else
+                handler->PSendSysMessage("  active: no AI (not summoned, or not a bot)");
+
+            handler->PSendSysMessage("  edits: {}", LedgerSnapshot(botGuid));
+
+            auto const roleNote = g_roleNotes.find(botGuid);
+            if (roleNote != g_roleNotes.end())
+                handler->PSendSysMessage("  |cffffd200could not establish:|r {}", roleNote->second);
+
+            auto const engageNote = g_engageNotes.find(botGuid);
+            if (engageNote != g_engageNotes.end())
+                handler->PSendSysMessage("  |cffffd200engagement:|r {}", engageNote->second);
+
+            auto const petOff = g_petTauntOff.find(botGuid);
+            if (petOff != g_petTauntOff.end() && !petOff->second.empty())
+                handler->PSendSysMessage("  pet taunts off: {} ability(ies)", uint32(petOff->second.size()));
+        }
+
+        handler->PSendSysMessage("|cff808080role sets what it may do, engage when it joins, quiet how "
+                                 "much threat it makes.|r");
+        return true;
+    }
+
     /// .companionsync engage <companion> [auto|mine|joined|never]
     ///
     /// Whether the companion gets into a fight at all. "mine" hands target selection to the
@@ -9412,6 +9728,8 @@ public:
             { "formation", HandleFormationCommand, SEC_PLAYER, Console::No },
             { "role",      HandleRoleCommand,      SEC_PLAYER, Console::No },
             { "engage",    HandleEngageCommand,    SEC_PLAYER, Console::No },
+            { "quiet",     HandleQuietCommand,     SEC_PLAYER, Console::No },
+            { "inspect",   HandleInspectCommand,   SEC_PLAYER, Console::No },
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
