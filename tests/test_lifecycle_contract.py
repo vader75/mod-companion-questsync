@@ -28,6 +28,21 @@ class Lifecycle(unittest.TestCase):
         # The post-commit message must not blame the slot cap it no longer owns.
         self.assertNotIn('all ownership slots are reserved', create)
 
+    def test_release_retires_the_body_once_the_logout_is_observed(self):
+        poll = section('void CheckPendingReleases()', 'bool BeginRelease(')
+        self.assertIn('FinalizeRetirementInline(', poll)
+        self.assertIn('retired', poll)
+        # The timeout branch must still leave the row for offline maintenance.
+        self.assertIn('remains quarantined', poll)
+        final = section('bool FinalizeRetirementInline(', 'void CheckPendingReleases()')
+        self.assertIn("x.state = 'retired'", final)
+        self.assertIn('DELETE FROM cq_bindings', final)
+        self.assertIn('c.online = 0', final)
+        self.assertIn('DirectCommitTransaction', final)
+        # A retired body is a tombstone: never reset, rename or delete it.
+        self.assertNotIn('DELETE FROM characters', final)
+        self.assertNotIn('ResetPoolBody', final)
+
     def test_create_is_atomic_and_never_resets_an_unclaimed_body(self):
         create = section('bool CreateCompanion(', 'bool OwnerHasQuestCompanionLacks(')
         self.assertIn('DirectCommitTransaction', create)

@@ -7040,6 +7040,35 @@ namespace
         return HasCurrentCustody(ownerGuid, botGuid, true);
     }
 
+    /// Finish a release that was already committed as `retiring`: mark the reservation a
+    /// tombstone and drop its binding so the owner's slot is free without an offline
+    /// window. The body itself is untouched - never reset, renamed, deleted or recycled -
+    /// and the whole thing is refused unless the row is still `retiring`, still matches the
+    /// verified body, and that body is offline.
+    bool FinalizeRetirementInline(uint32 ownerGuid, uint32 botGuid, std::string const& name)
+    {
+        std::string escaped = name;
+        CharacterDatabase.EscapeString(escaped);
+        auto trans = CharacterDatabase.BeginTransaction();
+        trans->Append("UPDATE cq_companion_custody x JOIN characters c ON c.guid = x.bot_guid "
+            "JOIN characters o ON o.guid = x.owner_guid AND o.guid <> c.guid "
+            "SET x.state = 'retired' "
+            "WHERE x.module = 'cq' AND x.state = 'retiring' AND x.tracking = 0 "
+            "AND x.bot_guid = {} AND x.owner_guid = {} AND c.account = x.body_account "
+            "AND c.online = 0 AND BINARY x.body_name = BINARY c.name",
+            botGuid, ownerGuid);
+        trans->Append("SET @cq_retire_changed = ROW_COUNT()");
+        trans->Append("DELETE FROM cq_bindings WHERE bot_guid = {} AND owner_guid = {} "
+            "AND BINARY companion_name = BINARY '{}' AND @cq_retire_changed > 0",
+            botGuid, ownerGuid, escaped);
+        CharacterDatabase.DirectCommitTransaction(trans);
+
+        return static_cast<bool>(CharacterDatabase.Query(
+            "SELECT 1 FROM cq_companion_custody WHERE bot_guid = {} AND owner_guid = {} "
+            "AND module = 'cq' AND state = 'retired'", botGuid, ownerGuid)) &&
+            !CharacterDatabase.Query("SELECT 1 FROM cq_bindings WHERE bot_guid = {}", botGuid);
+    }
+
     void CheckPendingReleases()
     {
         auto const now = std::chrono::steady_clock::now();
@@ -7057,9 +7086,25 @@ namespace
                 ++it;
                 continue;
             }
-            // A logout observation is NOT a save barrier. Never reset, rename or
-            // remove the reservation here, even if the DB online flag is clear.
-            char const* why = busy ? "logout was not confirmed before timeout" : "logout observed";
+            // Retiring is a tombstone, not a recycle: the body keeps its name and is never
+            // reset or handed to another owner. Finishing it here is what frees the owner's
+            // slot without an offline maintenance window, so it is gated on an observed
+            // logout rather than on a timer alone.
+            bool const retired = !busy && FinalizeRetirementInline(pending.ownerGuid, pending.botGuid, pending.name);
+            if (retired)
+            {
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} ({}) retired on release; the slot is free",
+                         pending.name, pending.botGuid);
+                if (Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
+                    owner && owner->GetSession())
+                    ChatHandler(owner->GetSession()).PSendSysMessage(
+                        "{} has retired and its slot is free again. Ask me for a new companion whenever you are ready.",
+                        pending.name);
+                InvalidateCompanionGuid(pending.ownerGuid);
+                it = g_pendingRelease.erase(it);
+                continue;
+            }
+            char const* why = busy ? "logout was not confirmed before timeout" : "retirement could not be confirmed";
             LOG_INFO("server.loading", "[CompanionQuestSync] {} ({}) remains quarantined: {}", pending.name, pending.botGuid, why);
             if (Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(pending.ownerGuid));
                 owner && owner->GetSession())
