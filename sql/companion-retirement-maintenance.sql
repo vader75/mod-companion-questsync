@@ -1,3 +1,9 @@
+-- MAINTENANCE BACKUP PATH, not the normal release flow. QuestSync retires a released
+-- companion by itself once its logout is observed (state 'retiring' -> 'retired' plus
+-- removal of that binding), so the owner's slot frees without staff action. Use this
+-- procedure only for a row that is still 'retiring' because the logout was never
+-- confirmed, or for rows left by a build that predates the automatic path.
+--
 -- OPTIONAL, during authorized clean-stop maintenance only, with all world
 -- processes and external account/character writers stopped. Not a save barrier.
 -- Requires both canonical binding tables and InnoDB; see docs/companion-custody.md.

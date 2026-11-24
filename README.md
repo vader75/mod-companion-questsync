@@ -144,6 +144,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 | --- | --- |
 | No panel or empty roster | Confirm CompanionSync is enabled and the server is running the module, then click **Refresh**. `/csync test` checks the client parser; it does not prove the server is sending data. |
 | No available race/class or an old companion won't summon | Check reviewed stock or ownership, current character identity, and custody/schema logs. Don't re-enroll an ambiguous body to bypass a refusal. |
+| Released a companion but the slot is still taken | Automatic retirement finishes once the logout is confirmed; if it was not, the row stays `retiring` and `sql/companion-retirement-maintenance.sql` (plus the portal's maintenance preview) is the backup path. |
 | A new companion didn't receive Portable Holes | Confirm the patched build and starter-bag migration were in place before the claim. The grant only fills empty slots and will not retry after the attempt has been spent. |
 | Quest missing or won't turn in | Check eligibility, quest-log and bag space, and the companion's own objectives. Summon it and bring it to a live, usable ender. Mode `0` disables the module's own hand-ins. |
 | No pins | Open the matching **zone** map, check both server pin settings and the addon, then use `/cpins refresh` with the map open. Check `DataDir` if zone mapping looks wrong. |
