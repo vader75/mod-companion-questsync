@@ -390,6 +390,16 @@ class CompanionPinsContract(unittest.TestCase):
                 frame.CreateFontString = function(self, ...)
                     local text = font(self, ...)
                     text.SetText = function(region, value) region.value = value end
+                    text.SetPoint = function(region, ...) region.point = {...} end
+                    text.GetStringWidth = function(region)
+                        local width = 0
+                        for byte in (region.value or ''):gmatch('.') do
+                            local n = byte:byte()
+                            if n < 128 or n >= 192 then width = width + (byte == 'W' and 8 or 4) end
+                        end
+                        return width
+                    end
+                    text.GetStringHeight = function() return 11 end
                     return text
                 end
                 return frame
@@ -398,7 +408,48 @@ class CompanionPinsContract(unittest.TestCase):
             GetCurrentMapZone = function() return 1 end
             GetCurrentMapContinent = function() return 1 end
             GetMapZones = function() return 'The Barrens', 'Other' end
+            CompanionPinsDB = { showLabels = false }
         ''')
+
+    def test_smart_labels_give_gold_then_green_priority_without_hiding_pins(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send(None, 'PLAYER_LOGIN')
+        self.send('CSYNC|Pin set 1 1/1:13,50,h=WWWWW@Mirdan,z=The Barrens|87,50,g=Work,z=The Barrens')
+        ready, work = g.CompanionPinsPin1, g.CompanionPinsPin2
+        self.assertEqual(ready.label.value, '')
+        g.SlashCmdList.WLPINS('labels')
+        self.assertEqual(ready.label.value, 'WWWWW')
+        self.assertEqual(work.label.value, '')
+        self.assertTrue(work.shown)
+        self.assertEqual(work.point[4], 87)
+
+        self.send('CSYNC|Pin set 2 1/1:13,50,g=WWWWW@Mirdan,z=The Barrens|87,50,p=Later,z=The Barrens')
+        self.assertEqual(g.CompanionPinsPin2.label.value, 'WWWWW')
+        self.assertEqual(g.CompanionPinsPin1.label.value, '')
+        self.assertTrue(g.CompanionPinsPin1.shown)
+
+    def test_smart_label_tries_other_side_and_preserves_full_shared_tooltip(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send(None, 'PLAYER_LOGIN')
+        g.SlashCmdList.WLPINS('labels')
+        self.send('CSYNC|Pin set 1 1/1:49,50,h=Ready@Mirdan + Ready@Gordan,z=The Barrens|80,50,p=Later,z=The Barrens')
+        pin = g.CompanionPinsPin1
+        self.assertEqual(pin.label.value, 'Ready')
+        self.assertEqual(pin.label.point[1], 'RIGHT')
+        self.assertEqual(pin.point[4], 49)
+        pin.script_OnEnter(pin)
+        lines = [g.GameTooltip.lines[i] for i in range(1, len(g.GameTooltip.lines) + 1)]
+        self.assertTrue(all(any(name in line for line in lines) for name in ('Mirdan', 'Gordan')))
+
+    def test_smart_label_truncates_to_width_without_splitting_utf8(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send(None, 'PLAYER_LOGIN')
+        g.SlashCmdList.WLPINS('labels')
+        self.send('CSYNC|Pin set 1 1/1:49,50,h=ÉtéÉtéÉtéÉtéÉtéÉté@Mirdan,z=The Barrens')
+        self.assertEqual(g.CompanionPinsPin1.label.value, 'ÉtéÉtéÉ…')
 
     def test_map_status_distinguishes_waiting_stale_empty_and_hidden(self):
         self.stub_map()

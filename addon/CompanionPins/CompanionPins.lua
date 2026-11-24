@@ -724,6 +724,67 @@ local function PlacePin(pin, x, y, w, h, placed)
     return x, y -- a canvas saturated by buttons has no free full-sized slot
 end
 
+-- Place text after all glyphs, so even an unlabelled pin reserves its hit box.
+local function PlaceLabels(frames, width)
+    local order, occupied = {}, {}
+    local priority = { handin = 3, gather = 2, finish = 2 }
+    for i, f in ipairs(frames) do
+        order[i] = i
+        occupied[i] = { f.mapX - PIN_HALF, f.mapX + PIN_HALF, f.mapY - PIN_HALF, f.mapY + PIN_HALF }
+    end
+    table.sort(order, function(a, b)
+        local pa = priority[frames[a].pin.style.key] or 1
+        local pb = priority[frames[b].pin.style.key] or 1
+        if pa == pb then return a < b end
+        return pa > pb
+    end)
+    for _, i in ipairs(order) do
+        local f = frames[i]
+        local label, title = f.label, f.pin.details[1].quest
+        label:SetText(title)
+        local fullWidth = label:GetStringWidth()
+        local halfHeight = label:GetStringHeight() / 2 + 2
+        local top, bottom = f.mapY - halfHeight, f.mapY + halfHeight
+        local left, right = f.mapX - PIN_HALF - 4, f.mapX + PIN_HALF + 4
+        local leftRoom, rightRoom = left, width - right
+        for _, box in ipairs(occupied) do
+            if top < box[4] and bottom > box[3] then
+                if box[1] < left then leftRoom = math.min(leftRoom, left - box[2]) end
+                if box[2] > right then rightRoom = math.min(rightRoom, box[1] - right) end
+            end
+        end
+        local faceLeft = leftRoom > rightRoom
+        if fullWidth <= math.min(leftRoom, rightRoom) then faceLeft = f.mapX > width / 2 end
+        local room = faceLeft and leftRoom or rightRoom
+        local text, textWidth = title, fullWidth
+        if fullWidth > room then
+            -- Remove complete UTF-8 characters. Don't leave tiny fragments that
+            -- are harder to identify than the glyph and its hover tooltip.
+            local ends = {}
+            for pos in title:gmatch("()[^\128-\191][\128-\191]*") do
+                if pos > 1 then ends[#ends + 1] = pos - 1 end
+            end
+            text = ""
+            for j = #ends, 4, -1 do
+                local short = title:sub(1, ends[j]):gsub("%s+$", "") .. "…"
+                label:SetText(short)
+                local measured = label:GetStringWidth()
+                if measured <= room then text, textWidth = short, measured; break end
+            end
+        end
+        if text ~= "" and textWidth > 0 then
+            label:SetText(text)
+            label:ClearAllPoints()
+            label:SetPoint(faceLeft and "RIGHT" or "LEFT", f, faceLeft and "LEFT" or "RIGHT", faceLeft and -4 or 4, 0)
+            label:SetJustifyH(faceLeft and "RIGHT" or "LEFT")
+            occupied[#occupied + 1] = faceLeft and { left - textWidth - 2, left + 2, top, bottom }
+                or { right - 2, right + textWidth + 2, top, bottom }
+        else
+            label:SetText("")
+        end
+    end
+end
+
 function CompanionPins:Redraw()
     if not MapOpen() or not WorldMapDetailFrame or not WorldMapDetailFrame:IsVisible() then return end
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
@@ -755,20 +816,10 @@ function CompanionPins:Redraw()
         f.shadow:SetText(style.glyph)
         local count = math.max(pin.count, #pin.details)
         f.count:SetText(count > 1 and tostring(count) or "")
-        local label = pin.details[1].quest
-        if #label > 22 then
-            local cut = 21
-            while cut > 1 and label:byte(cut) >= 128 and label:byte(cut) < 192 do cut = cut - 1 end
-            label = label:sub(1, cut - 1) .. ".."
-        end
-        local flipLabel = f.mapX > w / 2
-        f.label:ClearAllPoints()
-        f.label:SetPoint(flipLabel and "RIGHT" or "LEFT", f, flipLabel and "LEFT" or "RIGHT", flipLabel and -4 or 4, 0)
-        f.label:SetJustifyH(flipLabel and "RIGHT" or "LEFT")
-        f.label:SetWidth(math.max(1, (flipLabel and f.mapX or w - f.mapX) - PIN_HALF - 4))
-        f.label:SetText(self.showLabels and label or "")
+        f.label:SetText("")
         f.label:SetTextColor(style.ring[1], style.ring[2], style.ring[3])
     end
+    if self.showLabels then PlaceLabels(placed, w) end
     for i = #pins + 1, #self.frames do
         self.frames[i]:Hide()
         self.frames[i]:EnableMouse(false)
@@ -815,7 +866,7 @@ SlashCmdList["WLPINS"] = function(msg)
         CompanionPins.showLabels = not CompanionPins.showLabels
         SaveDB()
         CompanionPins:Redraw()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r persistent labels " ..
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffCompanion Pins|r smart labels " ..
             (CompanionPins.showLabels and "|cff20ff20on|r - hover a marker for detail" or
             "off|r - the tooltip on hover carries the detail") .. ".")
 

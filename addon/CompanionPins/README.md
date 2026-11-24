@@ -5,7 +5,7 @@ World-map quest markers for WoW 3.3.5a and `mod-companion-questsync`. Enable the
 ## Reading the map
 
 - Gold `?`: hand in at this NPC or object. Green `!`: work remains in this area.
-- Nearby markers can share a glyph and counter without combining distinct hand-in locations. Hover for quests, companion names, and progress. Labels are off by default.
+- Nearby markers can share a glyph and counter without combining distinct hand-in locations. Hover for quests, companion names, and progress. Smart labels are off by default. When enabled, one quest title can appear per glyph; labels try either side, shorten to fit, or hide without hiding the pin. Gold `?` labels get space first, then green `!`, then muted `?`.
 - The server uses fixed objective areas instead of switching to the nearest spawns as companions walk.
 
 ## State and recovery
@@ -23,7 +23,7 @@ Only exact zone names or map texture keys match (ignoring ASCII case, spaces and
 | `/cpins only <name>` / `/cpins all` | Filter every contributor on a shared marker, or show everyone |
 | `/cpins show` / `/cpins hide` | Show or hide the overlay and its automatic requests |
 | `/cpins refresh` | Request a fresh snapshot with the map open |
-| `/cpins labels` / `/cpins legend` | Toggle labels or the map key |
+| `/cpins labels` / `/cpins legend` | Toggle smart labels or the map key |
 | `/cpins list` / `/cpins clear` | Inspect or clear the local view |
 | `/cpins test` / `/cpins debug` | Draw a sample marker or toggle diagnostics |
 | `/cpins flip` / `/cpins offset <x> <y>` | Calibrate the overlay |
