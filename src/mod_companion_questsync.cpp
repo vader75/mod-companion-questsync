@@ -455,6 +455,7 @@ namespace
         std::vector<OfferedItem> offeredItems;
     };
     constexpr uint32 TradeReserveCount = 5;
+    constexpr uint32 CompanionBagReserve = 8;
     std::map<uint32, PendingTrade> g_pendingTrade;        // bot guid -> the offer waiting for the window
     uint64 g_nextTradeNoticeId = 0;
     struct DeliveryReceipt
@@ -3623,6 +3624,12 @@ namespace
                 ItemPosCountVec dest;
                 if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) != EQUIP_ERR_OK)
                     continue;
+                uint32 newSlots = 0;
+                for (auto const& slot : dest)
+                    if (!bot->GetItemByPos(slot.pos))
+                        ++newSlots;
+                if (newSlots > 0 && bot->GetFreeInventorySpace() < CompanionBagReserve + newSlots)
+                    continue;
                 if (Item* bought = bot->StoreNewItem(dest, item, true))
                 {
                     bot->SendNewItem(bought, give, true, false, true);
@@ -4645,9 +4652,9 @@ namespace
 #if defined(CQ_HAS_COMPANION_LOOT_POLICY) && defined(MOD_PLAYERBOTS)
     bool ReserveCompanionLootSlot(Player* bot, uint32 entry)
     {
-        constexpr uint32 ReservedSlots = 8;
+
         if (!g_cfg.enable || !g_cfg.sellJunk || !bot->GetSession() || !bot->GetSession()->IsBot() ||
-            bot->GetFreeInventorySpace() > ReservedSlots)
+            bot->GetFreeInventorySpace() > CompanionBagReserve)
             return false;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);

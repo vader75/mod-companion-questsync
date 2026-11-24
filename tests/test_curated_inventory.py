@@ -7,6 +7,13 @@ POLICY = (Path(__file__).resolve().parents[1] / 'src/CuratedDelivery.inc').read_
 
 
 class ManagedInventory(unittest.TestCase):
+    def test_automatic_vendor_restock_preserves_free_slots(self):
+        restock = SOURCE.split('void RestockNearVendor(', 1)[1].split('/// The highest', 1)[0]
+        self.assertIn('newSlots > 0', restock)
+        self.assertLess(restock.index('CanStoreNewItem'), restock.index('newSlots > 0'))
+        self.assertLess(restock.index('CompanionBagReserve + newSlots'), restock.index('StoreNewItem(dest'))
+        self.assertIn('!bot->GetItemByPos(slot.pos)', restock)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
@@ -16,7 +23,7 @@ class ManagedInventory(unittest.TestCase):
                       '!source->GetCreatureTemplate()->SkinLootId', '!qitem && !conditem && !item->rollWinnerGUID'):
             self.assertIn(guard, patch)
         reserve = SOURCE.split('bool ReserveCompanionLootSlot(', 1)[1].split('\n#endif', 1)[0]
-        for guard in ('ReservedSlots = 8', 'GetFreeInventorySpace() > ReservedSlots',
+        for guard in ('GetFreeInventorySpace() > CompanionBagReserve',
                       'proto->SubClass != ITEM_SUBCLASS_JUNK', '!= ITEM_USAGE_VENDOR',
                       'CanReleaseTemplate(bot, owner, proto)', '"always loot list"',
                       'IsControlledCompanion(bot, owner)', 'HasCurrentCustody('):
