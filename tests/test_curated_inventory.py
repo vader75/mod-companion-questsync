@@ -81,6 +81,18 @@ class ManagedInventory(unittest.TestCase):
         # It runs at claim and on the periodic pass, not only on a level-up hook.
         self.assertGreaterEqual(SOURCE.count('EnsureLevelProgress('), 3)
 
+    def test_a_ready_hand_in_is_pinned_even_when_the_giver_is_far(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1]
+        self.assertIn('if (giver || handInStates || (ready && versioned))', pins)
+        self.assertLess(pins.index('if (giver || handInStates || (ready && versioned))'),
+                        pins.index("char const style = giver ? 'h' : ready ? 'u' : 'p';"))
+
+    def test_the_lead_me_whisper_says_where_to_go(self):
+        block = SOURCE.split('if (!giver && g_cfg.handInMode == 2', 1)[1].split('continue;', 1)[0]
+        self.assertIn('ZoneName(spot.zone)', block)
+        self.assertIn('MapCoords(spot.x, spot.y, spot.zone)', block)
+        self.assertIn('" (" + coords + ")"', block)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')

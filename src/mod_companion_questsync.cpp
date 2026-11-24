@@ -4572,8 +4572,16 @@ namespace
                 if (TakeHandInTravelHint(owner, questId, nowTs))
                 {
                     LogHandInWait(owner, bot, quest, spot, dist, "out-of-range");
-                    SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' at " +
-                               spot.name + " myself. Lead me up to the giver and I will do the rest.", 90,
+                    // Name the place and give map coordinates: the pin may be on another
+                    // zone's map than the one the player is looking at.
+                    std::string where = "at " + spot.name;
+                    if (spot.zone)
+                        where += " in " + ZoneName(spot.zone);
+                    std::string const coords = spot.zone ? MapCoords(spot.x, spot.y, spot.zone) : std::string();
+                    if (!coords.empty())
+                        where += " (" + coords + ")";
+                    SayToOwner(bot, owner, "I can hand in '" + quest->GetTitle() + "' " + where +
+                               " myself. Lead me up to the giver and I will do the rest.", 90,
                                quest->GetQuestId(), true);
                 }
                 continue;
@@ -6195,7 +6203,12 @@ namespace
                 bool const ready = status == QUEST_STATUS_COMPLETE && DescribeMissingItemsUncached(bot, quest).empty();
                 WorldObject* giver = ready ? FindReadyQuestEnder(bot, quest) : nullptr;
                 std::vector<std::tuple<std::string, char, std::string>> spots;
-                if (giver || handInStates)
+                // A ready hand-in is pinned wherever its giver stands: requiring a live
+                // interaction left a far hand-in with NO pin at all - ready suppresses the
+                // objective pins, and no giver meant no ender pin. The 'u' style is only
+                // sent to a client that has negotiated the pin protocol, so a far hand-in
+                // stays invisible to an addon that cannot read the newer styles.
+                if (giver || handInStates || (ready && versioned))
                 {
                     std::optional<EnderPin> pin;
                     if (giver)

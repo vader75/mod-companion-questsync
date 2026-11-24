@@ -127,7 +127,9 @@ class HandInContract(unittest.TestCase):
 
     def test_new_styles_and_fractional_positions_require_explicit_support(self):
         pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
-        self.assertIn('if (giver || handInStates)', pins)
+        self.assertIn('if (giver || handInStates || (ready && versioned))', pins)
+        # A far ready hand-in is pinned, but only for a client that can read the 'u' style.
+        self.assertLess(pins.index('(ready && versioned)'), pins.index("ready ? 'u' : 'p'"))
         self.assertIn('handInStates ? fmt::format("{:.4f}, {:.4f}"', pins)
         self.assertIn('if (versioned || MultiCompanionSpeech(bot))', pins)
         self.assertIn('existing.style != style', pins)
