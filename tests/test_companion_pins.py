@@ -147,7 +147,8 @@ class CompanionPinsContract(unittest.TestCase):
         lines = '\n'.join(g.tooltip[i] for i in range(1, len(g.tooltip) + 1))
         self.assertIn('Mirdan — ready to hand in', lines)
         self.assertIn('Ilyrin — work left  1/3', lines)
-        self.assertIn('Gordan — hand-in not available yet', lines)
+        self.assertIn('Gordan — objectives complete', lines)
+        self.assertEqual(lines.count('If not already there, bring them up to this hand-in spot.'), 1)
         g.SlashCmdList.WLPINS('only Gordan')
         self.assertEqual((pin.pin.style.key, pin.glyph.value, len(pin.pin.details)), ('unavailable', '?', 1))
         self.assertEqual(pin.pin.details[1].companion, 'Gordan')
@@ -163,7 +164,20 @@ class CompanionPinsContract(unittest.TestCase):
         self.assertEqual(pin.pin.style.key, 'unavailable')
         self.assertFalse(tip.IsOwned(tip, pin))
         pin.script_OnEnter(pin)
-        self.assertIn('hand-in not available yet', tip.lines[3])
+        self.assertIn('objectives complete', tip.lines[3])
+
+    def test_completed_bandanas_show_one_shared_hand_in_hint(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send('CSYNC|Pin set 1 1/1:56,47,u=Red Leather Bandanas@Mirdan + '
+                  'Red Leather Bandanas@Drodan + Red Leather Bandanas@Ilyrin,z=The Barrens')
+        pin, tip = g.CompanionPinsPin1, g.GameTooltip
+        pin.script_OnEnter(pin)
+        lines = [tip.lines[i].strip() for i in range(1, len(tip.lines) + 1)]
+        self.assertEqual(lines[2:], [
+            'Mirdan — objectives complete', 'Drodan — objectives complete',
+            'Ilyrin — objectives complete', 'If not already there, bring them up to this hand-in spot.',
+        ])
 
     def test_repaint_does_not_dismiss_another_frames_tooltip(self):
         self.stub_map()

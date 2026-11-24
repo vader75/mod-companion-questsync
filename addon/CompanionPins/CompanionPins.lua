@@ -25,7 +25,7 @@ local STYLE = {
                ring = { 1.00, 0.80, 0.15 } },
     pending = { key = "pending", label = "work left", glyph = "?", priority = 2,
                 ring = { 0.72, 0.74, 0.77 } },
-    unavailable = { key = "unavailable", label = "hand-in not available yet", glyph = "?", priority = 2,
+    unavailable = { key = "unavailable", label = "objectives complete", glyph = "?", priority = 2,
                     ring = { 0.72, 0.74, 0.77 } },
     gather = { key = "gather", label = "to gather", glyph = "!", priority = 1,
                ring = { 0.35, 0.95, 0.35 } },
@@ -294,6 +294,7 @@ local function NewPin(index)
         if pin then
             GameTooltip:AddLine(pin.zone or "Companion quests", 1, 0.92, 0.6)
             local titles, order = {}, {}
+            local showHandInHint = false
             for _, row in ipairs(pin.details) do
                 local title = row.style.glyph .. " " .. row.quest
                 if not titles[title] then
@@ -302,6 +303,7 @@ local function NewPin(index)
                 end
                 local detail = row.companion or "Companion"
                 if row.style.glyph == "?" then detail = detail .. " — " .. row.style.label end
+                if row.style == STYLE.unavailable then showHandInHint = true end
                 if row.owed then detail = detail .. "  " .. row.owed:gsub(";", "  ·  ") end
                 titles[title][#titles[title] + 1] = { text = detail, items = row.items }
             end
@@ -313,6 +315,10 @@ local function NewPin(index)
                         GameTooltip:AddLine("    " .. item, 0.85, 0.85, 0.85, true)
                     end
                 end
+            end
+            -- The server doesn't send the specific reason; don't imply range is the only gate.
+            if showHandInHint then
+                GameTooltip:AddLine("If not already there, bring them up to this hand-in spot.", 0.85, 0.85, 0.85, true)
             end
         end
         GameTooltip:Show()
@@ -330,7 +336,7 @@ end
 local LEGEND = {
     { style = STYLE.gather, text = "work left" },
     { style = STYLE.handin, text = "ready to hand in" },
-    { style = STYLE.pending, text = "not ready to hand in" },
+    { style = STYLE.pending, text = "see hand-in details" },
 }
 
 local legend, status, overlayAnchor

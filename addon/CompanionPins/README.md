@@ -5,6 +5,7 @@ World-map quest markers for WoW 3.3.5a and `mod-companion-questsync`. Enable the
 ## Reading the map
 
 - Gold `?`: hand in at this NPC or object. Green `!`: work remains in this area.
+- Muted `?`: hover to see which companions still have work left and which have completed their objectives but cannot hand in yet. For completed companions, the tooltip suggests bringing them to the hand-in spot if they aren't already there.
 - Nearby markers can share a glyph and counter without combining distinct hand-in locations. Hover for quests, companion names, and progress. Smart labels are off by default. When enabled, one quest title can appear per glyph; labels try either side, shorten to fit, or hide without hiding the pin. Gold `?` labels get space first, then green `!`, then muted `?`.
 - The server uses fixed objective areas instead of switching to the nearest spawns as companions walk.
 
