@@ -123,11 +123,10 @@ family. A passive bot therefore *accepts* an `attack` order (the chat shortcut r
 never attacks - `attack my target` is not on the allowed list. Passive is an idle stance,
 never "fight, but carefully". See `docs/companion-strategy-map.md`.
 
-**If the build cannot do it, the card says so.** The lever is playerbots' passive strategy,
-and this core's headers are mangled in places, so the module *probes* for the strategy the
-first time it is needed. A build without it gets a warning in the log and
-`|cffffd200no passive strategy in this build|r` in chat when you set a policy — rather than
-a button that quietly does nothing.
+**If the build cannot do it, the card says so.** The lever is playerbots' `passive` strategy;
+the module checks that the strategy actually took the first time a policy is applied and
+reports `|cffffd200no passive strategy in this build|r` if it did not, rather than drawing a
+control that quietly does nothing.
 
 ## Setting it up
 

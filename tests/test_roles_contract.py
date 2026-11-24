@@ -241,6 +241,7 @@ class EngagementContract(unittest.TestCase):
         self.assertIn("g_passiveStrategy", body)
         cmd = slice_from("    static bool HandleEngageCommand", 5200)
         self.assertIn("this build cannot hold companions out of fights", cmd)
+        self.assertIn("no passive strategy in this build", SOURCE)
 
     def test_passive_is_an_idle_stance_never_a_fight_carefully_stance(self):
         # PassiveMultiplier zeroes "attack my target", so holding a bot passive while telling
