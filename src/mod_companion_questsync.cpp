@@ -554,6 +554,15 @@ namespace
     std::map<uint32, std::string> g_formation;                     // owner guid -> formation preset
     std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategies this class lacks
     std::map<uint32, std::string> g_engageNotes;  // bot guid -> why engagement control is unavailable
+    struct AppliedEdit
+    {
+        std::string name;
+        int state;
+        bool added;
+    };
+
+    std::map<uint32, std::vector<AppliedEdit>> g_roleApplied;   // what this module changed, per bot
+    std::set<uint32> g_passiveHeld;               // bots we have put into the passive stance
     std::atomic<int> g_engageColumn{0};           // 0 unknown, 1 present, -1 missing
     std::atomic<int> g_passiveStrategy{0};        // 0 unprobed, 1 usable, -1 not in this build
     std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
@@ -875,6 +884,10 @@ namespace
         // or a fresh companion silently skips its spell, talent and profession catch-up.
         g_roleNotes.erase(botGuid);
         g_engageNotes.erase(botGuid);
+        // no Player* here: a purged bot is leaving the world, and playerbots rebuilds an AI -
+        // and with it the strategy set - when the bot is next summoned
+        g_roleApplied.erase(botGuid);
+        g_passiveHeld.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
@@ -1147,6 +1160,8 @@ namespace
         return {};   // auto: the module keeps its hands off this companion entirely
     }
 
+    void RevertRoleStrategies(Player* bot);
+
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
     /// can say "no tank strategy for this class" rather than showing a control that lies.
     ///
@@ -1158,13 +1173,22 @@ namespace
         if (!bot || !bot->IsInWorld())
             return missed;
 
-        std::string const role = CompanionRole(bot->GetGUID().GetCounter());
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string const role = CompanionRole(botGuid);
         if (role == "auto")
+        {
+            // "auto" means "as playerbots had it", so hand back exactly what we took: leaving
+            // -tank and +passive in place is what made a companion stop fighting when its
+            // setting was put back to auto
+            RevertRoleStrategies(bot);
             return missed;
+        }
 
         PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
         if (!ai)
             return missed;
+
+        std::vector<AppliedEdit> applied;
 
         for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot))
         {
@@ -1184,9 +1208,32 @@ namespace
                     missed += ",";
                 missed += edit.add ? edit.name : std::string("-") + edit.name;
             }
+            else
+            {
+                applied.push_back({ edit.name, int(edit.state), edit.add });
+            }
         }
 
+        g_roleApplied[botGuid] = applied;
         return missed;
+    }
+
+    /// Undo the role edits this module made, and only those.
+    void RevertRoleStrategies(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        auto const mine = g_roleApplied.find(bot->GetGUID().GetCounter());
+        if (mine == g_roleApplied.end())
+            return;
+
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (ai)
+            for (AppliedEdit const& edit : mine->second)
+                ai->ChangeStrategy(std::string(edit.added ? "-" : "+") + edit.name, BotState(edit.state));
+
+        g_roleApplied.erase(mine);
     }
 
     // --------------------------------------------------------------- engagement
@@ -1289,6 +1336,23 @@ namespace
         return state > 0;
     }
 
+    /// Take the bot out of the passive stance if, and only if, we are the ones who put it there.
+    void ReleasePassive(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        if (!g_passiveHeld.erase(botGuid))
+            return;                     // not ours to undo
+
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+        {
+            ai->ChangeStrategy("-passive", BOT_STATE_COMBAT);
+            ai->ChangeStrategy("-passive", BOT_STATE_NON_COMBAT);
+        }
+    }
+
     /// Hold a companion to its engagement policy. Runs on the fast tick; every branch is a
     /// no-op for "auto", which is what keeps the setting honest.
     void ApplyEngagement(Player* owner, Player* bot)
@@ -1296,9 +1360,15 @@ namespace
         if (!owner || !bot || !EngageColumnPresent())
             return;
 
-        std::string const policy = CompanionEngage(bot->GetGUID().GetCounter());
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string const policy = CompanionEngage(botGuid);
         if (policy == "auto")
+        {
+            // putting the setting back to auto must not leave the bot in the stance we put it
+            // in: a stuck passive is a companion that ignores every order to fight
+            ReleasePassive(bot);
             return;
+        }
 
         if (!PassiveStrategyUsable(bot))
         {
@@ -1336,6 +1406,11 @@ namespace
             ai->ChangeStrategy(wantPassive ? "+passive" : "-passive", BOT_STATE_COMBAT);
             ai->ChangeStrategy(wantPassive ? "+passive" : "-passive", BOT_STATE_NON_COMBAT);
         }
+
+        if (wantPassive)
+            g_passiveHeld.insert(botGuid);
+        else
+            g_passiveHeld.erase(botGuid);
 
         // "mine" is the only policy where the module names the target: the bot stays passive
         // and is pointed at exactly what the owner is fighting.

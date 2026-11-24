@@ -60,12 +60,17 @@ Engagement, on top of the role:
 
 ## Levers that exist and we are not using
 
-- **`offheal`** - a real strategy in this build. A hybrid *could* be given off-heals with
-  `+offheal`; we deliberately do not (see companion-roles.md: `healer` is the lever), but the
-  door is open and this note corrects an earlier claim that the class simply could not.
+- **`offheal`** - a real strategy, but only for two classes in this build:
+  `OffhealRetPaladinStrategy` (paladin) and the druid cat off-heal. So "give it off-heals" is
+  a lever for ret paladins and feral druids, not a general one - a shadow priest still has no
+  off-heal strategy to enable. We deliberately do not enable it: `healer` is the lever
+  (companion-roles.md).
 - **`threat`** - threat reduction, which would make a `dps` role quieter than dropping taunts
   alone achieves.
 - **`guard`**, **`kite`**, **`flee`**, **`nc`** / **`co`** - defensive and stance verbs the
   module leaves to playerbots.
+- **`focus`** (threat focus) and **`dps assist`** / **`tank assist`** - the assist strategies
+  behind ordinary combat; `attack my target` works by setting `prioritized targets`, which is
+  why it does not need re-sending every tick (see companion-behaviour-review.md).
 - **`formation`** - playerbots has its own formation strategy; the module's presets drive
   `MoveFollow` directly instead, so the two cannot fight over the same bot.

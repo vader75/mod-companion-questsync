@@ -212,27 +212,27 @@ class EngagementContract(unittest.TestCase):
         self.assertIn('kEngagePolicies[] = { "auto", "mine", "joined", "never" }', SOURCE)
 
     def test_policy_is_held_with_the_passive_strategy(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('"+passive"', body)
         self.assertIn('"-passive"', body)
 
     def test_mine_points_the_bot_at_the_owners_target(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('policy == "mine"', body)
         self.assertIn("bot->GetVictim() != ownerTarget", body)
         self.assertIn('ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner)', body)
 
     def test_joined_lifts_passive_only_while_the_owner_fights(self):
         # joined and mine now share one stance rule: passive only while the owner is idle
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('(!ownerFighting && policy != "auto")', body)
 
     def test_never_stays_passive(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('policy == "never"', body)
 
     def test_auto_touches_nothing(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertLess(body.index('if (policy == "auto")'), body.index("ChangeStrategy"))
 
     def test_an_unavailable_strategy_is_probed_once_and_reported(self):
@@ -246,12 +246,12 @@ class EngagementContract(unittest.TestCase):
     def test_passive_is_an_idle_stance_never_a_fight_carefully_stance(self):
         # PassiveMultiplier zeroes "attack my target", so holding a bot passive while telling
         # it to attack is a silent no-op - the bug that left a warrior standing still
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn('bool const wantPassive = policy == "never" || (!ownerFighting && policy != "auto");',
                       body)
 
     def test_mine_fights_only_while_the_owner_is_fighting(self):
-        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)", 4600)
         self.assertIn("ownerFighting", body)
         attack = body.index('HandleCommand(CHAT_MSG_WHISPER, "attack", owner)')
         strategy = body.index('"+passive"')
