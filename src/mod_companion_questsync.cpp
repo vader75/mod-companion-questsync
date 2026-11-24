@@ -537,6 +537,7 @@ namespace
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_gearLevel;         // bot guid -> level the kit was built for
+    std::unordered_map<uint32, uint32> g_taughtLevel;       // bot guid -> level its spells/professions were synced for
     std::unordered_map<uint32, uint32> g_equipAt;           // bot guid -> unix time
     std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
     std::map<std::pair<uint32, uint32>, uint32> g_nudgeAt;     // (bot, quest) -> unix time
@@ -3228,6 +3229,30 @@ namespace
         return tookUp;
     }
 
+    /// Bring a companion's spells, talents and professions up to the level it carries.
+    ///
+    /// GiveLevel fires OnPlayerLevelChanged, and that hook syncs all three - but a body can
+    /// be levelled outside that path: the pool raises it before it is owned, a character is
+    /// restored or hand-granted, or the custody row lands after the level change. Then a
+    /// level-14 companion stands there with a level-1 spellbook and unspent talent points.
+    /// This is the idempotent catch-up - once per level, at claim and on the periodic pass.
+    void EnsureLevelProgress(Player* owner, Player* bot)
+    {
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || !bot->GetSession())
+            return;
+        uint8 const level = bot->GetLevel();
+        if (level < 5)
+            return;                       // nothing a trainer sells below five
+
+        uint32& taught = g_taughtLevel[bot->GetGUID().GetCounter()];
+        if (taught == level)
+            return;
+        taught = level;
+
+        TeachTrainerContent(bot, owner);  // weapon skills, class spells, talent points
+        TeachProfessions(bot, owner);     // both professions at the tier cap, tools, recipes
+    }
+
     /// Gathered materials eligible for surplus trade. Crafting checks its actual
     /// spell reagents separately; this is not a list of what can be bought.
     static std::vector<uint32> GatheredReagentsOf(uint16 skill)
@@ -5908,6 +5933,9 @@ namespace
             // A kit that never caught up with the level is corrected here, so companions
             // claimed before this existed heal themselves instead of staying in starters.
             RefreshLevelGear(owner, bot);
+            // Spells, talents and both professions once per level, so a body hired
+            // high or levelled outside the normal path still arrives complete.
+            EnsureLevelProgress(owner, bot);
             SellManagedJunk(owner, bot);
             if (g_cfg.tidyInventory && bot->GetFreeInventorySpace() < g_cfg.keepFreeSlots)
             {
@@ -7238,6 +7266,10 @@ namespace
                         // A starter body arrives dressed for level 1; give it the kit its
                         // level has earned before the owner ever sees it standing there.
                         RefreshLevelGear(master, fresh);
+                        // A body hired at a high level must arrive knowing what that level
+                        // knows: class spells and talents a trainer would have sold, and both
+                        // of its professions at the ceiling for its level, tools included.
+                        EnsureLevelProgress(master, fresh);
 
                         LOG_INFO("server.loading", "[CompanionQuestSync] {} dressed at spawn: {}",
                                  pending.name, DescribeGear(fresh));

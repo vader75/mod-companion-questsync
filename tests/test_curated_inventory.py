@@ -69,6 +69,18 @@ class ManagedInventory(unittest.TestCase):
         self.assertLess(trim.index('MailboxNearby(bot)'), trim.index('MailHome(owner, bot, mailbox, attachments)'))
         self.assertIn('attachments.size() > 3', trim)   # one letter's worth at a time
 
+    def test_a_companion_hired_high_is_taught_its_level(self):
+        catch_up = SOURCE.split('void EnsureLevelProgress(', 1)[1].split('/// ', 1)[0]
+        # Nothing a trainer sells before five, and the sync is idempotent per level.
+        self.assertIn('level < 5', catch_up)
+        self.assertIn('g_taughtLevel[bot->GetGUID().GetCounter()]', catch_up)
+        self.assertIn('taught == level', catch_up)
+        # Spells and talents come from the trainer sync; professions from the pair sync.
+        self.assertIn('TeachTrainerContent(bot, owner)', catch_up)
+        self.assertIn('TeachProfessions(bot, owner)', catch_up)
+        # It runs at claim and on the periodic pass, not only on a level-up hook.
+        self.assertGreaterEqual(SOURCE.count('EnsureLevelProgress('), 3)
+
     def test_corpse_loot_reserve_preserves_stacks_skinning_and_protected_items(self):
         patch = (Path(__file__).resolve().parents[1] /
                  'patches/azerothcore-companion-loot-reserve.patch').read_text(encoding='utf-8')
