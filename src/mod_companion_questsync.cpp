@@ -6379,6 +6379,18 @@ namespace
         return true;
     }
 
+    /// How many roster slots the owner already holds. A released companion keeps its
+    /// binding until its retirement is finalized, so it still counts here; naming that
+    /// is the difference between "the pool is broken" and "finish the release".
+    uint32 CompanionSlotCount(uint32 ownerGuid)
+    {
+        if (QueryResult row = CharacterDatabase.Query(
+                "SELECT COUNT(*) FROM cq_bindings WHERE owner_guid = {}", ownerGuid))
+            return row->Fetch()[0].Get<uint32>();
+
+        return 0;
+    }
+
     /// How many free bodies the pool has per race and class: `race-class=count`, `|`
     /// separated. The picker greys out what the pool cannot serve, which is the difference
     /// between a dropdown that works and one that fails after the player has chosen.
@@ -6551,6 +6563,12 @@ namespace
             error = "the name " + name + " is already taken";
             return false;
         }
+        if (CompanionSlotCount(ownerGuid) >= kMaxCompanions)
+        {
+            error = fmt::format("all {} companion slots are in use - release a companion and finalize "
+                                "its retirement to free one", uint32(kMaxCompanions));
+            return false;
+        }
         std::string const accounts = AddClassAccountCsv();
         uint32 const candidate = PickPoolBody(race, clazz);
         if (accounts.empty() || !candidate)
@@ -6580,7 +6598,7 @@ namespace
 
         if (!HasCurrentCustody(ownerGuid, candidate, true) || CompanionNameFor(candidate) != name)
         {
-            error = "the claim was not confirmed (stock changed, name taken, or all ownership slots are reserved)";
+            error = "the claim was not confirmed (that body went out of stock or the name was taken); try again";
             return false;
         }
         botGuid = candidate;

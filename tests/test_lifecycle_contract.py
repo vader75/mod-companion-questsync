@@ -21,6 +21,13 @@ class Lifecycle(unittest.TestCase):
         self.assertNotIn('DropBindingRow', roster)
         self.assertIn('CurrentCustodyClause', roster)
 
+    def test_full_slot_roster_is_reported_as_its_own_cause(self):
+        create = section('bool CreateCompanion(', 'bool OwnerHasQuestCompanionLacks(')
+        self.assertIn('CompanionSlotCount(', create)
+        self.assertIn('companion slots are in use', create)
+        # The post-commit message must not blame the slot cap it no longer owns.
+        self.assertNotIn('all ownership slots are reserved', create)
+
     def test_create_is_atomic_and_never_resets_an_unclaimed_body(self):
         create = section('bool CreateCompanion(', 'bool OwnerHasQuestCompanionLacks(')
         self.assertIn('DirectCommitTransaction', create)
