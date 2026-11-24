@@ -22,6 +22,7 @@ def slice_from(anchor, length=2600):
 
 class PresetContract(unittest.TestCase):
     def test_presets_are_the_documented_distances(self):
+        self.assertIn("constexpr float FormationCloseSpacing  = 2.0f;", SOURCE)
         self.assertIn("constexpr float FormationTightSpacing  = 4.0f;", SOURCE)
         self.assertIn("constexpr float FormationLooseSpacing  = 12.0f;", SOURCE)
         self.assertIn("constexpr float FormationSpreadSpacing = 20.0f;", SOURCE)
@@ -45,7 +46,7 @@ class SpacingContract(unittest.TestCase):
 
     def test_distance_is_the_only_thing_managed_and_it_is_the_preset(self):
         body = slice_from("    void ApplyFormation(Player* owner)")
-        self.assertIn("MoveFollow(owner, spacing, angle)", body)
+        self.assertIn("MoveFollow(owner, wanted, angle)", body)
         self.assertNotIn("MovePoint(", body)
 
     def test_combat_hands_movement_back_to_the_bot(self):
@@ -62,7 +63,7 @@ class SpacingContract(unittest.TestCase):
 
     def test_it_does_not_restart_the_generator_on_every_tick(self):
         body = slice_from("    void ApplyFormation(Player* owner)")
-        self.assertIn("std::fabs(bot->GetDistance(owner) - spacing) <= 2.5f", body)
+        self.assertIn("std::fabs(bot->GetDistance(owner) - wanted) <= 2.5f", body)
 
     def test_ring_index_is_stable_across_resummons(self):
         body = slice_from("    void ApplyFormation(Player* owner)")
@@ -73,13 +74,31 @@ class SpacingContract(unittest.TestCase):
         self.assertIn("ApplyFormation(player);", tick)
 
 
+class TradeWindowContract(unittest.TestCase):
+    """The vendor case: standing at arm's length is the only thing that makes a hand-over sane."""
+
+    def test_an_open_trade_window_pulls_the_companion_closer(self):
+        body = slice_from("    void ApplyFormation(Player* owner)")
+        self.assertIn("bot->GetTradeData()", body)
+        self.assertIn("std::min(spacing, FormationCloseSpacing)", body)
+
+    def test_the_override_is_temporary_by_construction(self):
+        # nothing latches it: the next tick recomputes from the preset as soon as the window shuts
+        body = slice_from("    void ApplyFormation(Player* owner)")
+        self.assertNotIn("g_formation[", body)
+
+    def test_documentation_names_the_override(self):
+        self.assertIn("An open trade window overrides the preset", DOC)
+
+
 class CommandContract(unittest.TestCase):
     def test_command_is_registered_for_players(self):
         self.assertIn('{ "formation", HandleFormationCommand, SEC_PLAYER, Console::No },', SOURCE)
 
     def test_command_rejects_a_typo_instead_of_silently_ignoring_it(self):
         body = slice_from("    static bool HandleFormationCommand")
-        self.assertIn("is not one of off, tight, loose, spread", body)
+        self.assertIn("is not one of close, tight, loose", body)
+        self.assertIn("spread, off", body)
 
     def test_command_applies_immediately_and_tells_the_addon(self):
         body = slice_from("    static bool HandleFormationCommand")
@@ -97,7 +116,7 @@ class CommandContract(unittest.TestCase):
 
 class AddonContract(unittest.TestCase):
     def test_header_offers_the_four_presets(self):
-        for preset in ('"tight"', '"loose"', '"spread"', '"off"'):
+        for preset in ('"close"', '"tight"', '"loose"', '"spread"', '"off"'):
             self.assertIn("name = " + preset, UI)
 
     def test_buttons_send_the_command(self):

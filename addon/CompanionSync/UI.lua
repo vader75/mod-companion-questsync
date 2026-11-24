@@ -1005,6 +1005,7 @@ local function CreateWindow()
     -- sit in the header next to Add companion. Only the distance is ours - combat hands movement
     -- straight back to the bot's own AI, which is why there is no "attack" button here.
     local FORMATIONS = {
+        { name = "close",  label = "Close",  hint = "2 yd behind you - arm's length, for handing items over" },
         { name = "tight",  label = "Tight",  hint = "4 yd behind you - close enough to see your back" },
         { name = "loose",  label = "Loose",  hint = "12 yd behind you - room to cast" },
         { name = "spread", label = "Spread", hint = "20 yd behind you - out of each other's way" },
@@ -1017,8 +1018,8 @@ local function CreateWindow()
             G.Run(".companionsync formation " .. preset.name)
             if G.RefreshFormation then G.RefreshFormation() end
         end, "Formation: companions hold " .. preset.hint, false)
-        -- left to right: Tight, Loose, Spread, Off, clear of the close button
-        button:SetPoint("TOPRIGHT", -46 - (4 - i) * 50, -32)
+        -- left to right: Close, Tight, Loose, Spread, Off - below Add companion, above the roster
+        button:SetPoint("TOPRIGHT", -46 - (#FORMATIONS - i) * 50, -42)
         frame.formation[preset.name] = button
     end
 

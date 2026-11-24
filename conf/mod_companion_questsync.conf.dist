@@ -263,8 +263,10 @@ CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TrimSurplus = 1
 CompanionQuestSync.LevelGear = 1
 CompanionQuestSync.MapPins = 1
-# How far behind you companions hold when they follow: off, tight (4 yd), loose (12 yd)
-# or spread (20 yd). Combat hands movement straight back to the bot's own AI; the
+# How far behind you companions hold when they follow: off, close (2 yd), tight (4 yd),
+# loose (12 yd) or spread (20 yd). An open trade window pulls a companion to 2 yd
+# whatever the preset is, so an item hand-over is not a walk. Combat hands movement
+# straight back to the bot's own AI; the
 # setting is per player per session and resets to this default at the next login.
 # See docs/companion-formation.md. Default: off
 CompanionQuestSync.Formation = off
@@ -303,8 +305,9 @@ CompanionQuestSync.ExtraBags = 4
 #
 
 #    CompanionQuestSync.Formation
-#        Follow spacing for the player's companions: off, tight (4 yd),
-#        loose (12 yd) or spread (20 yd). Only the distance is managed; combat
+#        Follow spacing for the player's companions: off, close (2 yd), tight (4 yd),
+#        loose (12 yd) or spread (20 yd). While a companion has a trade window open with
+#        you it closes to 2 yd regardless, so item hand-overs are not a walk. Only the distance is managed; combat
 #        returns movement to the bot's own AI. Players change it per session with
 #        .companionsync formation <preset> or the buttons in the addon header.
 #        Default: off

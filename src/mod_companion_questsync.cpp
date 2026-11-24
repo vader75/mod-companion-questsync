@@ -3255,12 +3255,15 @@ namespace
     ///
     /// Only the *spacing* belongs to the module. The angle mirrors playerbots' own follow
     /// formula, and combat hands movement straight back to the bot.
+    constexpr float FormationCloseSpacing  = 2.0f;
     constexpr float FormationTightSpacing  = 4.0f;
     constexpr float FormationLooseSpacing  = 12.0f;
     constexpr float FormationSpreadSpacing = 20.0f;
 
     float FormationSpacing(std::string const& preset)
     {
+        if (preset == "close")
+            return FormationCloseSpacing;
         if (preset == "tight")
             return FormationTightSpacing;
         if (preset == "loose")
@@ -3273,7 +3276,8 @@ namespace
     /// A preset name the module accepts, or an empty string for a typo.
     std::string FormationPreset(std::string const& name)
     {
-        if (name == "off" || name == "tight" || name == "loose" || name == "spread")
+        if (name == "off" || name == "close" || name == "tight" || name == "loose" ||
+            name == "spread")
             return name;
         return std::string();
     }
@@ -7943,7 +7947,7 @@ namespace
         if (!owner || !owner->IsInWorld() || !owner->IsAlive())
             return;
 
-        float const spacing = FormationSpacing(FormationFor(owner));
+        float spacing = FormationSpacing(FormationFor(owner));
         if (spacing <= 0.0f)
             return;
 
@@ -7976,12 +7980,17 @@ namespace
             float const angle = start + (0.125f + 1.75f * float(i + 1) / total +
                                          (live.size() == 2 ? 0.125f : 0.0f)) * float(M_PI);
 
+            // An open trade window overrides the preset: a companion you are handing items
+            // to should be at arm's length, not wherever the formation happens to put it.
+            float const wanted = bot->GetTradeData() ? std::min(spacing, FormationCloseSpacing)
+                                                     : spacing;
+
             // Distance hysteresis alone: re-issuing while a companion already sits on its mark
             // restarts the generator every tick and makes it jitter instead of walk.
-            if (std::fabs(bot->GetDistance(owner) - spacing) <= 2.5f)
+            if (std::fabs(bot->GetDistance(owner) - wanted) <= 2.5f)
                 continue;
 
-            bot->GetMotionMaster()->MoveFollow(owner, spacing, angle);
+            bot->GetMotionMaster()->MoveFollow(owner, wanted, angle);
         }
     }
 
@@ -8662,7 +8671,7 @@ public:
         if (a.empty())
         {
             handler->PSendSysMessage("|cffff8000formation|r: {} ({:.0f} yd behind you). "
-                                     "Use off | tight | loose | spread.",
+                                     "Use close | tight | loose | spread | off.",
                                      current, FormationSpacing(current));
             return true;
         }
@@ -8670,7 +8679,8 @@ public:
         std::string const wanted = FormationPreset(FormationLower(a[0]));
         if (wanted.empty())
         {
-            handler->PSendSysMessage("|cffff8000formation|r: '{}' is not one of off, tight, loose, spread.", a[0]);
+            handler->PSendSysMessage("|cffff8000formation|r: '{}' is not one of close, tight, loose, "
+                                     "spread, off.", a[0]);
             return true;
         }
 

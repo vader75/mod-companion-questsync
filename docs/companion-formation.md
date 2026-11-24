@@ -5,6 +5,7 @@ from the addon header or with a slash command:
 
 | Preset | Spacing | What it is for |
 |---|---|---|
+| `close` | 2 yd | arm's length — hand an item over, or stand in a doorway together |
 | `tight` | 4 yd | melee company — close enough to see your back |
 | `loose` | 12 yd | default caster spacing, the same distance playerbots uses |
 | `spread` | 20 yd | several companions, out of each other's way |
@@ -12,8 +13,14 @@ from the addon header or with a slash command:
 
 ```
 .companionsync formation            # what is it now
-.companionsync formation loose      # off | tight | loose | spread
+.companionsync formation loose      # close | tight | loose | spread | off
 ```
+
+**An open trade window overrides the preset**: the companion you are trading with closes
+to 2 yd whatever the ring says, and drifts back out when the window shuts. That is the
+only case where the module answers to something other than your setting — and it is the
+case where a formation would otherwise make you walk to your own companion to hand it
+something.
 
 `.companionsync formation` is per **player**, not per companion: the spacing is measured
 behind *you*, so it makes no sense to set it for one body. It starts at
@@ -42,6 +49,7 @@ the ring rather than shuffling everyone.
 - **No attack/stay/guard buttons.** Those are playerbots verbs; combat already belongs to
   the AI, and a `stay` that strands a companion is a support problem, not a formation one.
 - **No per-companion spacing.** It is one ring; two presets at once would mean two owners.
+  The trade-window override is the single exception, and it is temporary by nature.
 - **`WowLegends.BotPitchIn.Radius` is untouched.** That knob is how far *any* bot ranging
   the zone will join a fight near you — it governs quest-mob assist, not follow spacing,
   and it is realm-wide (it affects random bots too). Changing it belongs in
