@@ -127,6 +127,7 @@ All module keys below use the `CompanionQuestSync.` prefix. The [config template
 | `RequireGrouped` | `0` | Set to `1` to limit quest sync to grouped companions, not general upkeep. |
 | `HandInMode` / `HandInDelaySeconds` | `1` / `20` | `0` disables module hand-ins; `1` uses native interaction; `2` also gives a travel reminder. `HandInNearDistance` controls the reminder threshold, not native interaction range. |
 | `MapPins` / `PinSync` | `1` / `1` | `MapPins` pushes the markers, `PinSync` governs the protocol; both must be on. Install CompanionPins on the client to see them. |
+| `Formation` | `off` | Follow spacing behind the player: `off`, `tight` (4 yd), `loose` (12 yd), `spread` (20 yd). Per player per session; combat always hands movement back to the bot. See [docs/companion-formation.md](docs/companion-formation.md). |
 | `AllowCreate` / `PoolAccountType` | `1` / `2` | Player-side claims need reviewed stock on eligible AddClass accounts. Disabling player creation is not a substitute for guarding all allocators. |
 | `AutoProduce` / `AutoTrade` / `MailHome` | `1` / `1` / `1` | Background crafting, guarded town trades, and curated mail are separate switches. `AutoTrade=0` leaves manual offers available on a patched build. |
 

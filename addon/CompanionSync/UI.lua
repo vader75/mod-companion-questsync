@@ -1001,6 +1001,37 @@ local function CreateWindow()
     -- before -44 leaves the two controls their own space
     add:SetPoint("TOPRIGHT", -46, -14)
 
+    -- Formation presets: spacing is a property of the owner, not of one card, so the controls
+    -- sit in the header next to Add companion. Only the distance is ours - combat hands movement
+    -- straight back to the bot's own AI, which is why there is no "attack" button here.
+    local FORMATIONS = {
+        { name = "tight",  label = "Tight",  hint = "4 yd behind you - close enough to see your back" },
+        { name = "loose",  label = "Loose",  hint = "12 yd behind you - room to cast" },
+        { name = "spread", label = "Spread", hint = "20 yd behind you - out of each other's way" },
+        { name = "off",    label = "Off",    hint = "leave the bot's own follow alone" },
+    }
+    frame.formation = {}
+    for i, preset in ipairs(FORMATIONS) do
+        local button = Button(frame, preset.label, 46, function()
+            G.Formation = preset.name
+            G.Run(".companionsync formation " .. preset.name)
+            if G.RefreshFormation then G.RefreshFormation() end
+        end, "Formation: companions hold " .. preset.hint, false)
+        -- left to right: Tight, Loose, Spread, Off, clear of the close button
+        button:SetPoint("TOPRIGHT", -46 - (4 - i) * 50, -32)
+        frame.formation[preset.name] = button
+    end
+
+    G.RefreshFormation = function()
+        local active = G.Formation or "off"
+        for name, button in pairs(frame.formation) do
+            local text = button:GetFontString()
+            if name == active then text:SetTextColor(1.0, 0.82, 0.30)
+            else text:SetTextColor(0.62, 0.62, 0.66) end
+        end
+    end
+    G.RefreshFormation()
+
     frame.elapsed = 0
     frame:SetScript("OnUpdate", function(self, delta)
         self.elapsed = self.elapsed + delta

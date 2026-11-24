@@ -606,6 +606,13 @@ listener:SetScript("OnEvent", function(_, event, message)
         ProtocolActivity()
         return
     end
+    local formation = text:match("^Formation (%a+)$")
+    if formation then
+        G.Formation = formation
+        ProtocolActivity()
+        if G.RefreshFormation then G.RefreshFormation() end
+        return
+    end
     local h, pool = text:match("^Sync capabilities 1 (%d+) ([01])$")
     h = UInt(h, UINT32_MAX)
     if h and h > 0 then

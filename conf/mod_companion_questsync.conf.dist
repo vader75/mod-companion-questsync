@@ -263,6 +263,11 @@ CompanionQuestSync.SellJunk = 1
 CompanionQuestSync.TrimSurplus = 1
 CompanionQuestSync.LevelGear = 1
 CompanionQuestSync.MapPins = 1
+# How far behind you companions hold when they follow: off, tight (4 yd), loose (12 yd)
+# or spread (20 yd). Combat hands movement straight back to the bot's own AI; the
+# setting is per player per session and resets to this default at the next login.
+# See docs/companion-formation.md. Default: off
+CompanionQuestSync.Formation = off
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
@@ -297,6 +302,13 @@ CompanionQuestSync.ExtraBags = 4
 #        patch and companion-starter-bags.sql installed (see docs/companion-custody.md).
 #
 
+#    CompanionQuestSync.Formation
+#        Follow spacing for the player's companions: off, tight (4 yd),
+#        loose (12 yd) or spread (20 yd). Only the distance is managed; combat
+#        returns movement to the bot's own AI. Players change it per session with
+#        .companionsync formation <preset> or the buttons in the addon header.
+#        Default: off
+#
 #    CompanionQuestSync.MapPins
 #        Enable companion map pins (requires CompanionPins and PinSync) and nearby
 #        movement assistance. Native quest-giver icons show the player's own quests.

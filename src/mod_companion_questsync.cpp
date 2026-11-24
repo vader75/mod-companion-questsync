@@ -37,6 +37,7 @@
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
+#include <cmath>
 #include <fstream>
 
 // defined in DBCStores.cpp, id-indexed by the AreaTable's own first column
@@ -52,6 +53,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "Log.h"
 #include "Mail.h"
 #include "LootMgr.h"
+#include "MotionMaster.h"
 #include "Map.h"
 #include "MapMgr.h"
 #include "Cell.h"
@@ -137,6 +139,7 @@ namespace
         bool trimSurplus       = true;      // spare trade goods, at a vendor, only when bags are tight
         bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
+        std::string formation  = "off";     // off | tight | loose | spread (docs/companion-formation.md)
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
@@ -548,6 +551,7 @@ namespace
     std::map<std::pair<uint32, uint32>, uint32> g_addedCount;       // (bot, quest) -> log size at add
     std::map<std::pair<uint32, uint32>, uint32> g_vanishLogged;      // (bot, quest) -> unix time
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
+    std::map<uint32, std::string> g_formation;                     // owner guid -> formation preset
 
     bool AnyPlayerInWorld()
     {
@@ -675,6 +679,7 @@ namespace
         g_cfg.levelGear           = sConfigMgr->GetOption<bool>("CompanionQuestSync.LevelGear", true);
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
+        g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "off");
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -1841,6 +1846,13 @@ namespace
         std::string text = DescribeMissingItemsUncached(bot, quest);
         g_missingCache[key] = text;
         return text;
+    }
+
+    std::string FormationLower(std::string name)
+    {
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        return name;
     }
 
     std::string ZoneName(uint32 zoneId, char const* fallback = "an unknown zone")
@@ -3237,6 +3249,46 @@ namespace
                        " - I will gather what I pass from now on.", 30);
 
         return tookUp;
+    }
+
+    /// Formation presets: the distance each companion keeps behind its owner.
+    ///
+    /// Only the *spacing* belongs to the module. The angle mirrors playerbots' own follow
+    /// formula, and combat hands movement straight back to the bot.
+    constexpr float FormationTightSpacing  = 4.0f;
+    constexpr float FormationLooseSpacing  = 12.0f;
+    constexpr float FormationSpreadSpacing = 20.0f;
+
+    float FormationSpacing(std::string const& preset)
+    {
+        if (preset == "tight")
+            return FormationTightSpacing;
+        if (preset == "loose")
+            return FormationLooseSpacing;
+        if (preset == "spread")
+            return FormationSpreadSpacing;
+        return 0.0f;                        // "off", or a name we do not know: leave the AI alone
+    }
+
+    /// A preset name the module accepts, or an empty string for a typo.
+    std::string FormationPreset(std::string const& name)
+    {
+        if (name == "off" || name == "tight" || name == "loose" || name == "spread")
+            return name;
+        return std::string();
+    }
+
+    /// The owner's current preset, seeded from the config the first time it is asked for.
+    std::string FormationFor(Player* owner)
+    {
+        uint32 const guid = owner->GetGUID().GetCounter();
+        auto it = g_formation.find(guid);
+        if (it == g_formation.end())
+        {
+            std::string const configured = FormationPreset(FormationLower(g_cfg.formation));
+            it = g_formation.emplace(guid, configured.empty() ? std::string("off") : configured).first;
+        }
+        return it->second;
     }
 
     /// Bring a companion's spells, talents and professions up to the level it carries.
@@ -6427,6 +6479,7 @@ namespace
         SendProtocolLine(owner, "Hello " + std::to_string(g_cfg.intervalSeconds));
         SendProtocolLine(owner, fmt::format("Sync capabilities 1 {} {}",
             kAddonHeartbeatSeconds, g_cfg.allowCreate ? 1 : 0));
+        SendProtocolLine(owner, "Formation " + FormationFor(owner));
 #ifdef AC_TRADE_OFFER_COMMIT
         SendProtocolLine(owner, "Delivery receipts 1");
 #endif
@@ -7880,6 +7933,58 @@ namespace
                      report.rows, report.danglingOwner, report.danglingBot, report.duplicate, report.doubleBound);
     }
 
+    /// Keep the owner's summoned companions at the preset spacing.
+    ///
+    /// Re-issues only when a companion is meaningfully off its mark, or is not following at
+    /// all: restarting the motion generator every tick fights the AI's own pathing and makes
+    /// companions jitter instead of walk. Combat is the AI's business - we simply stop asking.
+    void ApplyFormation(Player* owner)
+    {
+        if (!owner || !owner->IsInWorld() || !owner->IsAlive())
+            return;
+
+        float const spacing = FormationSpacing(FormationFor(owner));
+        if (spacing <= 0.0f)
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return;
+
+        std::sort(bots.begin(), bots.end());      // stable index: a resummon must not shuffle the ring
+
+        std::vector<Player*> live;
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (bot && bot->IsInWorld() && IsControlledCompanion(bot, owner))
+                live.push_back(bot);
+        }
+        if (live.empty())
+            return;
+
+        float const start = owner->GetOrientation();
+        float const total = float(live.size());
+        for (size_t i = 0; i < live.size(); ++i)
+        {
+            Player* bot = live[i];
+            if (!bot->IsAlive() || bot->IsInCombat() || bot->GetMapId() != owner->GetMapId() ||
+                bot->IsInFlight() || bot->GetVehicle())
+                continue;
+
+            // playerbots' own follow angle, so the ring reads the way its AI draws it
+            float const angle = start + (0.125f + 1.75f * float(i + 1) / total +
+                                         (live.size() == 2 ? 0.125f : 0.0f)) * float(M_PI);
+
+            // Distance hysteresis alone: re-issuing while a companion already sits on its mark
+            // restarts the generator every tick and makes it jitter instead of walk.
+            if (std::fabs(bot->GetDistance(owner) - spacing) <= 2.5f)
+                continue;
+
+            bot->GetMotionMaster()->MoveFollow(owner, spacing, angle);
+        }
+    }
+
 class CompanionQuestSyncWorldScript : public WorldScript
 {
 public:
@@ -7944,6 +8049,7 @@ public:
 
                 // Transport has its own cadence even when quest auto-sync is disabled.
                 SendHeartbeat(player);
+                ApplyFormation(player);   // spacing only; combat hands movement back
 
                 std::vector<uint32> bots;
                 if (!FindCompanions(player->GetGUID().GetCounter(), bots))
@@ -8539,6 +8645,49 @@ public:
         }
     }
 
+    /// .companionsync formation [off|tight|loose|spread]
+    ///
+    /// Per owner per session: the preset is spacing behind *you*, so it is not a property
+    /// of any one companion, and it resets to the config default at the next login.
+    static bool HandleFormationCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::string const current = FormationFor(player);
+        std::vector<std::string> const a = SplitArgs(args, 1);
+
+        if (a.empty())
+        {
+            handler->PSendSysMessage("|cffff8000formation|r: {} ({:.0f} yd behind you). "
+                                     "Use off | tight | loose | spread.",
+                                     current, FormationSpacing(current));
+            return true;
+        }
+
+        std::string const wanted = FormationPreset(FormationLower(a[0]));
+        if (wanted.empty())
+        {
+            handler->PSendSysMessage("|cffff8000formation|r: '{}' is not one of off, tight, loose, spread.", a[0]);
+            return true;
+        }
+
+        g_formation[player->GetGUID().GetCounter()] = wanted;
+        ApplyFormation(player);              // take effect now, not on the next tick
+
+        if (wanted == "off")
+            handler->PSendSysMessage("Formation off - your companions follow as their own AI sees fit.");
+        else
+            handler->PSendSysMessage("Formation |cff20ff20{}|r - companions hold about {:.0f} yd behind you "
+                                     "and hand movement back to their AI in combat.",
+                                     wanted, FormationSpacing(wanted));
+
+        SendProtocolLine(player, "Formation " + wanted);
+        return true;
+    }
+
     static bool HandleCatchUpCommand(ChatHandler* handler, char const* /*args*/)
     {
         CommandReplyScope replies(handler);
@@ -8600,6 +8749,7 @@ public:
     {
         static ChatCommandTable companionSyncTable =
         {
+            { "formation", HandleFormationCommand, SEC_PLAYER, Console::No },
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },
             { "refresh", HandleRefreshCommand, SEC_PLAYER, Console::No },
             { "quests", HandleQuestsCommand, SEC_PLAYER, Console::No },
@@ -10218,6 +10368,7 @@ public:
         g_lastSkillSync.erase(ownerGuid);
         g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
+        g_formation.erase(ownerGuid);
         g_pinRevisions.erase(ownerGuid);
         g_pinRequestAt.erase(ownerGuid);
         g_requestedSupplies.erase(ownerGuid);
