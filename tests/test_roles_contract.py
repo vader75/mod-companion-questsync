@@ -96,6 +96,21 @@ class StrategyContract(unittest.TestCase):
         self.assertIn("this class has no {} strategy", body)
         self.assertIn('line += ":na";', SOURCE)
 
+    def test_support_does_not_heal_by_itself(self):
+        # support is "stay out of the tank's way", not "off-heal": it must not add a heal
+        # strategy, or hybrids would heal badly and pull threat doing it
+        body = slice_from('if (role == "dps" || role == "support")', 260)
+        self.assertNotIn('"heal"', body)
+        self.assertIn('{ "tank", BOT_STATE_COMBAT, false }', body)
+
+    def test_healer_is_the_lever_that_adds_healing(self):
+        body = slice_from('if (role == "healer")', 220)
+        self.assertIn('{ "heal", BOT_STATE_COMBAT, true }', body)
+
+    def test_the_documentation_names_healer_as_the_off_heal_lever(self):
+        self.assertIn("Support does not heal, on purpose", DOC)
+        self.assertIn("mark it `healer`", DOC)
+
     def test_documentation_reflects_that_it_is_live(self):
         self.assertIn("Each role is translated into strategy edits", DOC)
         self.assertIn("no setter", DOC)

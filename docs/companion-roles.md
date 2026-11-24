@@ -44,6 +44,31 @@ role is set, when the companion arrives, and re-asserted every minute:
 The re-assert matters: playerbots resets a bot's strategies when its spec or level changes,
 so a one-shot apply would quietly lapse and the companion would go back to taunting.
 
+### Support does not heal, on purpose
+
+`support` means "stays out of the tank's way": it removes `tank` and `pull` and adds
+nothing. It never removes the `heal` strategy either, so a **healing spec** keeps healing
+exactly as playerbots would have it - nothing this module does takes that away.
+
+A **hybrid in a damage spec** (shadow priest, enhancement shaman, ret paladin, feral druid)
+will not off-heal as `support`, because playerbots never gave it a `heal` strategy and we do
+not add one. That is deliberate:
+
+- a shadow priest spending globals on heals it never trained for does poor damage and no
+  good healing;
+- heals generate threat, so an off-healing support can pull a mob off you simply by healing
+  you hard - the opposite of keeping out of your way;
+- its heal thresholds are playerbots' own config, not something we could set per companion.
+
+**The lever exists anyway: mark it `healer`.** That is the role that says "heal first", with
+`+heal` and no taunt, no pull. So:
+
+| Situation | Role to use |
+|---|---|
+| Holy priest, resto druid/shaman, holy paladin — let it keep doing what it does | `support` or `healer` (both keep healing; `healer` also blocks taunt/pull explicitly) |
+| Shadow priest / enhancement shaman / ret paladin / feral druid that you want off-healing | `healer` |
+| The same hybrids that should only add damage | `dps` |
+
 ### When a class cannot honour the role
 
 The strategy names are playerbots' own and they are class-specific — a warrior has no
