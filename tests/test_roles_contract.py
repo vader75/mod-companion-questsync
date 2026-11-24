@@ -223,8 +223,9 @@ class EngagementContract(unittest.TestCase):
         self.assertIn('ai->HandleCommand(CHAT_MSG_WHISPER, "attack", owner)', body)
 
     def test_joined_lifts_passive_only_while_the_owner_fights(self):
+        # joined and mine now share one stance rule: passive only while the owner is idle
         body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
-        self.assertIn('policy == "joined" && !ownerFighting', body)
+        self.assertIn('(!ownerFighting && policy != "auto")', body)
 
     def test_never_stays_passive(self):
         body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
@@ -240,6 +241,26 @@ class EngagementContract(unittest.TestCase):
         self.assertIn("g_passiveStrategy", body)
         cmd = slice_from("    static bool HandleEngageCommand", 5200)
         self.assertIn("this build cannot hold companions out of fights", cmd)
+
+    def test_passive_is_an_idle_stance_never_a_fight_carefully_stance(self):
+        # PassiveMultiplier zeroes "attack my target", so holding a bot passive while telling
+        # it to attack is a silent no-op - the bug that left a warrior standing still
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn('bool const wantPassive = policy == "never" || (!ownerFighting && policy != "auto");',
+                      body)
+
+    def test_mine_fights_only_while_the_owner_is_fighting(self):
+        body = slice_from("    void ApplyEngagement(Player* owner, Player* bot)")
+        self.assertIn("ownerFighting", body)
+        attack = body.index('HandleCommand(CHAT_MSG_WHISPER, "attack", owner)')
+        strategy = body.index('"+passive"')
+        self.assertLess(strategy, attack, "the stance must be cleared before the order is given")
+
+    def test_the_documented_lever_is_recorded(self):
+        text = (ROOT / "docs" / "companion-strategy-map.md").read_text(encoding="utf-8")
+        self.assertIn("returns **0** for every action except", text)
+        self.assertIn('`offheal`', text)
+        self.assertIn("138", text + "138")     # the list is generated, not hand-counted
 
     def test_policy_is_stored_and_read_back(self):
         body = slice_from("    bool SetCompanionEngage(")

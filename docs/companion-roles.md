@@ -113,9 +113,15 @@ and it is set per companion too:
 | `joined` | it joins fights you are already in, and starts none |
 | `never` | stays out of combat; nothing here stops it defending itself |
 
-`mine` is implemented by holding the companion in playerbots' passive strategy and pointing
-it at your target when you have one, so the two cannot diverge: if you switch targets, so
-does it; if you stop fighting, so does it.
+`mine` holds the companion passive while *you* are out of combat, and drops passive the
+moment you are fighting, re-pointing it at your target every tick - so if you switch targets,
+so does it; if you stop fighting, so does it.
+
+Why it works that way: `PassiveMultiplier` returns a value of 0 for every action except
+`co`/`nc`/`reset botAI`/`check mount state`/`lfg` and the `follow`/`stay`/`chat shortcut`
+family. A passive bot therefore *accepts* an `attack` order (the chat shortcut runs) and then
+never attacks - `attack my target` is not on the allowed list. Passive is an idle stance,
+never "fight, but carefully". See `docs/companion-strategy-map.md`.
 
 **If the build cannot do it, the card says so.** The lever is playerbots' passive strategy,
 and this core's headers are mangled in places, so the module *probes* for the strategy the

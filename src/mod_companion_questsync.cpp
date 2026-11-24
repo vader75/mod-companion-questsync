@@ -1320,10 +1320,15 @@ namespace
         bool const ownerHitsSomething = ownerTarget && ownerTarget->IsAlive() &&
                                         owner->IsValidAttackTarget(ownerTarget);
 
-        // "never" and "joined" are the same edit and differ only in when it is lifted:
-        // never stays passive, joined becomes active the moment the owner is in combat.
-        bool const wantPassive = policy == "never" || policy == "mine" ||
-                                 (policy == "joined" && !ownerFighting);
+        // Passive is an idle stance, not a combat order: PassiveMultiplier returns a value of
+        // 0 for every action except co/nc/reset/mount/lfg and the follow/stay/chat-shortcut
+        // families, so a passive bot acknowledges "attack my target" and then does nothing.
+        // That is why "mine" used to leave the companion standing there: it was held passive
+        // while being told to attack.
+        //
+        // So passive means "you are not fighting, so neither am I". The moment the owner is in
+        // combat it comes off, and "mine" re-points the bot at the owner's target every tick.
+        bool const wantPassive = policy == "never" || (!ownerFighting && policy != "auto");
 
         bool const passive = ai->HasStrategy("passive", BOT_STATE_COMBAT);
         if (wantPassive != passive)
