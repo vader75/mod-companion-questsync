@@ -111,6 +111,37 @@ class StrategyContract(unittest.TestCase):
         self.assertIn("Support does not heal, on purpose", DOC)
         self.assertIn("mark it `healer`", DOC)
 
+    def test_a_druid_is_taken_out_of_bear_form_for_dps_and_support(self):
+        # playerbots picks bear from the Thick Hide aura, not from intent: dropping "tank"
+        # alone leaves the companion standing in a bear suit, so the form strategy goes too
+        body = slice_from('if (role == "dps" || role == "support")', 700)
+        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, false });', body)
+        self.assertIn('edits.push_back({ "cat", BOT_STATE_COMBAT, true });', body)
+        self.assertIn("if (canCat)", body)
+        whole = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn("bool const canCat = druid && bot->HasSpell(768);", whole)
+
+    def test_a_druid_healer_is_taken_out_of_bear_form(self):
+        body = slice_from('if (role == "healer")', 500)
+        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, false });', body)
+
+    def test_a_druid_tank_is_put_into_bear_form(self):
+        body = slice_from('if (role == "tank")', 320)
+        self.assertIn('edits.push_back({ "bear", BOT_STATE_COMBAT, true });', body)
+        self.assertIn("bot->HasSpell(5487)", body)
+
+    def test_forms_are_only_touched_for_druids(self):
+        body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
+        self.assertIn("bool const druid = bot && bot->getClass() == CLASS_DRUID;", body)
+        # every form edit is behind that flag, so no other class is dragged into a form
+        for line in body.splitlines():
+            if '"bear"' in line or '"cat"' in line:
+                self.assertTrue("edits.push_back" in line or "if (druid" in line, line)
+
+    def test_a_removal_that_did_not_take_is_reported_as_well(self):
+        body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        self.assertIn('edit.add ? edit.name : std::string("-") + edit.name', body)
+
     def test_documentation_reflects_that_it_is_live(self):
         self.assertIn("Each role is translated into strategy edits", DOC)
         self.assertIn("no setter", DOC)

@@ -1104,19 +1104,45 @@ namespace
         bool add;
     };
 
-    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role)
+    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role, Player* bot)
     {
+        // A druid is the one class where the form is decided by a talent aura, not by what the
+        // player wants: playerbots puts any feral druid carrying Thick Hide into bear form for
+        // good, so dropping "tank" leaves it standing in a bear suit, holding threat by
+        // proximity. The form strategy itself has to go.
+        bool const druid = bot && bot->getClass() == CLASS_DRUID;
+        bool const canCat = druid && bot->HasSpell(768);        // Cat Form
+
         if (role == "tank")
-            return { { "tank", BOT_STATE_COMBAT, true } };
+        {
+            std::vector<RoleStrategyEdit> edits = { { "tank", BOT_STATE_COMBAT, true } };
+            if (druid && bot->HasSpell(5487))                    // Bear Form
+                edits.push_back({ "bear", BOT_STATE_COMBAT, true });
+            return edits;
+        }
 
         if (role == "healer")
-            return { { "heal", BOT_STATE_COMBAT, true },
-                     { "tank", BOT_STATE_COMBAT, false },
-                     { "pull", BOT_STATE_NON_COMBAT, false } };
+        {
+            std::vector<RoleStrategyEdit> edits = { { "heal", BOT_STATE_COMBAT, true },
+                                                    { "tank", BOT_STATE_COMBAT, false },
+                                                    { "pull", BOT_STATE_NON_COMBAT, false } };
+            if (druid)
+                edits.push_back({ "bear", BOT_STATE_COMBAT, false });
+            return edits;
+        }
 
         if (role == "dps" || role == "support")
-            return { { "tank", BOT_STATE_COMBAT, false },
-                     { "pull", BOT_STATE_NON_COMBAT, false } };
+        {
+            std::vector<RoleStrategyEdit> edits = { { "tank", BOT_STATE_COMBAT, false },
+                                                    { "pull", BOT_STATE_NON_COMBAT, false } };
+            if (druid)
+            {
+                edits.push_back({ "bear", BOT_STATE_COMBAT, false });
+                if (canCat)
+                    edits.push_back({ "cat", BOT_STATE_COMBAT, true });
+            }
+            return edits;
+        }
 
         return {};   // auto: the module keeps its hands off this companion entirely
     }
@@ -1140,7 +1166,7 @@ namespace
         if (!ai)
             return missed;
 
-        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role))
+        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot))
         {
             bool const present = ai->HasStrategy(edit.name, edit.state);
             if (edit.add == present)
@@ -1148,13 +1174,15 @@ namespace
 
             ai->ChangeStrategy(std::string(edit.add ? "+" : "-") + edit.name, edit.state);
 
-            // a "+tank" that leaves the strategy absent means this class has no such
-            // strategy - worth saying out loud, because the player asked for it
+            // verify the edit landed, in both directions: a "+tank" that leaves the strategy
+            // absent means this class has no such strategy, and a "-bear" that leaves the
+            // strategy present means the companion is still in that form - the second is the
+            // bug a druid reports as "it is still a bear"
             if (ai->HasStrategy(edit.name, edit.state) != edit.add)
             {
                 if (!missed.empty())
                     missed += ",";
-                missed += edit.name;
+                missed += edit.add ? edit.name : std::string("-") + edit.name;
             }
         }
 

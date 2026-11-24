@@ -82,6 +82,11 @@ A failure to establish part of a role is reported, never swallowed.
 
 Known gaps, so nobody expects them:
 
+- **Druids shift form by talent aura, not by intent.** playerbots puts any feral druid
+  carrying Thick Hide into bear form for good, so `dps` and `support` also drop the `bear`
+  strategy and add `cat` (Cat Form known); `healer` drops it too, and `tank` adds it. If a
+  build refuses either edit, the card says so - the companion is still in the form it was in,
+  and that is worth seeing rather than guessing.
 - **Pet taunt** (Growl) is not covered by dropping the `tank` strategy.
 - **Threat** from a DPS companion still accumulates; a role can stop taunts and pulls, not
   the threat a fight generates.
