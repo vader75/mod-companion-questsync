@@ -1,9 +1,9 @@
 ## Interface: 30300
 ## Title: Companion Pins
-## Notes: Draws map pins for the companion's quests, read from the module's CSYNC payloads.
+## Notes: Companion quest map pins: gold ? ready to hand in, muted ? not ready (requires server support), green ! work left. Hover for each companion's state.
 ## Notes-de-DE: Zeichnet Kartenmarkierungen fuer die Quest-Abgabe des Begleiters.
 ## Author: Hermes (for WOW Legends)
-## Version: 1.1.0
+## Version: 1.2.0
 ## SavedVariables: CompanionPinsDB
 ## X-Category: Map
 

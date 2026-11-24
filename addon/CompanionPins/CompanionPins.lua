@@ -21,15 +21,21 @@ CompanionPins.hidden = false
 
 -- shape: "round" (hand-in) or "square" (work to do)
 local STYLE = {
-    handin = { key = "handin", label = "hand in",  glyph = "?", shape = "round",
+    handin = { key = "handin", label = "ready to hand in", glyph = "?", priority = 3,
                ring = { 1.00, 0.80, 0.15 } },
-    gather = { key = "gather", label = "to gather", glyph = "!", shape = "square",
+    pending = { key = "pending", label = "work left", glyph = "?", priority = 2,
+                ring = { 0.72, 0.74, 0.77 } },
+    unavailable = { key = "unavailable", label = "hand-in not available yet", glyph = "?", priority = 2,
+                    ring = { 0.72, 0.74, 0.77 } },
+    gather = { key = "gather", label = "to gather", glyph = "!", priority = 1,
                ring = { 0.35, 0.95, 0.35 } },
     finish = { key = "finish", label = "to finish", glyph = "!", shape = "square",
                ring = { 0.35, 0.95, 0.35 } },
     other  = { key = "other",  label = "quest",     glyph = "?", shape = "square",
                ring = { 0.40, 0.70, 1.00 } },
 }
+
+local WIRE_STYLE = { h = STYLE.handin, p = STYLE.pending, u = STYLE.unavailable, g = STYLE.gather }
 
 -- Canonical character names are UTF-8. Match the final @Name, not a locale's %w.
 local function SplitCompanion(name)
@@ -95,7 +101,7 @@ end
 local lastPayload, lastSnapshotAt, samplePin
 local pending, appliedRevision, legacy
 local supported, lastRequestAt, manualAt, unavailable
-local pinEpoch, tagged
+local pinEpoch, tagged, handInAdvertised, handInRequested
 local attempts = 0
 local STALE_AFTER, RETRY_AFTER, ASSEMBLY_TIMEOUT, MAX_ATTEMPTS = 120, 15, 10, 3
 
@@ -138,10 +144,10 @@ local function SyncPins(payload)
     lastPayload = payload
     local fresh, companions = {}, {}
     for entry in string.gmatch(payload, "[^|]+") do
-        local x, y, style, name, zone = entry:match("^(%d+),(%d+),([hg])=(.+),z=(.-)%s*$")
+        local x, y, style, name, zone = entry:match("^(%d+%.?%d*),(%d+%.?%d*),([hpug])=(.+),z=(.-)%s*$")
         if x and tonumber(x) <= 100 and tonumber(y) <= 100 and zone ~= "" then
             local pin = { x = tonumber(x), y = tonumber(y), zone = zone,
-                style = style == "h" and STYLE.handin or STYLE.gather, details = {} }
+                style = WIRE_STYLE[style], details = {} }
             -- Server joins titles with the literal separator ' + '. Keep the quest,
             -- companion and progress together instead of flattening independent lists.
             for raw in (name .. " + "):gmatch("(.-) %+ ") do
@@ -149,7 +155,7 @@ local function SyncPins(payload)
                 local owed = segment:match(":([%d/;]+)$")
                 local quest, companion = SplitCompanion(owed and segment:gsub(":[%d/;]+$", "") or segment)
                 if quest and quest ~= "" then
-                    pin.details[#pin.details + 1] = { quest = quest, companion = companion, owed = owed }
+                    pin.details[#pin.details + 1] = { quest = quest, companion = companion, owed = owed, style = pin.style }
                     if companion then companions[companion] = true end
                 end
             end
@@ -180,16 +186,26 @@ local function RequestPins(force, opening)
         if force then Notice("Please wait a few seconds before refreshing again.") end
         return
     end
+    local upgrade = pinEpoch and handInAdvertised and not handInRequested
     if not force then
         if not supported or unavailable or CompanionPins.hidden or attempts >= MAX_ATTEMPTS then return end
         if pending and now - pending.at < ASSEMBLY_TIMEOUT then return end
-        if not pending and (not pinEpoch or tagged) and Fresh(now) and (appliedRevision or lastRequestAt) then return end
+        if not upgrade and not pending and (not pinEpoch or tagged) and Fresh(now)
+            and (appliedRevision or lastRequestAt) then return end
     else
         attempts, manualAt = 0, now
         Notice(supported and "Requesting map pins…" or "Checking whether this server supports map pins…")
     end
     attempts, lastRequestAt = attempts + 1, now
-    SendChatMessage(pinEpoch and ".companionsync pins v2 epoch" or ".companionsync pins v2", "SAY")
+    local command = ".companionsync pins v2"
+    if pinEpoch then
+        command = command .. " epoch"
+        if handInAdvertised then
+            handInRequested = true
+            command = command .. " handin"
+        end
+    end
+    SendChatMessage(command, "SAY")
 end
 
 CompanionPins_Request = RequestPins
@@ -204,6 +220,10 @@ CompanionPins_Request = RequestPins
 -- needs no art assets, and it cannot degenerate into a black square the way a
 -- plate-and-ring badge does at map scale. Colour says whose business it is, the glyph
 -- says what to do, the label says which quest - and nothing is boxed.
+local function HidePinTooltip(self)
+    if GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+end
+
 local function NewPin(index)
     local f = CreateFrame("Button", ADDON .. "Pin" .. index, WorldMapDetailFrame)
     f:SetSize(2 * PIN_HALF, 2 * PIN_HALF)
@@ -245,12 +265,13 @@ local function NewPin(index)
             GameTooltip:AddLine(pin.zone or "Companion quests", 1, 0.92, 0.6)
             local titles, order = {}, {}
             for _, row in ipairs(pin.details) do
-                local title = (row.style == STYLE.handin and "? " or "! ") .. row.quest
+                local title = row.style.glyph .. " " .. row.quest
                 if not titles[title] then
                     titles[title] = {}
                     order[#order + 1] = title
                 end
                 local detail = row.companion or "Companion"
+                if row.style.glyph == "?" then detail = detail .. " — " .. row.style.label end
                 if row.owed then detail = detail .. "  " .. row.owed:gsub(";", "  ·  ") end
                 titles[title][#titles[title] + 1] = detail
             end
@@ -263,9 +284,6 @@ local function NewPin(index)
         end
         GameTooltip:Show()
     end)
-    local function HidePinTooltip(self)
-        if GameTooltip:IsOwned(self) then GameTooltip:Hide() end
-    end
     f:SetScript("OnLeave", HidePinTooltip)
     f:SetScript("OnHide", HidePinTooltip)
     CompanionPins.frames[index] = f
@@ -279,6 +297,7 @@ end
 local LEGEND = {
     { style = STYLE.gather, text = "work left" },
     { style = STYLE.handin, text = "ready to hand in" },
+    { style = STYLE.pending, text = "not ready to hand in" },
 }
 
 local legend, status, overlayAnchor
@@ -287,7 +306,7 @@ local function BuildLegend()
     if legend then return legend end
 
     local f = CreateFrame("Frame", ADDON .. "Legend", WorldMapFrame)
-    f:SetSize(118, 16 + #LEGEND * 15)
+    f:SetSize(132, 16 + #LEGEND * 15)
     f:SetFrameLevel(WorldMapFrame:GetFrameLevel() + 12)
     f:EnableMouse(false)
 
@@ -458,6 +477,10 @@ CompanionPins:SetScript("OnEvent", function(self, event, message)
         return
     end
 
+    if text == "Pin set handin 1" then
+        handInAdvertised = true
+        return
+    end
     local session = text:match("^Pin set session (%d+)$")
     if session then
         if AcceptEpoch(session) then self:Redraw() end
@@ -567,8 +590,7 @@ function CompanionPins:VisiblePins(mapName, width, height, fileName)
             local details = {}
             for _, row in ipairs(pin.details) do
                 if not self.only or (row.companion and FoldASCII(row.companion) == FoldASCII(self.only)) then
-                    details[#details + 1] = { quest = row.quest, companion = row.companion,
-                        owed = row.owed, style = pin.style }
+                    details[#details + 1] = row
                 end
             end
             if #details > 0 then
@@ -578,21 +600,28 @@ function CompanionPins:VisiblePins(mapName, width, height, fileName)
         end
     end
     table.sort(candidates, function(a, b)
-        if a.style ~= b.style then return a.style == STYLE.handin end
+        if a.style.priority ~= b.style.priority then return a.style.priority > b.style.priority end
         if a.zone ~= b.zone then return a.zone < b.zone end
         if a.x ~= b.x then return a.x < b.x end
         if a.y ~= b.y then return a.y < b.y end
+        if a.style.key ~= b.style.key then return a.style.key < b.style.key end
         return a.details[1].quest < b.details[1].quest
     end)
     local clusters = {}
     for _, pin in ipairs(candidates) do
-        local cluster
+        local cluster, nearest = nil, 18 * 18
         for _, entry in ipairs(clusters) do
-            local dx, dy = (entry.x - pin.x) * width / 100, (entry.y - pin.y) * height / 100
-            local bothHandIns = pin.style == STYLE.handin and entry.style == STYLE.handin
-            if entry.zone == pin.zone and dx * dx + dy * dy <= 18 * 18 and (not bothHandIns or (dx == 0 and dy == 0)) then
-                cluster = entry
-                break
+            if entry.zone == pin.zone then
+                local dx, dy = (entry.x - pin.x) * width / 100, (entry.y - pin.y) * height / 100
+                if dx == 0 and dy == 0 then
+                    cluster = entry
+                    break
+                end
+                local distance = dx * dx + dy * dy
+                if pin.style == STYLE.gather and (entry.style == STYLE.gather or entry.style == STYLE.handin)
+                    and (distance < nearest or (not cluster and distance == nearest)) then
+                    cluster, nearest = entry, distance
+                end
             end
         end
         if cluster then
@@ -614,6 +643,50 @@ function CompanionPins:VisiblePins(mapName, width, height, fileName)
     return clusters
 end
 
+-- Keep map coordinates intact. Nudge only the rendered button when a hand-in
+-- would share a hit box, preferring a vertical step so labels can stay readable.
+local function PlacePin(pin, x, y, w, h, placed)
+    local step = 2 * PIN_HALF
+    local function fits(px, py)
+        for _, prior in ipairs(placed) do
+            if (pin.style.glyph == "?" or prior.pin.style.glyph == "?")
+                and math.abs(prior.mapX - px) < step and math.abs(prior.mapY - py) < step then
+                return false
+            end
+        end
+        return true
+    end
+    local function bounded(px, py)
+        return math.max(PIN_HALF, math.min(w - PIN_HALF, px)), math.max(PIN_HALF, math.min(h - PIN_HALF, py))
+    end
+    x, y = bounded(x, y)
+    if fits(x, y) then return x, y end
+    for ring = 1, math.ceil(math.max(w, h) / step) do
+        local bestX, bestY, bestDistance
+        local function try(dx, dy)
+            local px, py = bounded(x + dx * step, y + dy * step)
+            local distance = (px - x)^2 + (py - y)^2
+            if (not bestDistance or distance < bestDistance) and fits(px, py) then
+                bestX, bestY, bestDistance = px, py, distance
+            end
+        end
+        try(0, ring)
+        try(0, -ring)
+        for offset = 1, ring do
+            try(offset, ring)
+            try(-offset, ring)
+            try(offset, -ring)
+            try(-offset, -ring)
+        end
+        for offset = 1 - ring, ring - 1 do
+            try(ring, offset)
+            try(-ring, offset)
+        end
+        if bestDistance then return bestX, bestY end
+    end
+    return x, y -- a canvas saturated by buttons has no free full-sized slot
+end
+
 function CompanionPins:Redraw()
     if not MapOpen() or not WorldMapDetailFrame or not WorldMapDetailFrame:IsVisible() then return end
     local w, h = WorldMapDetailFrame:GetWidth(), WorldMapDetailFrame:GetHeight()
@@ -627,13 +700,16 @@ function CompanionPins:Redraw()
             pins = self:VisiblePins(mapName, w, h, fileName)
         end
     end
+    local placed = {}
     for i, pin in ipairs(pins) do
         local f = self.frames[i] or NewPin(i)
+        -- This button can be reused for new state or a different location.
+        HidePinTooltip(f)
         f.pin = pin
         local px = (pin.x + self.offsetX) / 100 * w
         local py = (pin.y + self.offsetY) / 100
-        f.mapX = math.max(PIN_HALF, math.min(w - PIN_HALF, px))
-        f.mapY = math.max(PIN_HALF, math.min(h - PIN_HALF, (FLIP_Y and (1 - py) or py) * h))
+        f.mapX, f.mapY = PlacePin(pin, px, (FLIP_Y and (1 - py) or py) * h, w, h, placed)
+        placed[i] = f
         f:ClearAllPoints()
         f:SetPoint("CENTER", WorldMapDetailFrame, "TOPLEFT", f.mapX, -f.mapY)
         local style = pin.style

@@ -77,6 +77,109 @@ class CompanionPinsContract(unittest.TestCase):
         self.send('CSYNC|Pin set 10000000000000001:1 1/1:48,52,h=New,z=Westfall')
         self.assertEqual(self.frame.pins[1].quest, 'New')
 
+    def test_pending_hand_in_is_requested_only_after_capability_advertisement(self):
+        self.lua.execute('WorldMapFrame.IsShown = function() return true end')
+        self.send('CSYNC|Hello 30')
+        requests = self.lua.globals().requests
+        self.assertEqual(requests[1], '.companionsync pins v2')
+        self.send('CSYNC|Pin set handin 1')
+        self.send('CSYNC|Pin set session 1000')
+        self.send('CSYNC|Pin set 1 1/1:')
+        self.lua.globals().now = 115
+        self.frame.script_OnUpdate(self.frame, 1)
+        self.assertEqual(requests[2], '.companionsync pins v2 epoch handin')
+
+    def test_same_ender_retains_each_companions_state_and_recomputes_filtered_style(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.lua.execute('''
+            tooltip = {}
+            GameTooltip.AddLine = function(_, text) tooltip[#tooltip + 1] = text end
+        ''')
+        self.send('CSYNC|Pin set 1 1/1:45.1250,51.1250,h=Stew@Mirdan,z=The Barrens|'
+                  '45.1250,51.1250,p=Stew@Ilyrin:1/3,z=The Barrens|'
+                  '45.1250,51.1250,u=Stew@Gordan,z=The Barrens')
+        pin = g.CompanionPinsPin1
+        self.assertEqual(self.frame.drawnPins, 1)
+        self.assertEqual((pin.pin.style.key, pin.glyph.value), ('handin', '?'))
+        pin.script_OnEnter(pin)
+        lines = '\n'.join(g.tooltip[i] for i in range(1, len(g.tooltip) + 1))
+        self.assertIn('Mirdan — ready to hand in', lines)
+        self.assertIn('Ilyrin — work left  1/3', lines)
+        self.assertIn('Gordan — hand-in not available yet', lines)
+        g.SlashCmdList.WLPINS('only Gordan')
+        self.assertEqual((pin.pin.style.key, pin.glyph.value, len(pin.pin.details)), ('unavailable', '?', 1))
+        self.assertEqual(pin.pin.details[1].companion, 'Gordan')
+
+    def test_repaint_dismisses_a_stale_hand_in_tooltip(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send('CSYNC|Pin set 1 1/1:45,51,h=Stew@Mirdan,z=The Barrens')
+        pin, tip = g.CompanionPinsPin1, g.GameTooltip
+        pin.script_OnEnter(pin)
+        self.assertIn('ready to hand in', tip.lines[3])
+        self.send('CSYNC|Pin set 2 1/1:45,51,u=Stew@Mirdan,z=The Barrens')
+        self.assertEqual(pin.pin.style.key, 'unavailable')
+        self.assertFalse(tip.IsOwned(tip, pin))
+        pin.script_OnEnter(pin)
+        self.assertIn('hand-in not available yet', tip.lines[3])
+
+    def test_repaint_does_not_dismiss_another_frames_tooltip(self):
+        self.stub_map()
+        g = self.lua.globals()
+        self.send('CSYNC|Pin set 1 1/1:45,51,h=Stew@Mirdan,z=The Barrens')
+        tip = g.GameTooltip
+        tip.SetOwner(tip, g.WorldMapFrame)
+        tip.AddLine(tip, 'Another tooltip')
+        tip.Show(tip)
+        self.send('CSYNC|Pin set 2 1/1:45,51,u=Stew@Mirdan,z=The Barrens')
+        self.send('CSYNC|Pin set 3 1/1:')
+        self.assertTrue(tip.shown and tip.IsOwned(tip, g.WorldMapFrame))
+        self.assertEqual(tip.lines[1], 'Another tooltip')
+
+    def test_close_but_distinct_hand_in_locations_do_not_cluster(self):
+        self.send('CSYNC|Pin set 1 1/1:45,51,h=Stew@Mirdan,z=Westfall|'
+                  '45.25,51,p=Stew@Ilyrin,z=Westfall|46,51,u=Stew@Gordan,z=Westfall|'
+                  '45.25,51,g=Stew@Ilyrin:1/3,z=Westfall')
+        visible = self.frame.VisiblePins(self.frame, 'Westfall', 900, 700)
+        self.assertEqual([(visible[i].x, visible[i].style.key) for i in range(1, len(visible) + 1)],
+                         [(45, 'handin'), (45.25, 'pending'), (46, 'unavailable')])
+        self.assertEqual(len(self.frame.VisiblePins(self.frame, 'Elwynn', 900, 700)), 0)
+        self.send('CSYNC|Pin set 2 1/1:')
+        self.assertEqual(len(self.frame.VisiblePins(self.frame, 'Westfall', 900, 700)), 0)
+
+    def test_distinct_clamped_hand_ins_have_disjoint_mouse_hit_boxes(self):
+        for zoomed in (False, True):
+            with self.subTest(zoomed=zoomed):
+                self.stub_map(zoomed=zoomed)
+                g = self.lua.globals()
+                self.send(f'CSYNC|Pin set {1 + zoomed} 1/1:0.25,51,h=Stew@Mirdan,z=The Barrens|'
+                          '0.5,51,p=Stew@Ilyrin,z=The Barrens')
+                rects = []
+                for index, (x, companion) in enumerate(((0.25, 'Mirdan'), (0.5, 'Ilyrin')), 1):
+                    marker = g[f'CompanionPinsPin{index}']
+                    self.assertEqual((marker.pin.x, marker.pin.details[1].companion), (x, companion))
+                    self.assertTrue(marker.shown and marker.mouse)
+                    scale = g.WorldMapDetailFrame.GetEffectiveScale()
+                    cx, cy = marker.point[4], -marker.point[5]
+                    half_width, half_height = marker.width / 2, marker.height / 2
+                    left, right, top, bottom = ((cx - half_width + marker.insets[1]) * scale,
+                                                (cx + half_width - marker.insets[2]) * scale,
+                                                (cy - half_height + marker.insets[3]) * scale,
+                                                (cy + half_height - marker.insets[4]) * scale)
+                    self.assertLess(left, right)
+                    self.assertLess(top, bottom)
+                    rects.append((left, right, top, bottom))
+                a, b = rects
+                self.assertTrue(a[1] <= b[0] or b[1] <= a[0] or a[3] <= b[2] or b[3] <= a[2], rects)
+
+    def test_muted_hand_in_does_not_swallow_nearby_green_work(self):
+        self.send('CSYNC|Pin set 1 1/1:45.5,51,p=Stew@Mirdan,z=Westfall|'
+                  '45,51,g=Stew@Mirdan:1/3,z=Westfall')
+        visible = self.frame.VisiblePins(self.frame, 'Westfall', 900, 700)
+        self.assertEqual([(visible[i].x, visible[i].style.glyph) for i in range(1, len(visible) + 1)],
+                         [(45.5, '?'), (45, '!')])
+
     def test_sample_pin_does_not_acknowledge_manual_refresh_or_mutate_snapshot(self):
         self.stub_map()
         g = self.lua.globals()
@@ -204,6 +307,11 @@ class CompanionPinsContract(unittest.TestCase):
             WorldMapFrame.IsShown = function() return true end
             WorldMapFrame.HookScript = function() end
             WorldMapFrame.GetFrameLevel = function() return 1 end
+            GameTooltip.SetOwner = function(self, owner) self.owner, self.lines = owner, {} end
+            GameTooltip.IsOwned = function(self, owner) return self.owner == owner end
+            GameTooltip.AddLine = function(self, line) self.lines[#self.lines + 1] = line end
+            GameTooltip.Show = function(self) self.shown = true end
+            GameTooltip.Hide = function(self) self.shown, self.owner = false, nil end
             local function rect(frame, left, right, bottom, top, scale)
                 frame.GetLeft = function() return left end
                 frame.GetRight = function() return right end
@@ -227,10 +335,15 @@ class CompanionPinsContract(unittest.TestCase):
             function CreateFrame(...)
                 local frame = create(...)
                 frame.Show = function(self) self.shown = true end
-                frame.Hide = function(self) self.shown = false end
+                frame.Hide = function(self)
+                    local wasShown = self.shown
+                    self.shown = false
+                    if wasShown and self.script_OnHide then self:script_OnHide() end
+                end
                 frame.SetAlpha = function(self, alpha) self.alpha = alpha end
                 frame.EnableMouse = function(self, enabled) self.mouse = enabled end
                 frame.SetPoint = function(self, ...) self.point = {...} end
+                frame.SetSize = function(self, w, h) self.width, self.height = w, h end
                 frame.SetHitRectInsets = function(self, ...) self.insets = {...} end
                 local font = frame.CreateFontString
                 frame.CreateFontString = function(self, ...)

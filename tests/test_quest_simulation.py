@@ -30,7 +30,8 @@ class QuestSimulation(unittest.TestCase):
         pins = section('std::string BuildPinLine(', 'void SendPinSync(')
         self.assertNotIn('spot.map == bot->GetMapId()', pins)
         self.assertNotIn('owner->IsQuestRewarded(questId)', pins)
-        self.assertIn('spot.map', pins)
+        plot = section('std::optional<EnderPin> PlotEnder(EnderSpot const& spot)\n', '/// content-keyed')
+        self.assertIn('WmaConvert(gx, gy, int32(zone), spot.map)', plot)
 
     def test_owner_progress_cannot_force_complete_ineligible_companion(self):
         mirror = section('void SyncQuestToBot(', '/// Quest pickup may retry')

@@ -92,6 +92,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <optional>
 
 using namespace Acore::ChatCommands;
 
@@ -403,6 +404,7 @@ namespace
         uint64 epoch = 0;
         uint32 revision = 0;
         bool tagged = false;
+        bool handInStates = false;
     };
     std::map<uint32, PinStream> g_pinRevisions;           // presence means this client requested v2
     std::map<uint32, uint32> g_pinRequestAt;              // bound repeat requests within a session
@@ -1621,12 +1623,22 @@ namespace
         return map->GetZoneId(phaseMask, x, y, z);
     }
 
+    struct EnderPin
+    {
+        float x, y;
+        std::string zone;
+    };
+
+    std::optional<EnderPin> PlotEnder(EnderSpot const& spot);
+
     // Cache immutable spawn candidates, not the decision of which spawn is
     // nearest a moving companion. These records are hints, not live enders.
     std::unordered_map<uint32, std::vector<EnderSpot>> g_enderSpawns;
 
-    EnderSpot FindQuestEnder(Player* bot, uint32 questId)
+    EnderSpot FindQuestEnder(Player* bot, uint32 questId, std::optional<EnderPin>* forPin = nullptr)
     {
+        if (forPin)
+            forPin->reset();
         auto [it, load] = g_enderSpawns.try_emplace(questId);
         if (load)
         {
@@ -1653,25 +1665,30 @@ namespace
 
         EnderSpot const* nearest = nullptr;
         float best = 0.0f;
+        uint32 const botMap = bot->GetMapId();
         for (EnderSpot const& candidate : it->second)
         {
-            if (candidate.map != bot->GetMapId())
-            {
-                if (!nearest)
-                    nearest = &candidate; // deterministic fallback; coordinates on different maps are incomparable
+            // Map pins also exclude phase-incompatible remote spawns; preserve the
+            // existing cross-map direction fallback for whispers.
+            bool const sameMap = candidate.map == botMap;
+            if ((forPin || sameMap) && !(candidate.phase & bot->GetPhaseMask()))
                 continue;
-            }
-            if (!(candidate.phase & bot->GetPhaseMask()))
+            // Maps are incomparable; the first eligible remote spawn is the fallback.
+            float const dist = sameMap ? bot->GetDistance(candidate.x, candidate.y, candidate.z) : 0.0f;
+            if (nearest && (!sameMap || (nearest->map == botMap && !(dist < best))))
                 continue;
-            float const dist = bot->GetDistance(candidate.x, candidate.y, candidate.z);
-            if (!nearest || nearest->map != bot->GetMapId() || dist < best)
+            if (forPin)
             {
-                nearest = &candidate;
-                best = dist;
+                auto pin = PlotEnder(candidate);
+                if (!pin)
+                    continue;
+                *forPin = std::move(pin);
             }
+            nearest = &candidate;
+            best = dist;
         }
         EnderSpot spot = nearest ? *nearest : EnderSpot{};
-        if (spot.found && !spot.zone)
+        if (!forPin && spot.found && !spot.zone)
             spot.zone = ZoneAt(spot.map, spot.phase, spot.x, spot.y, spot.z);
         return spot;
     }
@@ -1791,7 +1808,7 @@ namespace
         return text;
     }
 
-    std::string ZoneName(uint32 zoneId)
+    std::string ZoneName(uint32 zoneId, char const* fallback = "an unknown zone")
     {
         // Direct ID lookup. GetAreaEntryByAreaID on this build round-trips through the
         // area's exploration bit and looks THAT up as an entry id - an arbitrary row -
@@ -1801,7 +1818,7 @@ namespace
             if (zone->area_name[0])
                 return zone->area_name[0];
 
-        return "an unknown zone";
+        return fallback;
     }
 
     /// Map numbers and a zone name for a quest's objective area, anchored to the POI's
@@ -1903,11 +1920,11 @@ namespace
     /// core's Map2ZoneCoordinates math but reads OUR table - the core's typed struct
     /// does not match its load format on this repack, and its store is indexed by
     /// map_id, so an area id cannot be looked up through it at all.
-    bool WmaConvert(float& x, float& y, int32 areaId)
+    bool WmaConvert(float& x, float& y, int32 areaId, std::optional<uint32> mapId = std::nullopt)
     {
         for (WorldMapAreaRow const& row : g_worldMapAreas)
         {
-            if (row.areaId != areaId)
+            if (row.areaId != areaId || (mapId && row.mapId != *mapId))
                 continue;
 
             float px = (x - row.x1) / ((row.x2 - row.x1) / 100.0f);
@@ -1941,6 +1958,21 @@ namespace
         uint32 const zone = map->GetZoneId(phaseMask, x, y, ground + 2.0f);
 
         return zone ? zone : WorldMapZoneAt(mapId, x, y);
+    }
+
+    std::optional<EnderPin> PlotEnder(EnderSpot const& spot)
+    {
+        if (!spot.found)
+            return std::nullopt;
+        uint32 const zone = spot.zone ? spot.zone : ZoneAtHeight(spot.map, spot.phase, spot.x, spot.y);
+        float gx = spot.x, gy = spot.y;
+        if (!zone || !WmaConvert(gx, gy, int32(zone), spot.map) ||
+            !(gx >= 0.0f && gx <= 100.0f && gy >= 0.0f && gy <= 100.0f))
+            return std::nullopt;
+        std::string zoneName = ZoneName(zone, "");
+        if (zoneName.empty())
+            return std::nullopt;
+        return EnderPin{ gx, gy, std::move(zoneName) };
     }
 
 
@@ -5609,8 +5641,9 @@ namespace
     ///
     ///     Pin sync 3: 43,65,h=Kobold Candles|64,59,g=Gold Dust Exchange|...
     ///
-    /// h = it can hand that quest in now, g = it still has work there. A pin that
-    /// is not in this line is not real, which is what lets the map clean up after a
+    /// h = can hand in here now, g = objective work here. Capable clients also get
+    /// p = eventual hand-in with work left, u = hand-in not currently available.
+    /// A pin that is not in this line is not real, which lets the map clean up after a
     /// desync: a whisper lost to a rate limit, a logout, or an abandoned quest.
     /// The whole map, for every companion bound to this owner.
     ///
@@ -5695,11 +5728,12 @@ namespace
             std::string zone;   // the giver's zone, named by the SERVER: the client's own
                                 // location is not the pin's location, and guessing it was
                                 // how pins ended up stamped with the wrong map
-            uint32 extra = 0;   // companions folded into this marker beyond the second
         };
 
         std::vector<Entry> entries;
-        bool const versioned = g_pinRevisions.contains(owner->GetGUID().GetCounter());
+        auto const stream = g_pinRevisions.find(owner->GetGUID().GetCounter());
+        bool const versioned = stream != g_pinRevisions.end();
+        bool const handInStates = versioned && stream->second.handInStates;
 
         std::vector<uint32> bots;
         if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
@@ -5721,55 +5755,45 @@ namespace
                 if (!quest)
                     continue;
 
-                // Two glyph kinds, both with server-computed coordinates and a zone
-                // the server names - the client never guesses location:
-                //   h = ready to hand in, at the giver (a POI circle cannot say this)
-                //   g = work left, at the objective area - necessary because the client
-                //       only draws native POI circles for quests in the PLAYER's own log;
-                //       the pushed packets for companion-held quests display nothing,
-                //       which the first session without g glyphs proved in the field.
-                std::string coords;
-                std::string zoneName;
-                std::vector<std::pair<std::string, std::string>> workLeftSpots;
-                char style = 'g';
+                QuestStatus const status = bot->GetQuestStatus(questId);
+                if (status != QUEST_STATUS_INCOMPLETE && status != QUEST_STATUS_COMPLETE)
+                    continue;
 
-                bool const ready = bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE &&
-                                   DescribeMissingItemsUncached(bot, quest).empty();
-                if (ready)
+                // A completed log entry can still be missing turn-in items. Only
+                // a live interaction AND the native reward check can make it gold.
+                bool const ready = status == QUEST_STATUS_COMPLETE && DescribeMissingItemsUncached(bot, quest).empty();
+                WorldObject* giver = ready ? FindReadyQuestEnder(bot, quest) : nullptr;
+                std::vector<std::tuple<std::string, char, std::string>> spots;
+                if (giver || handInStates)
                 {
-                    if (WorldObject* giver = FindReadyQuestEnder(bot, quest))
+                    std::optional<EnderPin> pin;
+                    if (giver)
+                        pin = PlotEnder(DescribeQuestEnder(giver));
+                    else
+                        FindQuestEnder(bot, questId, &pin);
+                    char const style = giver ? 'h' : ready ? 'u' : 'p';
+                    if (pin)
                     {
-                        EnderSpot const spot = DescribeQuestEnder(giver);
-                        uint32 const zone = spot.zone ? spot.zone : ZoneAtHeight(spot.map, spot.phase, spot.x, spot.y);
-                        int32 const useZone = int32(zone);
-
-                        float gx = spot.x, gy = spot.y;
-                        if (WmaConvert(gx, gy, useZone) && gx >= 0.0f && gx <= 100.0f && gy >= 0.0f && gy <= 100.0f)
-                        {
-                            coords = "map " + std::to_string(uint32(gx)) + ", " + std::to_string(uint32(gy));
-                            zoneName = ZoneName(uint32(useZone));
-                            style = 'h';
-                        }
+                        // Legacy parsers require integer percentages. Keep distinct
+                        // nearby giver positions on capable clients. Reverse bounds
+                        // can produce -0 at a map edge.
+                        std::string const numbers = handInStates ? fmt::format("{:.4f}, {:.4f}", pin->x + 0.0f, pin->y + 0.0f) :
+                            std::to_string(uint32(pin->x)) + ", " + std::to_string(uint32(pin->y));
+                        spots.emplace_back("map " + numbers, style, pin->zone);
                     }
                 }
-                else
+
+                if (!ready)
                 {
-                    // The active companion copy determines work pins, even if the
-                    // owner has already handed in their copy.
+                    // Keep objective markers even when a future hand-in spot is known.
+                    std::vector<std::pair<std::string, std::string>> workLeftSpots;
                     if (!LootSpots(bot, quest, workLeftSpots))
                         PoiPins(bot, quest, workLeftSpots);
+                    for (auto const& spot : workLeftSpots)
+                        spots.push_back({ spot.first, 'g', spot.second });
                 }
 
-                // The pin list for this quest: one entry for a ready hand-in (the
-                // giver), or one per objective area for work still owed.
-                std::vector<std::tuple<std::string, char, std::string, std::string>> spots;
-                if (!coords.empty())
-                    spots.push_back({ coords, style, "", zoneName });
-                else
-                    for (auto const& spot : workLeftSpots)
-                        spots.push_back({ spot.first, 'g', "", spot.second });
-
-                for (auto const& [coords, style, _unused, zoneName] : spots)
+                for (auto const& [coords, style, zoneName] : spots)
                 {
                     // "map 43, 65" -> "43,65"
                     std::string numbers = coords.substr(4);
@@ -5803,7 +5827,7 @@ namespace
                     bool merged = false;
                     for (Entry& existing : entries)
                     {
-                        if (existing.numbers != numbers || existing.zone != zoneName || (versioned && existing.style != style))
+                        if (existing.numbers != numbers || existing.zone != zoneName || existing.style != style)
                             continue;
 
                         // Every owner reads on the pin: the client gives the names their
@@ -5816,7 +5840,7 @@ namespace
                     }
 
                     if (!merged)
-                        entries.push_back({ numbers, style, title, zoneName, 0 });
+                        entries.push_back({ numbers, style, title, zoneName });
                 }
             }
         }
@@ -5835,9 +5859,6 @@ namespace
 
             if (!entry.zone.empty())
                 line += ",z=" + entry.zone;
-
-            if (entry.extra)
-                line += " +" + std::to_string(entry.extra);
         }
 
         return line;
@@ -9031,7 +9052,7 @@ public:
         return true;
     }
 
-    /// .companionsync pins [v2 [epoch]] - recover a map snapshot, including an empty one.
+    /// .companionsync pins [v2 [epoch [handin]]] - recover a map snapshot, including an empty one.
     static bool HandlePinsCommand(ChatHandler* handler, char const* args)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -9039,7 +9060,7 @@ public:
             return false;
 
         std::string const protocol = TrimArg(args);
-        if (protocol == "v2" || protocol == "v2 epoch")
+        if (protocol == "v2" || protocol == "v2 epoch" || protocol == "v2 epoch handin")
         {
             uint32 const ownerGuid = player->GetGUID().GetCounter();
             uint32& last = g_pinRequestAt[ownerGuid];
@@ -9055,7 +9076,10 @@ public:
             PinStream& stream = g_pinRevisions[ownerGuid];
             if (!stream.epoch)
                 stream.epoch = NextPinEpoch();
-            stream.tagged = protocol == "v2 epoch";
+            stream.tagged = protocol != "v2";
+            stream.handInStates = protocol == "v2 epoch handin";
+            if (!stream.handInStates)
+                SendProtocolLine(player, "Pin set handin 1");
             if (!stream.tagged)
                 SendProtocolLine(player, fmt::format("Pin set session {}", stream.epoch));
             SendPinSync(player, true);

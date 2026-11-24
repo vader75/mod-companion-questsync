@@ -1,0 +1,152 @@
+#include <algorithm>
+#include <cassert>
+#include <cstdio>
+#include <map>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
+
+using uint16 = unsigned short;
+using uint32 = unsigned int;
+using int32 = int;
+enum QuestStatus { QUEST_STATUS_NONE, QUEST_STATUS_INCOMPLETE, QUEST_STATUS_COMPLETE, QUEST_STATUS_FAILED, QUEST_STATUS_REWARDED };
+constexpr uint16 MAX_QUEST_LOG_SIZE = 1;
+struct Quest
+{
+    uint32 GetQuestId() const { return 1; }
+    std::string GetTitle() const { return "Stew"; }
+};
+struct EnderSpot
+{
+    bool found = false;
+    uint32 entry = 0;
+    std::string name;
+    float x = 0, y = 0, z = 0;
+    uint32 map = 0, zone = 0, phase = 1;
+    bool gameObject = false;
+};
+// The test seeds the production spawn cache instead of querying the world database.
+struct Field { template<typename T> T Get() const { return {}; } };
+struct QueryResult
+{
+    explicit operator bool() const { assert(false && "populate the spawn cache"); return false; }
+    QueryResult* operator->() { return this; }
+    Field* Fetch() { return nullptr; }
+    bool NextRow() { return false; }
+};
+struct Database { QueryResult Query(char const*, uint32, uint32) { return {}; } } WorldDatabase;
+struct WorldObject { EnderSpot spot; };
+struct Player
+{
+    uint32 id;
+    std::string name;
+    QuestStatus status = QUEST_STATUS_INCOMPLETE;
+    bool hasItems = true;
+    bool canReward = true;
+    WorldObject* giver = nullptr;
+
+    Player GetGUID() const { return *this; }
+    uint32 GetCounter() const { return id; }
+    bool IsInWorld() const { return true; }
+    uint32 GetQuestSlotQuestId(uint16) const { return 1; }
+    QuestStatus GetQuestStatus(uint32) const { return status; }
+    std::string GetName() const { return name; }
+    bool CanRewardQuest(Quest const*, uint32, bool) const { return canReward; }
+    uint32 GetMapId() const { return 0; }
+    uint32 GetPhaseMask() const { return 1; }
+    float GetDistance(float x, float y, float z) const { return (x - 49) * (x - 49) + (y - 100) * (y - 100) + z * z; }
+};
+struct QuestStore {
+    Quest quest;
+    Quest const* GetQuestTemplate(uint32) const { return &quest; }
+} store, *sObjectMgr = &store;
+struct WorldMapAreaRow { uint32 mapId; int32 areaId; float x1, x2, y1, y2; };
+std::vector<WorldMapAreaRow> g_worldMapAreas = { { 1, 12, 80, 0, 80, 0 }, { 0, 12, 100, 0, 100, 0 } };
+struct PinStream { bool handInStates; };
+std::map<uint32, PinStream> g_pinRevisions;
+std::map<uint32, Player> players;
+bool FindCompanions(uint32, std::vector<uint32>& out)
+{
+    for (auto const& [id, bot] : players) out.push_back(id);
+    return !out.empty();
+}
+Player* FindCompanionPlayer(uint32 id) { return &players.at(id); }
+std::string DescribeMissingItemsUncached(Player* bot, Quest const*) { return bot->hasItems ? "" : "missing"; }
+WorldObject* FindInteractableQuestEnder(Player* bot, uint32) { return bot->giver; }
+uint32 ChooseRewardIndex(Player*, Quest const*) { return 0; }
+EnderSpot DescribeQuestEnder(WorldObject* giver) { return giver->spot; }
+uint32 ZoneAt(uint32, uint32, float, float, float) { return 0; }
+uint32 ZoneAtHeight(uint32 map, uint32 phase, float, float) { return map == 0 && phase == 1 ? 12 : 0; }
+std::string ZoneName(uint32 zone, char const* fallback) { return zone == 12 ? "Westfall" : fallback; }
+using Spots = std::vector<std::pair<std::string, std::string>>;
+bool LootSpots(Player*, Quest const*, Spots&) { return false; }
+void PoiPins(Player*, Quest const*, Spots& out) { out.emplace_back("map 40, 50", "Westfall"); }
+bool MultiCompanionSpeech(Player*) { return false; }
+std::string OwedText(Player*, Quest const*) { return "1/3"; }
+namespace fmt
+{
+std::string format(char const*, float x, float y)
+{
+    char buffer[48];
+    std::snprintf(buffer, sizeof(buffer), "%.4f, %.4f", x, y);
+    return buffer;
+}
+}
+@@PRODUCTION@@
+
+int main()
+{
+    Player owner{ 99, "Owner" };
+    players.emplace(1, Player{ 1, "Amy" });
+    players.emplace(2, Player{ 2, "Bob" });
+    players.emplace(3, Player{ 3, "Charlie" });
+    auto& amy = players.at(1);
+    auto& bob = players.at(2);
+    auto& charlie = players.at(3);
+    amy.status = QUEST_STATUS_COMPLETE;
+    charlie.status = QUEST_STATUS_COMPLETE;
+    EnderSpot const ender{ .found = true, .x = 49.0f, .y = 55.0f, .zone = 12 };
+    auto& spawns = g_enderSpawns[1];
+    spawns.push_back(ender);
+    WorldObject live{ ender };
+    amy.giver = charlie.giver = &live;
+    charlie.canReward = false;
+
+    // No negotiation: old wire grammar and no promised ender for Bob or Charlie.
+    assert(BuildPinLine(&owner) == "40,50,g=Stew:1/3,z=Westfall|45,51,h=Stew,z=Westfall");
+    g_pinRevisions[99] = { false };
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45,51,h=Stew@Amy,z=Westfall");
+    g_pinRevisions[99] = { true };
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy,z=Westfall|"
+                                   "45.0000,51.0000,p=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,u=Stew@Charlie,z=Westfall");
+    amy.giver = nullptr; // Out of range is not work left and never gold.
+    charlie.status = QUEST_STATUS_COMPLETE;
+    charlie.hasItems = false;
+    bob.status = QUEST_STATUS_FAILED;
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Charlie:1/3,z=Westfall|45.0000,51.0000,p=Stew@Charlie:1/3,z=Westfall|"
+                                   "45.0000,51.0000,u=Stew@Amy,z=Westfall");
+    charlie.status = QUEST_STATUS_REWARDED;
+    spawns.front().zone = 0; // Use the spot's own map/phase when probing the zone.
+    spawns.front().y = 100.0f; // Exact edge on reverse bounds must not serialize as negative zero.
+    assert(BuildPinLine(&owner) == "0.0000,51.0000,u=Stew@Amy,z=Westfall");
+    spawns.front().y = 101.0f; // Closest to Amy, but outside the zone's map bounds.
+    assert(BuildPinLine(&owner).empty());
+    spawns.push_back(ender);
+    assert(BuildPinLine(&owner) == "45.0000,51.0000,u=Stew@Amy,z=Westfall");
+    assert(FindQuestEnder(&amy, 1).y == 101.0f); // Whisper directions still use the closest spawn.
+    live.spot = spawns.front();
+    amy.giver = &live;
+    amy.canReward = false;
+    assert(BuildPinLine(&owner) == "45.0000,51.0000,u=Stew@Amy,z=Westfall");
+    amy.canReward = true;
+    assert(BuildPinLine(&owner).empty()); // A live but unmappable giver must not turn a static spawn gold.
+    amy.giver = nullptr;
+    spawns.resize(1);
+    spawns.front() = ender;
+    spawns.front().map = 2; // Wrong map, even with a known zone number.
+    assert(BuildPinLine(&owner).empty());
+    spawns.clear();
+    assert(BuildPinLine(&owner).empty());
+}

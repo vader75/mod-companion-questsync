@@ -1,4 +1,8 @@
 """Keep companion hand-in feedback separate from native player quest status."""
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +10,31 @@ SOURCE = (Path(__file__).resolve().parents[1] / 'src/mod_companion_questsync.cpp
 
 
 class HandInContract(unittest.TestCase):
+    def test_cpp_map_snapshot_keeps_each_copy_and_omits_unmappable_or_inactive_quests(self):
+        compiler = os.environ.get('CXX') or shutil.which('cl') or shutil.which('c++')
+        if not compiler:
+            self.skipTest('Run in a C++20 developer shell or set CXX to exercise map snapshots.')
+        snippets = []
+        for first, following in (
+            ('    bool WmaConvert(', '    /// The zone that owns'),
+            ('    struct EnderPin', '    /// "map 52, 34"'),
+            ('    std::optional<EnderPin> PlotEnder(EnderSpot const& spot)\n', '    /// content-keyed, bounded by the quests'),
+            ('    WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)\n', '    void DeliverHandIns('),
+            ('    std::string SafePinName(', '    /// How far each companion'),
+            ('    std::string BuildPinLine(', '    /// Send the pin line'),
+        ):
+            start = SOURCE.index(first)
+            snippets.append(SOURCE[start:SOURCE.index(following, start)])
+        fixture = Path(__file__).with_name('handin_pins.cpp.in').read_text(encoding='utf-8')
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as tmp:
+            source, exe = Path(tmp) / 'pins.cpp', Path(tmp) / 'pins.exe'
+            source.write_text(fixture.replace('@@PRODUCTION@@', '\n'.join(snippets)), encoding='utf-8')
+            msvc = Path(compiler).stem.lower() in {'cl', 'clang-cl'}
+            flags = ['/nologo', '/std:c++20', '/EHsc', f'/Fe{exe}'] if msvc else ['-std=c++20', '-o', str(exe)]
+            for args in ([compiler, *flags, str(source)], [str(exe)]):
+                result = subprocess.run(args, cwd=tmp, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_periodic_whispers_do_not_use_a_recent_command_as_permission(self):
         self.assertNotIn('g_commandBurst', SOURCE)
         queue = SOURCE.split('void FlushWhisperQueue(', 1)[1].split('auto& queue =', 1)[0]
@@ -68,7 +97,7 @@ class HandInContract(unittest.TestCase):
         pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
         self.assertIn('bool const ready =', pins)
         self.assertIn('DescribeMissingItemsUncached(bot, quest).empty()', pins)
-        self.assertIn('if (ready)', pins)
+        self.assertIn('ready ? FindReadyQuestEnder(bot, quest) : nullptr', pins)
 
     def test_reward_refusal_is_logged_at_the_existing_attempt_cadence(self):
         turnin = SOURCE.split('void DeliverHandIns(', 1)[1].split('bot->RewardQuest(', 1)[0]
@@ -82,11 +111,37 @@ class HandInContract(unittest.TestCase):
 
     def test_ready_pin_never_falls_back_to_static_ender(self):
         pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
-        self.assertIn('FindReadyQuestEnder(bot, quest)', pins)
-        self.assertNotIn('FindQuestEnder(bot, questId)', pins)
+        self.assertRegex(pins, r"giver\s*\?\s*'h'\s*:\s*ready\s*\?\s*'u'\s*:\s*'p'")
+        self.assertIn('ready ? FindReadyQuestEnder(bot, quest) : nullptr', pins)
+        self.assertRegex(pins, r'if \(giver\)\s*pin = PlotEnder\(DescribeQuestEnder\(giver\)\);\s*else\s*FindQuestEnder\(bot, questId, &pin\);')
         gate = SOURCE.split('WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)\n', 1)[1].split('void DeliverHandIns(', 1)[0]
         for check in ('QUEST_STATUS_COMPLETE', 'FindInteractableQuestEnder(', 'CanRewardQuest('):
             self.assertIn(check, gate)
+
+    def test_active_copy_only_and_work_pins_not_replaced_by_pending_ender(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        self.assertRegex(pins, r'if \(status != QUEST_STATUS_INCOMPLETE && status != QUEST_STATUS_COMPLETE\)\s+continue;')
+        self.assertRegex(pins, r'if \(!ready\)\s*\{[^}]+LootSpots\(bot, quest, workLeftSpots\)\)\s*PoiPins')
+        self.assertRegex(pins, r"for \(auto const& spot : workLeftSpots\)\s*spots.push_back\(\{ spot.first, 'g', spot.second \}")
+
+    def test_new_styles_and_fractional_positions_require_explicit_support(self):
+        pins = SOURCE.split('std::string BuildPinLine(', 1)[1].split('void SendPinSync(', 1)[0]
+        self.assertIn('if (giver || handInStates)', pins)
+        self.assertIn('handInStates ? fmt::format("{:.4f}, {:.4f}"', pins)
+        self.assertIn('if (versioned || MultiCompanionSpeech(bot))', pins)
+        self.assertIn('existing.style != style', pins)
+        command = SOURCE.split('static bool HandlePinsCommand(', 1)[1].split('uint32 botGuid = 0;', 1)[0]
+        self.assertIn('stream.handInStates = protocol == "v2 epoch handin";', command)
+        self.assertIn('SendProtocolLine(player, "Pin set handin 1");', command)
+
+    def test_static_marker_checks_phase_and_converts_in_givers_own_map(self):
+        finder = SOURCE.split('EnderSpot FindQuestEnder(', 1)[1].split('std::string MapCoords(', 1)[0]
+        self.assertIn('if ((forPin || sameMap) && !(candidate.phase & bot->GetPhaseMask()))', finder)
+        plot = SOURCE.split('std::optional<EnderPin> PlotEnder(EnderSpot const& spot)\n', 1)[1].split('/// content-keyed', 1)[0]
+        self.assertIn('ZoneAtHeight(spot.map, spot.phase, spot.x, spot.y)', plot)
+        self.assertIn('WmaConvert(gx, gy, int32(zone), spot.map)', plot)
+        self.assertIn('gx >= 0.0f && gx <= 100.0f && gy >= 0.0f && gy <= 100.0f', plot)
+        self.assertRegex(plot, r'if \(zoneName.empty\(\)\)\s*return std::nullopt;')
 
     def test_arrival_and_delayed_whisper_require_the_same_live_giver(self):
         report = SOURCE.split('void ReportPosition(', 1)[1].split('if (dist > 60.0f)', 1)[0]
