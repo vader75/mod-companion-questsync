@@ -571,11 +571,13 @@ listener:SetScript("OnEvent", function(_, event, message)
         local quarantine = system:match("^(.+) is quarantined for offline maintenance%. The body and name remain reserved until staff review%.$")
             or system:match("^(.+): logout observed%. The body stays reserved for offline maintenance%.$")
             or system:match("^(.+): logout was not confirmed before timeout%. The body stays reserved for offline maintenance%.$")
+            or system:match("^(.+) has retired and its slot is free again%.")
         local plain = system:match("^Companion quest sync:%s*(.+)$") or quarantine and system
         if not plain then return end
         local name = plain:match("^(.+) could not be released %- ")
             or plain:match("^(.+) has gone back to the pool%.")
             or plain:match("^(.+) is not one of your companions%.$")
+            or plain:match("^(.+) is retiring%.")
             or quarantine
         if name and G.releasing[name] then
             G.releasing[name] = nil
@@ -781,7 +783,7 @@ Confirm("CSYNC_UNBIND",
     function(data) if data and data.name then G.Action("unbind", data.name) end end)
 
 Confirm("CSYNC_RELEASE",
-    "Request retirement for %s?\n\nThis removes it from your active roster. The body and name remain reserved for offline maintenance.",
+    "Retire %s?\n\nIt leaves your roster and its slot frees once it has left the world.",
     function(data) if data and data.name then G.Action("release", data.name) end end)
 
 function G.ConfirmUnbind(name)

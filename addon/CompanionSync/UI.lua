@@ -451,7 +451,7 @@ local function CreateCard()
 
     card.releaseButton = Button(card, "Release", 62, function()
         if card.companion then G.ConfirmRelease(card.companion.name) end
-    end, "Quarantine it for staff review. The body and name stay reserved.")
+    end, "Retire it. Its slot frees once it has left the world.")
     card.releaseButton:SetPoint("BOTTOMRIGHT", -78, -12)
     card.releaseButton:GetFontString():SetTextColor(1, 0.6, 0.6)
 

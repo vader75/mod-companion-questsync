@@ -207,6 +207,16 @@ class SyncTransport(unittest.TestCase):
         self.assertIsNone(self.g.releasing.Amy)
         self.assertIsNotNone(self.visible('remain reserved until staff review'))
 
+    def test_release_reports_the_slot_freeing_itself(self):
+        self.send('Comp sync 1: ' + A)
+        self.g.Toggle()
+        self.assertTrue(self.g.Action('release', 'Amy'))
+        self.send('Companion quest sync: Amy is retiring. Its slot frees once it has left the world.', prefix='')
+        self.assertIsNone(self.g.releasing.Amy)
+        self.assertIsNotNone(self.visible('slot frees once it has left the world'))
+        self.send('Amy has retired and its slot is free again. Ask me for a new companion whenever you are ready.', prefix='')
+        self.assertIsNotNone(self.visible('has retired and its slot is free again'))
+
     def test_release_is_not_queued_without_send_and_expires_without_roster(self):
         self.assertFalse(self.g.Action('release', 'Amy'))
         self.assertIsNone(self.g.releasing.Amy)

@@ -8403,7 +8403,7 @@ public:
         }
 
         SendCompSync(player, true);
-        handler->PSendSysMessage("{} is quarantined for offline maintenance. The body and name remain reserved until staff review.", name);
+        handler->PSendSysMessage("{} is retiring. Its slot frees once it has left the world.", name);
         return true;
     }
 
