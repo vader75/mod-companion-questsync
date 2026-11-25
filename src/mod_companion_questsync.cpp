@@ -1754,9 +1754,11 @@ namespace
             return;
         }
 
-        // Dual spec exists from 40; holding both trees is what makes a role flip instant instead
-        // of a talent wipe, so it is granted to the companion rather than bought.
-        if (g_cfg.specMinLevel >= 40 && bot->GetSpecsCount() < 2)
+        // Dual spec exists from 40 - the core's rule, not this module's setting - and holding both
+        // trees is what makes a role flip instant instead of a talent wipe, so it is granted to the
+        // companion rather than bought. Keyed on the character's level so that lowering
+        // SpecMinLevel to try the retrain early does not quietly skip the second spec.
+        if (bot->GetLevel() >= 40 && bot->GetSpecsCount() < 2)
         {
             bot->UpdateSpecCount(2);
             LOG_INFO("server.loading", "[CompanionQuestSync] {} now holds two talent specs", bot->GetName());

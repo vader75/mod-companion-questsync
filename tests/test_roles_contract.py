@@ -445,6 +445,10 @@ class SpecFollowsRole(unittest.TestCase):
         body = function_body("    void ReconcileCompanionSpec(Player* owner")
         self.assertIn("bot->GetSpecsCount() < 2", body)
         self.assertIn("bot->UpdateSpecCount(2);", body)
+        # the core's own level rule, not the module's config: a lowered SpecMinLevel must not
+        # skip the second spec
+        self.assertIn("bot->GetLevel() >= 40 && bot->GetSpecsCount() < 2", body)
+        self.assertNotIn("g_cfg.specMinLevel >= 40", body)
 
     def test_a_stored_tree_is_switched_not_rebuilt(self):
         body = function_body("    void ReconcileCompanionSpec(Player* owner")
