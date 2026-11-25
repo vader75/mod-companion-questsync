@@ -561,10 +561,19 @@ class TheLogDoesNotSayTheSameThingTwice(unittest.TestCase):
         self.assertIn('!commandReply && !handIn && tradeNoticeId == 0', say)   # replies and hand-ins still speak
 
     def test_a_class_quest_is_never_whispered_as_an_ask(self):
-        refusal = SOURCE.split('void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)', 1)[1][:900]
+        refusal = SOURCE.split('void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)', 1)[1][:1200]
         self.assertIn('if (refusal.expected)', refusal)
-        self.assertLess(refusal.index('if (refusal.expected)'), refusal.index('g_notified'))
+        self.assertLess(refusal.index('if (refusal.expected)'), refusal.index('bool const wanted = g_cfg.notifySkipped >= 2;'))
         self.assertIn('bool const wanted = g_cfg.notifySkipped >= 2;', refusal)
+
+    def test_a_permanent_refusal_is_logged_once_per_quest(self):
+        """A class or race lock never changes, so the line was the same sentence every pass -
+        measured at 84 lines in 16 minutes for one class quest across four companions. The latch
+        is g_notified, which the pass prunes against the owner's log so a re-taken quest reports."""
+        refusal = SOURCE.split('void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)', 1)[1][:1200]
+        expected = refusal.split('if (refusal.expected)', 1)[1].split('bool const wanted', 1)[0]
+        self.assertIn('bool const first = g_notified[bot->GetGUID().GetCounter()].insert(quest->GetQuestId()).second;', expected)
+        self.assertIn('if (first && g_cfg.debug >= 1)', expected)
 
     def test_a_stored_talent_is_found_whichever_way_it_is_spelled(self):
         """character_talent holds either the talent's DBC id or its rank spell id depending on the

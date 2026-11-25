@@ -2905,10 +2905,15 @@ namespace
     void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)
     {
         // "it is a class quest my class cannot take" is not an ask the player can answer, so it is
-        // never whispered: it goes to the log once and stays there
+        // never whispered: it goes to the log once and stays there. Once per quest, not once per
+        // pass - a class or race lock is permanent for this body, so the same line every 30 s is
+        // pure noise (measured: 84 lines in 16 minutes for one paladin's class quest across four
+        // companions). The latch is g_notified, which the pass already prunes against the owner's
+        // log, so a quest that leaves and comes back is reported again.
         if (refusal.expected)
         {
-            if (g_cfg.debug >= 1)
+            bool const first = g_notified[bot->GetGUID().GetCounter()].insert(quest->GetQuestId()).second;
+            if (first && g_cfg.debug >= 1)
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} could not take '{}' ({}): {}",
                          bot->GetName(), quest->GetTitle(), quest->GetQuestId(), refusal.reason);
             return;
@@ -3029,8 +3034,10 @@ namespace
     }
 
     /// "map 52, 34" for a world position, in the client's own 0-100 scale, so the
-    /// player can find the spot even when the map will not show a pin for a quest
-    /// that is not in their own log.
+    /// player can plot the spot themselves even when the map will not show a pin for
+    /// a quest that is not in their own log. Nothing parses this text: the markers
+    /// come from the CSYNC pin payload, and CompanionPins treats whispers as
+    /// narrative only. It is a hint for the player's own map, nothing more.
     std::string MapCoords(float x, float y, uint32 zoneId)
     {
         float mapX = x;
@@ -3039,7 +3046,7 @@ namespace
         // Map2ZoneCoordinates is the world -> map-percentage direction; the
         // similarly named Zone2MapCoordinates converts the other way, which is why
         // every coordinate this module produced came back out of range and was
-        // dropped by the guard below - no "map X, Y", so nothing for the addon to pin.
+        // dropped by the guard below - no "map X, Y" in any spoken hint.
         Map2ZoneCoordinates(mapX, mapY, zoneId);
 
         if (mapX < 0.0f || mapX > 100.0f || mapY < 0.0f || mapY > 100.0f)
@@ -3047,10 +3054,11 @@ namespace
 
         return "map " + std::to_string(uint32(mapX)) + ", " + std::to_string(uint32(mapY));
     }
-    /// "map X, Y" for a quest's objective area, taken from its POI points. The
-    /// addon pins whatever the companion says out loud, so a hint without coordinates
-    /// is a hint that never becomes a pin - which is exactly what happened when only
-    /// the "far away" branch carried them.
+    /// "map X, Y" for a quest's objective area, taken from its POI points, so a
+    /// spoken hint names a spot the player can plot. The marker for the same area
+    /// travels in the pin payload instead; the coordinate text is only ever read by
+    /// the player, never by the addons. Every branch that speaks a location carries
+    /// one, so the hint reads the same whichever branch fires.
     std::string PoiCoords(Player* bot, Quest const* quest)
     {
         QuestPOIVector const* poi = sObjectMgr->GetQuestPOIVector(quest->GetQuestId());
