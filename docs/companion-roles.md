@@ -228,6 +228,13 @@ the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe
 granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
 and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
 
+When a retrain does not take, it is not repeated every pass. The module reads the trees back after
+each attempt, retries on a widening interval (30 seconds, two minutes, ten), and after three
+attempts stops and says so once - `is still fury after 3 attempts at protection: leaving its talents
+alone until its level, its role or the trees change`. `inspect` shows the attempt in flight
+(`attempt 2, next in 40s`, or `given up after 3`). A different tree, a level up, or a fresh body
+starts over.
+
 A spec change also re-picks the kit. playerbots dresses a bot from its spec tab, so the gear a
 companion is wearing was chosen for the tree it has just left - a protection warrior in fury's gear
 is dressed for the wrong fight. The two "the kit still fits the level" gates in `LevelGear` are

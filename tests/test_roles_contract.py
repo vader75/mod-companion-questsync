@@ -487,6 +487,38 @@ class SpecFollowsRole(unittest.TestCase):
         self.assertIn("bool specChanged = false);", SOURCE)   # the declaration carries the default
 
 
+class RetriesWidenThenStop(unittest.TestCase):
+    """A retrain that does not take must not be re-attempted every pass for the whole session.
+
+    Act, read the trees back, widen the interval, and after three attempts stop and say so once.
+    Anything the decision depends on - a different tree, a new level, a fresh body - starts over.
+    """
+
+    def test_the_trees_are_read_back_after_each_path(self):
+        body = function_body("    void VerifySpecAttempt(Player* bot, std::string const& wantName)")
+        self.assertIn("int const now = CurrentSpecTab(bot);", body)
+        self.assertIn("g_specAttempts.erase(botGuid);", body)      # landed, nothing to remember
+        self.assertIn("if (attempt.goal != wantName || attempt.level != bot->GetLevel())", SOURCE)
+        self.assertEqual(SOURCE.count("VerifySpecAttempt(bot, wantName);"), 2)   # the switch and the retrain
+
+    def test_a_stale_attempt_is_noticed_at_the_gate(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)")
+        self.assertIn("if (attempt.gaveUp)", body)
+        self.assertIn("uint32(time(nullptr)) < attempt.nextAt", body)
+        # the gate sits before the retrain, or it would ask again anyway
+        self.assertLess(body.index("attempt.gaveUp"), body.index("factory.InitTalentsTree"))
+
+    def test_the_interval_widens_and_then_stops(self):
+        body = function_body("    void VerifySpecAttempt(Player* bot, std::string const& wantName)")
+        self.assertIn("kBackoff[] = { 30, 120, 600 }", body)
+        self.assertIn("if (attempt.tries >= 3)", body)
+        self.assertIn("attempt.gaveUp = true;", body)
+
+    def test_inspect_says_where_the_attempt_stands(self):
+        self.assertIn("given up after ", SOURCE)
+        self.assertIn("attempt ", SOURCE)
+        self.assertIn("g_specAttempts.erase(botGuid);", SOURCE)   # dropped when the tree lands
+
 class SpecLineTravelsWithRoles(unittest.TestCase):
     """The card has to show the role AND what the talents did about it.
 

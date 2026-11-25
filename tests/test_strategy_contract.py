@@ -80,7 +80,7 @@ class Pets(unittest.TestCase):
 
 class Observability(unittest.TestCase):
     def test_inspect_reports_the_setting_the_ledger_and_the_pitfalls(self):
-        body = slice_from("    static bool HandleInspectCommand(", 6400)
+        body = slice_from("    static bool HandleInspectCommand(", 7600)
         self.assertIn("StrategySnapshot(ai)", body)
         self.assertIn("LedgerSnapshot(botGuid)", body)
         self.assertIn("g_engageNotes.find(botGuid)", body)
@@ -130,19 +130,19 @@ class GapClosers(unittest.TestCase):
         self.assertIn('GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true)', SOURCE)
 
     def test_inspect_names_the_formation_and_what_it_competes_with(self):
-        body = slice_from("    static bool HandleInspectCommand(", 6400)
+        body = slice_from("    static bool HandleInspectCommand(", 7600)
         self.assertIn("std::string const formation = EffectiveFormation(player, bot);", body)
         self.assertIn("FormationLeash(formation)", body)
         self.assertIn('GetOption<uint32>("WowLegends.BotPitchIn.Radius", 20)', body)
         self.assertIn("formation: off (distance left to playerbots)", body)
 
     def test_inspect_notices_a_charge_missing_from_the_spellbook(self):
-        body = slice_from("    static bool HandleInspectCommand(", 6200)
+        body = slice_from("    static bool HandleInspectCommand(", 7400)
         self.assertIn("missing from the spellbook (an older ", body)
         self.assertIn("bot->HasSpell(closer.spell)", body)
 
     def test_inspect_says_what_was_withheld(self):
-        body = slice_from("    static bool HandleInspectCommand(", 6400)
+        body = slice_from("    static bool HandleInspectCommand(", 7600)
         self.assertIn("gap closers withheld", body)
 
 

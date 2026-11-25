@@ -1714,6 +1714,65 @@ namespace
 
     std::unordered_map<uint32, std::string> g_specNotes;   // bot guid -> the last decision logged
 
+    /// What was asked of a companion's talents, and how the asking went.
+    ///
+    /// A retrain that does not take is not worth repeating on every slow pass: the module counts
+    /// the attempt, retries on a widening interval, and then stops acting and says so once. That is
+    /// the difference between automation and a loop - and the things the decision actually depends
+    /// on (a different tree, a new level, a fresh login) start it over.
+    struct SpecAttempt
+    {
+        std::string goal;        // the tree the role wanted at the last attempt
+        uint32 tries = 0;
+        uint32 nextAt = 0;       // no attempt before this second
+        uint32 level = 0;        // the level it was tried at; a level up is a new question
+        bool gaveUp = false;
+    };
+    std::unordered_map<uint32, SpecAttempt> g_specAttempts;   // bot guid -> the attempt in flight
+
+    /// Called after a retrain or a spec switch: did the tree actually move?
+    ///
+    /// The trees are read back rather than assumed - a retrain that silently failed is exactly the
+    /// case that used to be retried every thirty seconds for the rest of the session.
+    void VerifySpecAttempt(Player* bot, std::string const& wantName)
+    {
+        if (!bot)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        SpecAttempt& attempt = g_specAttempts[botGuid];
+        attempt.goal = wantName;
+        attempt.level = bot->GetLevel();
+        ++attempt.tries;
+
+        int const now = CurrentSpecTab(bot);
+        if (now >= 0 && wantName == kSpecTreeNames[bot->getClass()][now])
+        {
+            g_specAttempts.erase(botGuid);       // landed: nothing left to remember
+            return;
+        }
+
+        // 30 seconds, two minutes, ten: the first retry is quick because the usual reasons are
+        // temporary (a cast, a trade), and the last is slow because by then it is not happening
+        static constexpr uint32 kBackoff[] = { 30, 120, 600 };
+        if (attempt.tries >= 3)
+        {
+            attempt.gaveUp = true;
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} is still {} after {} attempts at {}: leaving its "
+                                       "talents alone until its level, its role or the trees change",
+                     bot->GetName(), now >= 0 ? kSpecTreeNames[bot->getClass()][now] : "untalented",
+                     attempt.tries, wantName);
+        }
+        else
+        {
+            attempt.nextAt = uint32(time(nullptr)) + kBackoff[attempt.tries - 1];
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} did not end up in {} (still {}): retrying in {}s",
+                     bot->GetName(), wantName,
+                     now >= 0 ? kSpecTreeNames[bot->getClass()][now] : "untalented",
+                     kBackoff[attempt.tries - 1]);
+        }
+    }
+
     /// Make the talents follow the role, on the same terms as everything else: deliberate,
     /// out of combat, and honest about what it is doing.
     ///
@@ -1737,7 +1796,9 @@ namespace
         int const have = SpecTabOf(bot, active);
         if (have == want)
         {
+            // agree already: nothing to ask, and nothing to remember about asking
             g_specNotes.erase(botGuid);
+            g_specAttempts.erase(botGuid);
             return;
         }
 
@@ -1772,6 +1833,20 @@ namespace
             return;
         }
 
+        // One question at a time: a goal that is already being retried is not re-asked on every
+        // pass, and a goal the module has given up on stays given up until something changes.
+        SpecAttempt& attempt = g_specAttempts[botGuid];
+        if (attempt.goal != wantName || attempt.level != bot->GetLevel())
+        {
+            attempt = SpecAttempt();
+            attempt.goal = wantName;
+            attempt.level = bot->GetLevel();
+        }
+        if (attempt.gaveUp)
+            return;
+        if (attempt.nextAt && uint32(time(nullptr)) < attempt.nextAt)
+            return;
+
         // Dual spec exists from 40 - the core's rule, not this module's setting - and holding both
         // trees is what makes a role flip instant instead of a talent wipe, so it is granted to the
         // companion rather than bought. Keyed on the character's level so that lowering
@@ -1800,6 +1875,7 @@ namespace
             // playerbots picks equipment from the spec tab, so a new spec means a re-pick; the
             // kit it is wearing was chosen for the tree it has just left
             RefreshLevelGear(owner, bot, /*specChanged=*/true);
+            VerifySpecAttempt(bot, wantName);
             if (owner && owner->GetSession())
                 ChatHandler(owner->GetSession()).PSendSysMessage(
                     "|cff20ff20{}|r switched to its stored |cffffffff{}|r spec for its |cffffffff{}|r role.",
@@ -1826,6 +1902,7 @@ namespace
                  bot->GetName(), haveName, wantName, role,
                  otherUsable ? " (the previous tree is kept in the other spec)" : "");
         RefreshLevelGear(owner, bot, /*specChanged=*/true);
+        VerifySpecAttempt(bot, wantName);
 
         if (owner && owner->GetSession())
             ChatHandler(owner->GetSession()).PSendSysMessage(
@@ -10278,7 +10355,20 @@ public:
                 {
                     std::string const haveName = have >= 0 ? kSpecTreeNames[bot->getClass()][have]
                                                            : std::string("no points yet");
-                    char const* mode = g_cfg.specFollowRole >= 2 ? "" : " (dry run)";
+                    std::string mode = g_cfg.specFollowRole >= 2 ? "" : " (dry run)";
+                    auto const inFlight = g_specAttempts.find(botGuid);
+                    if (inFlight != g_specAttempts.end() && inFlight->second.tries)
+                    {
+                        if (inFlight->second.gaveUp)
+                            mode += ", given up after " + std::to_string(inFlight->second.tries);
+                        else
+                        {
+                            mode += ", attempt " + std::to_string(inFlight->second.tries);
+                            uint32 const second = uint32(time(nullptr));
+                            if (inFlight->second.nextAt > second)
+                                mode += ", next in " + std::to_string(inFlight->second.nextAt - second) + "s";
+                        }
+                    }
                     handler->PSendSysMessage("  spec: {} |cff9d9d9drole {} wants {}{}|r",
                                              haveName, CompanionRole(botGuid),
                                              kSpecTreeNames[bot->getClass()][want], mode);
