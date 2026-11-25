@@ -548,6 +548,10 @@ namespace
     std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_gearLevel;         // bot guid -> level the kit was built for
 
+    /// Last shape check per companion: the hands can change outside our gear pass, so the watch
+    /// is throttled rather than tied to the pass.
+    std::unordered_map<uint32, uint32> g_kitWatchAt;
+
     /// Pieces a re-gear pulled out of a slot and left in the bags, bot guid -> item guid.
     ///
     /// playerbots destroys the item it replaces *in* a slot, so a plain upgrade leaves the bags
@@ -935,6 +939,7 @@ namespace
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
         g_staleGear.erase(botGuid);
+        g_kitWatchAt.erase(botGuid);
         g_trimAt.erase(botGuid);
         g_lastAutoProduce.erase(botGuid);
         g_deadNoticeAt.erase(botGuid);
@@ -6661,6 +6666,37 @@ namespace
         return 0;
     }
 
+    /// The best piece of its kind the companion already carries.
+    ///
+    /// A shield looted five minutes ago is what the tank should be holding; handing it a fresh one
+    /// instead would leave that drop to rot in the bags and give the companion gear it did not earn.
+    Item* FindCarriedKitPiece(Player* bot, KitPiece piece)
+    {
+        Item* best = nullptr;
+        if (!bot)
+            return best;
+
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            if (!item || item->IsEquipped() || item->IsInTrade() || item->IsRefundable())
+                return;
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!MatchesKitPiece(piece, proto) || bot->CanUseItem(proto) != EQUIP_ERR_OK)
+                return;
+            if (!best || proto->ItemLevel > best->GetTemplate()->ItemLevel)
+                best = item;
+        });
+        return best;
+    }
+
+    bool EquipCarriedKitPiece(Player* bot, uint8 slot, Item* item)
+    {
+        uint16 dest = 0;
+        if (bot->CanEquipItem(slot, dest, item, /*swap=*/true) != EQUIP_ERR_OK)
+            return false;
+        return bot->EquipItem(dest, item, true) != nullptr;
+    }
+
     bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)
     {
         // swap: the piece being replaced goes to the bags, and the sweep that follows the pass
@@ -6669,6 +6705,16 @@ namespace
         if (bot->CanEquipNewItem(slot, dest, itemId, /*swap=*/true) != EQUIP_ERR_OK)
             return false;
         return bot->EquipNewItem(dest, itemId, true) != nullptr;
+    }
+
+    /// Fit the best piece of a kind this companion can wear: what it carries first, a new one only
+    /// when it owns nothing suitable.
+    bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece)
+    {
+        if (Item* carried = FindCarriedKitPiece(bot, piece))
+            return EquipCarriedKitPiece(bot, slot, carried);
+        uint32 const fresh = FindKitItem(bot, piece);
+        return fresh && EquipKitPiece(bot, slot, fresh);
     }
 
     /// The hands, in words - for the log and the card, so "refitted" is not the only evidence.
@@ -6697,6 +6743,94 @@ namespace
             }
         };
         return describe(EQUIPMENT_SLOT_MAINHAND) + " + " + describe(EQUIPMENT_SLOT_OFFHAND);
+    }
+
+    /// The equipment slot an inventory type goes in, or -1 when it is not worn at all.
+    int SlotForInventoryType(uint8 type)
+    {
+        switch (type)
+        {
+            case INVTYPE_HEAD: return EQUIPMENT_SLOT_HEAD;
+            case INVTYPE_NECK: return EQUIPMENT_SLOT_NECK;
+            case INVTYPE_SHOULDERS: return EQUIPMENT_SLOT_SHOULDERS;
+            case INVTYPE_BODY: return EQUIPMENT_SLOT_BODY;
+            case INVTYPE_CHEST: case INVTYPE_ROBE: return EQUIPMENT_SLOT_CHEST;
+            case INVTYPE_WAIST: return EQUIPMENT_SLOT_WAIST;
+            case INVTYPE_LEGS: return EQUIPMENT_SLOT_LEGS;
+            case INVTYPE_FEET: return EQUIPMENT_SLOT_FEET;
+            case INVTYPE_WRISTS: return EQUIPMENT_SLOT_WRISTS;
+            case INVTYPE_HANDS: return EQUIPMENT_SLOT_HANDS;
+            case INVTYPE_FINGER: return EQUIPMENT_SLOT_FINGER1;      // either ring slot will do
+            case INVTYPE_TRINKET: return EQUIPMENT_SLOT_TRINKET1;
+            case INVTYPE_CLOAK: return EQUIPMENT_SLOT_BACK;
+            case INVTYPE_WEAPON: case INVTYPE_2HWEAPON: case INVTYPE_WEAPONMAINHAND: return EQUIPMENT_SLOT_MAINHAND;
+            case INVTYPE_SHIELD: case INVTYPE_HOLDABLE: case INVTYPE_WEAPONOFFHAND: return EQUIPMENT_SLOT_OFFHAND;
+            case INVTYPE_RANGED: case INVTYPE_RANGEDRIGHT: case INVTYPE_THROWN: case INVTYPE_RELIC:
+                return EQUIPMENT_SLOT_RANGED;
+            default: return -1;
+        }
+    }
+
+    std::set<uint64> WornGuids(Player* bot)
+    {
+        std::set<uint64> worn;
+        if (!bot)
+            return worn;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                worn.insert(item->GetGUID().GetRawValue());
+        return worn;
+    }
+
+    /// Anything that was worn and is now carried was put down by the change just made.
+    uint32 MarkKitDisplaced(Player* bot, std::set<uint64> const& wornBefore)
+    {
+        uint32 displaced = 0;
+        if (!bot || wornBefore.empty())
+            return displaced;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            if (!item || item->IsEquipped())
+                return;                             // still on the body: the change kept it
+            uint64 const raw = item->GetGUID().GetRawValue();
+            if (wornBefore.count(raw) && g_staleGear[botGuid].insert(raw).second)
+                ++displaced;
+        });
+        return displaced;
+    }
+
+    /// A world upgrade moves the piece it beat into the bags, where nothing in the pass ever sees
+    /// it again. A carried armour or weapon piece that the worn piece in its own slot beats on item
+    /// level is that cast-off, and it goes to the vendor like any other - but a profession tool, a
+    /// curated delivery, anything bound or in trade is left exactly where it is.
+    void MarkSupersededGear(Player* owner, Player* bot)
+    {
+        if (!bot || !owner)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::set<uint32> const tools = ProfessionToolItems(bot->getClass());
+        VisitCarriedItems(bot, [&](Item* item)
+        {
+            if (!item || item->IsEquipped() || item->IsInTrade() || item->IsRefundable())
+                return;
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto || (proto->Class != ITEM_CLASS_ARMOR && proto->Class != ITEM_CLASS_WEAPON) ||
+                tools.count(proto->ItemId) || !CanReleaseItem(bot, owner, item))
+                return;
+
+            int const slot = SlotForInventoryType(proto->InventoryType);
+            if (slot < 0)
+                return;
+
+            Item* worn = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, uint8(slot));
+            if (!worn || !worn->GetTemplate() || worn->GetTemplate()->ItemLevel <= proto->ItemLevel)
+                return;                             // a spare, not a cast-off
+
+            g_staleGear[botGuid].insert(item->GetGUID().GetRawValue());
+        });
     }
 
     /// Fit the piece the role insists on, when the score-driven kit contradicts it.
@@ -6731,14 +6865,12 @@ namespace
             // a two-hander holds both hands, so it has to give way before a shield can go on
             if (mainProto && mainProto->InventoryType == INVTYPE_2HWEAPON)
             {
-                uint32 const oneHand = FindKitItem(bot, KitPiece::OneHandedWeapon);
-                if (!oneHand || !EquipKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, oneHand))
+                if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::OneHandedWeapon))
                     return false;                   // no shield without a hand free: say nothing, try next pass
                 changed = true;
             }
 
-            uint32 const shield = FindKitItem(bot, KitPiece::Shield);
-            if (!shield || !EquipKitPiece(bot, EQUIPMENT_SLOT_OFFHAND, shield))
+            if (!FitKitPiece(bot, EQUIPMENT_SLOT_OFFHAND, KitPiece::Shield))
                 return changed;
             changed = true;
         }
@@ -6756,8 +6888,7 @@ namespace
             if (!meleeTwoHand)
                 return false;
 
-            uint32 const caster = FindKitItem(bot, KitPiece::CasterOneHand);
-            if (!caster || !EquipKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, caster))
+            if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::CasterOneHand))
                 return false;
             changed = true;
         }
@@ -6766,6 +6897,38 @@ namespace
             LOG_INFO("server.loading", "[CompanionQuestSync] {} refitted its hands for the {} role: {}",
                      bot->GetName(), role, KitShapeText(bot));
         return changed;
+    }
+
+    /// The hands can change outside our pass: playerbots equips a world drop the moment it scores
+    /// better, and a two-hander picked up by a tank puts the shield back in the bags. So the shape
+    /// is also checked on the slow pass, throttled, and the role's shape comes back within a minute
+    /// instead of waiting for the next level.
+    void WatchKitShape(Player* owner, Player* bot)
+    {
+        if (!bot || !bot->IsInWorld() || bot->IsInCombat())
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string const role = CompanionRole(botGuid);
+        if (KitNeedFor(bot->getClass(), role) == KitNeed::None)
+            return;                                 // damage and support have no shape to keep
+
+        uint32& last = g_kitWatchAt[botGuid];
+        uint32 const now = uint32(time(nullptr));
+        if (last && now - last < 60)
+            return;
+        last = now;
+
+        std::set<uint64> const worn = WornGuids(bot);
+        if (RepairKitShape(bot, role))
+        {
+            if (uint32 const displaced = MarkKitDisplaced(bot, worn))
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
+                         bot->GetName(), displaced);
+        }
+
+        // a drop that beat a worn piece left the old one in the bags; it goes the same way
+        MarkSupersededGear(owner, bot);
     }
 
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)
@@ -6804,10 +6967,7 @@ namespace
         uint32 const before = DescribeGearItemLevel(bot);
 
         // what it was wearing, so the pass can tell what it put down
-        std::set<uint64> wornBefore;
-        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
-            if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                wornBefore.insert(item->GetGUID().GetRawValue());
+        std::set<uint64> const wornBefore = WornGuids(bot);
 
 #ifdef MOD_PLAYERBOTS
         PlayerbotFactory factory(bot, level);
@@ -6822,18 +6982,7 @@ namespace
         // anything that was worn and is now carried was displaced by this pass: the vendor's, not
         // the bags'. playerbots destroys the piece it replaces in a slot, so in the ordinary case
         // there is nothing here at all - an offhand swapped for a two-hander is what shows up.
-        uint32 displaced = 0;
-        if (!wornBefore.empty())
-        {
-            VisitCarriedItems(bot, [&](Item* item)
-            {
-                if (!item || item->IsEquipped())
-                    return;                     // still on the body: the pass kept it
-                uint64 const raw = item->GetGUID().GetRawValue();
-                if (wornBefore.count(raw) && g_staleGear[botGuid].insert(raw).second)
-                    ++displaced;
-            });
-        }
+        uint32 const displaced = MarkKitDisplaced(bot, wornBefore);
         // Latched here, after the attempt but before the verdict: the preconditions
         // above (bags, trade, combat) still retry on the next pass, while a generator
         // that produced nothing does not run again for another five levels.
@@ -7715,6 +7864,7 @@ namespace
             // A kit that never caught up with the level is corrected here, so companions
             // claimed before this existed heal themselves instead of staying in starters.
             RefreshLevelGear(owner, bot);
+            WatchKitShape(owner, bot);
             // Spells, talents and both professions once per level, so a body hired
             // high or levelled outside the normal path still arrives complete.
             EnsureLevelProgress(owner, bot);

@@ -228,6 +228,13 @@ the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe
 granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
 and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
 
+A better piece picked up in the world is wanted, and playerbots fits it the moment it scores
+higher - outside this module's gear pass. The shape is therefore also watched on the slow pass,
+once a minute: a two-hander looted by a tank puts the shield back within the minute, a refit takes
+a shield the companion already carries before it is given a new one, and the piece a world upgrade
+beat is marked for the vendor so it does not rot in the bags. Profession tools, curated deliveries,
+bound items and anything in trade are never marked.
+
 The kit is then checked for *shape*, not score. playerbots picks by score for the spec tab, which
 is right for damage and support and wrong for the two roles that imply a shape: a tank on a class
 that can carry a shield should be holding one, and a healer should not be holding a melee

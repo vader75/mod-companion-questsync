@@ -219,16 +219,19 @@ class DisplacedGearGoesToTheVendor(unittest.TestCase):
 
     def test_the_pass_remembers_what_it_was_wearing(self):
         body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
-        self.assertIn('std::set<uint64> wornBefore;', body)
-        self.assertIn('wornBefore.insert(item->GetGUID().GetRawValue());', body)
+        self.assertIn('std::set<uint64> const wornBefore = WornGuids(bot);', body)
         # the snapshot is taken before the factory runs, or it proves nothing
-        self.assertLess(body.index('wornBefore.insert'), body.index('factory.InitEquipment'))
+        self.assertLess(body.index('WornGuids(bot)'), body.index('factory.InitEquipment'))
+        worn = fn_body('std::set<uint64> WornGuids(Player* bot)')
+        self.assertIn('worn.insert(item->GetGUID().GetRawValue());', worn)
 
     def test_what_came_off_is_marked_not_deleted(self):
         body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
-        self.assertIn('g_staleGear[botGuid].insert(raw).second', body)
-        self.assertIn('item->IsEquipped()', body)
+        self.assertIn('MarkKitDisplaced(bot, wornBefore)', body)
         self.assertNotIn('bot->DestroyItem', body)          # the vendor's job, not the bin's
+        mark = fn_body('uint32 MarkKitDisplaced(Player* bot, std::set<uint64> const& wornBefore)')
+        self.assertIn('g_staleGear[botGuid].insert(raw).second', mark)
+        self.assertIn('item->IsEquipped()', mark)           # still worn is not displaced
 
     def test_the_vendor_takes_them_whatever_their_quality(self):
         body = gear_body('uint32 SellManagedJunk(Player* owner, Player* bot)')
@@ -288,7 +291,7 @@ class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
         self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', refit)
         # the sweep that marks displaced pieces runs after the refit, so swapped pieces are vendored
         pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
-        self.assertLess(pass_.index('RepairKitShape(bot'), pass_.index('g_staleGear[botGuid].insert(raw)'))
+        self.assertLess(pass_.index('RepairKitShape(bot'), pass_.index('MarkKitDisplaced(bot, wornBefore)'))
 
     def test_the_refit_runs_after_the_factory_that_it_corrects(self):
         pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
@@ -303,3 +306,43 @@ class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
     def test_inspect_says_what_the_hands_are(self):
         self.assertIn('"  kit: {} ', SOURCE)
         self.assertIn('KitShapeText(bot)', SOURCE)
+
+
+class AWorldUpgradeIsRespected(unittest.TestCase):
+    """playerbots equips a looted item the moment it scores better - which is wanted, and which
+    happens outside our gear pass.
+
+    So the shape is watched on the slow pass too (throttled), a refit prefers what the companion
+    already carries over anything new, and the piece a world drop beat is marked for the vendor
+    instead of rotting in the bags.
+    """
+
+    def test_the_shape_is_watched_between_gear_passes(self):
+        self.assertIn("WatchKitShape(owner, bot);", SOURCE)
+        body = fn_body('void WatchKitShape(Player* owner, Player* bot)')
+        self.assertIn("if (last && now - last < 60)", body)
+        self.assertIn("KitNeedFor(bot->getClass(), role) == KitNeed::None", body)
+        # and it fits the same shape the pass does
+        self.assertIn("RepairKitShape(bot, role)", body)
+
+    def test_a_refit_prefers_what_it_already_carries(self):
+        body = fn_body('bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece)')
+        self.assertIn("FindCarriedKitPiece(bot, piece)", body)
+        self.assertLess(body.index("FindCarriedKitPiece"), body.index("FindKitItem"))
+        carried = fn_body('Item* FindCarriedKitPiece(Player* bot, KitPiece piece)')
+        self.assertIn("item->IsEquipped()", carried)          # never "finds" what is already worn
+        self.assertIn("bot->CanUseItem(proto)", carried)
+
+    def test_a_world_upgrade_leaves_a_cast_off_that_goes_to_the_vendor(self):
+        body = fn_body('void MarkSupersededGear(Player* owner, Player* bot)')
+        self.assertIn("ProfessionToolItems(bot->getClass())", body)     # tools are not cast-offs
+        self.assertIn("CanReleaseItem(bot, owner, item)", body)         # curated and bound are not either
+        self.assertIn("worn->GetTemplate()->ItemLevel <= proto->ItemLevel", body)
+        self.assertIn("SlotForInventoryType(proto->InventoryType)", body)
+        self.assertIn("g_staleGear[botGuid].insert(item->GetGUID().GetRawValue());", body)
+
+    def test_the_slot_map_covers_the_hands(self):
+        body = fn_body('int SlotForInventoryType(uint8 type)')
+        self.assertIn("case INVTYPE_SHIELD: case INVTYPE_HOLDABLE: case INVTYPE_WEAPONOFFHAND: return EQUIPMENT_SLOT_OFFHAND;", body)
+        self.assertIn("case INVTYPE_WEAPON: case INVTYPE_2HWEAPON", body)
+        self.assertIn("default: return -1;", body)
