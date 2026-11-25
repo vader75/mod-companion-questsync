@@ -9721,6 +9721,22 @@ public:
                                      name, CompanionRole(botGuid), CompanionEngage(botGuid),
                                      CompanionQuiet(botGuid) ? "|cffffffffon|r" : "off");
 
+            // Distance is the one setting with no other visible record: a bad role shows up in
+            // the strategies below, a bad formation only shows up as companions standing in the
+            // wrong place. Name it, with the leash it implies and the realm-wide pitch-in radius
+            // it competes with.
+            if (bot)
+            {
+                std::string const formation = EffectiveFormation(player, bot);
+                uint32 const pitchIn = sConfigMgr->GetOption<uint32>("WowLegends.BotPitchIn.Radius", 20);
+
+                if (formation.empty())
+                    handler->PSendSysMessage("  formation: off (distance left to playerbots)");
+                else
+                    handler->PSendSysMessage("  formation: {} (leash {:.0f} yd, pitch-in {} yd)",
+                                             formation, FormationLeash(formation), pitchIn);
+            }
+
             PlayerbotAI* ai = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
             if (ai)
                 handler->PSendSysMessage("  active: {}", StrategySnapshot(ai));

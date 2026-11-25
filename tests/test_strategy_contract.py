@@ -126,6 +126,13 @@ class GapClosers(unittest.TestCase):
     def test_it_is_behind_a_config_switch(self):
         self.assertIn('GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true)', SOURCE)
 
+    def test_inspect_names_the_formation_and_what_it_competes_with(self):
+        body = slice_from("    static bool HandleInspectCommand(", 5600)
+        self.assertIn("std::string const formation = EffectiveFormation(player, bot);", body)
+        self.assertIn("FormationLeash(formation)", body)
+        self.assertIn('GetOption<uint32>("WowLegends.BotPitchIn.Radius", 20)', body)
+        self.assertIn("formation: off (distance left to playerbots)", body)
+
     def test_inspect_says_what_was_withheld(self):
         body = slice_from("    static bool HandleInspectCommand(", 4600)
         self.assertIn("gap closers withheld", body)
