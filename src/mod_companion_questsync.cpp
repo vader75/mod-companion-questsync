@@ -1935,6 +1935,15 @@ namespace
             // agree already: nothing to ask, and nothing to remember about asking
             g_specNotes.erase(botGuid);
             g_specAttempts.erase(botGuid);
+
+            // ...but agreeing on the tree is not the same as having spent everything the level owes.
+            // A body hired at 15 can sit in the right tree holding four unspent points, and the
+            // early return here meant nobody ever put them in.
+            if (bot->GetFreeTalentPoints() != 0)
+                if (uint32 const spent = SpendPointsIntoTree(bot, want); spent)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} put {} more talent point(s) into {}, "
+                                               "which it had not spent yet",
+                             bot->GetName(), spent, wantName);
             return;
         }
 
