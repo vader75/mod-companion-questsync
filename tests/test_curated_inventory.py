@@ -276,7 +276,7 @@ class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
             self.assertNotIn('role == "%s"' % role, need)
 
     def test_a_staff_is_not_a_melee_two_hander(self):
-        body = fn_body('bool RepairKitShape(Player* bot, std::string const& role)')
+        body = fn_body('bool RepairKitShape(Player* bot, std::string const& role,')
         melee = body[body.index('bool const meleeTwoHand'):]
         melee = melee[:melee.index(';')]
         for weapon in ('AXE2', 'MACE2', 'SWORD2', 'POLEARM'):
@@ -285,9 +285,9 @@ class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
         self.assertIn('ITEM_SUBCLASS_WEAPON_STAFF ? "staff"', SOURCE)
 
     def test_the_hands_change_without_the_bags_filling(self):
-        body = fn_body('bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)')
+        body = fn_body('bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId,')
         self.assertIn('/*swap=*/true', body)
-        refit = fn_body('bool RepairKitShape(Player* bot, std::string const& role)')
+        refit = fn_body('bool RepairKitShape(Player* bot, std::string const& role,')
         self.assertIn('bot->GetFreeInventorySpace() < 1', refit)   # one slot for the piece it swaps out
         # the sweep that marks displaced pieces runs after the refit, so swapped pieces are vendored
         pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
@@ -321,12 +321,14 @@ class AWorldUpgradeIsRespected(unittest.TestCase):
         self.assertIn("WatchKitShape(owner, bot);", SOURCE)
         body = fn_body('void WatchKitShape(Player* owner, Player* bot)')
         self.assertIn("if (last && now - last < 60)", body)
-        self.assertIn("KitNeedFor(bot->getClass(), role) != KitNeed::None", body)   # shape roles only
+        self.assertIn("RefitRoleHands(bot, role)", body)
+        refit = fn_body('void RefitRoleHands(Player* bot, std::string const& role)')
+        self.assertIn("KitNeedFor(bot->getClass(), role) == KitNeed::None", refit)
         # and it fits the same shape the pass does
-        self.assertIn("RepairKitShape(bot, role)", body)
+        self.assertIn("RepairKitShape(bot, role)", refit)
 
     def test_a_refit_prefers_what_it_already_carries(self):
-        body = fn_body('bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece)')
+        body = fn_body('bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece,')
         self.assertIn("FindCarriedKitPiece(bot, piece)", body)
         self.assertLess(body.index("FindCarriedKitPiece"), body.index("FindKitItem"))
         carried = fn_body('Item* FindCarriedKitPiece(Player* bot, KitPiece piece)')

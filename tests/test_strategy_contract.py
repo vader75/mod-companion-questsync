@@ -123,7 +123,7 @@ class GapClosers(unittest.TestCase):
         self.assertIn("bot->RemoveSpellCooldown(closer.spell, true);", body)
 
     def test_it_runs_with_the_role_and_on_the_slow_pass(self):
-        self.assertIn("ReconcileRoleSpells(bot, role);", SOURCE)
+        self.assertIn("ReconcileRoleSpells(bot, role);", (ROOT / "src/RoleSwitch.inc").read_text(encoding="utf-8"))
         self.assertIn("ReconcileRoleSpells(bot, CompanionRole(", SOURCE)
 
     def test_it_is_behind_a_config_switch(self):

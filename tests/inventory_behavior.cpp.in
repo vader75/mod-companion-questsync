@@ -146,6 +146,7 @@ void SendDeliveryProgress(Player* target, uint32, char const* state, char const*
     outcomes.emplace_back(state);
 }
 @@LOOKUP@@
+@@OWNER_LOOKUP@@
 @@RECEIPT@@
 struct PendingTrade { uint32 ownerGuid; uint32 nonce; };
 @@CANCELLATION@@

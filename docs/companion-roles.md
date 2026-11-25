@@ -35,11 +35,11 @@ role is set, when the companion arrives, and re-asserted every minute:
 
 | Role | Edits |
 |---|---|
-| `tank` | `+tank` in combat — it is allowed to taunt and hold the fight |
+| `tank` | `+tank` in combat (Druids use `+bear`, Death Knights use `+blood`) — it is allowed to taunt and hold the fight |
 | `healer` | `+heal` in combat, `-tank` and `-pull` — it heals, never taunts, never pulls |
 | `dps` | `-tank`, `-pull` — contributes damage, cannot taunt or pull off you; `+threat` when `quiet` is on |
 | `support` | `-tank`, `-pull` — as `dps`, but expected to be buffing and following your target |
-| `auto` | nothing at all |
+| `auto` | undoes the module's strategy edits, including displaced native spec strategies |
 
 The re-assert matters: playerbots resets a bot's strategies when its spec or level changes,
 so a one-shot apply would quietly lapse and the companion would go back to taunting.
@@ -75,10 +75,12 @@ The strategy names are playerbots' own and they are class-specific — a warrior
 `heal`, a priest has no `tank`. Every add is verified afterwards, and a role the class
 cannot fully satisfy is marked on the card (`Role: healer !`) and said plainly in chat:
 
-> this class has no heal strategy, so that part of the role is not in force — it will
-> fight, just not that way.
+> Some combat strategy changes could not be applied (heal). A strategy marked 'kept'
+> stays active so your companion can still fight.
 
-A failure to establish part of a role is reported, never swallowed.
+A failed add is reported by name; `kept tank` means the tank strategy is still active,
+not missing. Applying a role checks the companion's weapons immediately, independently
+of talent retraining. The periodic gear check still handles later equipment changes.
 
 Known gaps, so nobody expects them:
 
@@ -179,21 +181,10 @@ The module refuses that removal and reports `kept tank` in the role card instead
 
 ## A role change is deliberate, out of combat, and rate-limited
 
-The panel no longer sends a role the moment you click it. Clicking stages it (`Role: dps > tank`),
-and an **Apply** button beside it sends it. That is the whole reason the button exists: a role is
-not a checkbox. It drives strategies today, and it will drive a respec and a gear swap, and five
-clicks in ten seconds is how a companion ends up respeccing in a doorway with a shield it cannot
-use.
-
-The server is the authority, and it refuses the change on two counts:
-
-- **Out of combat** - either the companion or the player fighting. A role that changes mid-swing
-  has to unwind strategies, talents and gear while the bot is being hit; nothing good comes of it.
-  The panel greys Apply with `In fight` and says the same thing if a macro slips past it.
-- **One change per `RoleChangeCooldown`** (60 s by default). Asking for the role it already has is
-  a no-op and does not spend the window, so a mistaken click costs nothing. The remaining seconds
-  travel to the addon in the `Roles` line (`:l<seconds>`), which is why Apply can count down
-  instead of looking broken.
+The panel stages a role (`Role: dps > tank`). **Apply** submits it, and the server waits until
+both characters are out of combat and not trading and the companion is online. The panel also
+shows the remaining per-companion `RoleChangeCooldown` (60 seconds by default), carried in the
+`Roles` line (`:l<seconds>`). A queued change waits for that window without spending it early.
 
 Two smaller things worth knowing. A realm that imported `sql/companion-roles.sql` but not
 `sql/companion-role-lock.sql` still changes roles, it just cannot rate-limit them - the module logs
@@ -217,16 +208,10 @@ off-heals", so a healer tree would be a tree the module then forbids the compani
 tank and a druid cat share feral - the tree survives a role flip, the form does not, which is what
 the druid form rules are for.
 
-Three things gate it, and they are the same three as a role change: the role must not be `auto`
-(the module leaves those alone), the companion must be out of combat, and it must be at or above
-`SpecMinLevel` (40). Below that level the trees are six points wide and a "spec" is theatre, so the
-module records the decision it *would* take in `Server.log` once per session and changes nothing.
-
-From level 40 a companion holds **two** specs, and that is what makes a role flip cheap: the
-tree the role wants is spent into the slot that is not in use, so the tree it was in survives in
-the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe. The second spec is
-granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
-and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
+On the default settings, requested role switches include talents from level 10. Existing realm
+configuration can keep talents off, request logging only, or raise the minimum. The active and
+inactive trees are read from their actual rank entries and `specMask`; the core's `HasTalent`
+lookup ignores its spec argument in this repack.
 
 A better piece picked up in the world is wanted, and playerbots fits it the moment it scores
 higher - outside this module's gear pass. The shape is therefore also watched on the slow pass,
@@ -235,54 +220,31 @@ a shield the companion already carries before it is given a new one, and the pie
 beat is marked for the vendor so it does not rot in the bags. Profession tools, curated deliveries,
 bound items and anything in trade are never marked.
 
-The kit is then checked for *shape*, not score. playerbots picks by score for the spec tab, which
-is right for damage and support and wrong for the two roles that imply a shape: a tank on a class
-that can carry a shield should be holding one, and a healer should not be holding a melee
-two-hander with both hands. If the score-driven kit contradicts that, the module refits the one
-piece itself - a shield and, if needed, a one-hander to hold beside it; a caster one-hander in
-place of a melee two-hander. A staff is left alone, because a staff is what a healer wants. Druid
-tanks and death knights are asked for nothing: for them the two-hander *is* the shape. The piece
-that comes off goes to the bags and is then marked for the vendor, so the hands change without the
-bags filling.
+### Switching loadouts
 
-playerbots fills the trees from a per-level build table, and that table has no entry for the
-levels it was not authored for: `InitTalentsTree` wipes the trees, spends nothing, and reports
-success. Measured at level 15: the retrain logged `no points -> protection`, the trees came back
-empty, and the card said `none`. So from ten points upward - where a tree starts to mean something -
-a retrain that leaves the role's tree empty spends the free points itself: lowest row first, one
-rank at a time, with the core vetting every pick through `LearnTalent`, so prerequisites, tier gates
-and rank caps are its call and not ours. The log says how many points went in and why
-(`no build template for level 15`).
+Apply queues a single request for that companion. If it is offline, either character is in combat
+or trading, or the role cooldown is still running, the existing role stays active. The watcher
+uses the same pending request as Apply. Picking the active role cancels a queued switch.
 
-playerbots re-templates on every level-up, and that reset can wipe what a retrain spent, leaving the
-companion with points in hand and an empty tree. The slow-pass watch that keeps the hands in shape
-therefore keeps the tree too: an empty role tree with free points is refilled from the same routine,
-and only ever by spending points that are actually free.
+The switch snapshots the current hands and talent ranks. It restores the requested role's saved
+weapon/offhand by item GUID or fits a shield and one-hander when a shield-capable tank needs them.
+A switch does not run the general gear factory. Put-down equipment stays in the bags and is
+excluded from QuestSync's sale, trim and curated delivery while reserved for a saved role.
+A hand swap can require two free bag slots. Pending switches and saved loadouts are kept in memory:
+they survive dismissal/logout during the same worldserver run, but not a worldserver restart.
 
-When a retrain does not take, it is not repeated every pass. The module reads the trees back after
-each attempt, retries on a widening interval (30 seconds, two minutes, ten), and after three
-attempts stops and says so once - `is still fury after 3 attempts at protection: leaving its talents
-alone until its level, its role or the trees change`. `inspect` shows the attempt in flight
-(`attempt 2, next in 40s`, or `given up after 3`). A different tree, a level up, or a fresh body
-starts over.
-
-A spec change also re-picks the kit. playerbots dresses a bot from its spec tab, so the gear a
-companion is wearing was chosen for the tree it has just left - a protection warrior in fury's gear
-is dressed for the wrong fight. The two "the kit still fits the level" gates in `LevelGear` are
-bypassed for that one pass (bags, combat and an open trade window are still respected), which is
-why `LevelGear` has to be on for a retrain to re-kit anything.
-
-The pieces such a pass takes off are sold at the next vendor rather than left in the bags.
-playerbots destroys whatever it replaces in a slot, but an offhand put down for a two-hander comes
-back into the bags, and a companion flipping between tank and damage gear would otherwise shed one
-shield per flip. With `SellJunk` off they simply stay; nothing is ever destroyed to make room.
-
-The retrain uses playerbots' own template with a forced tab (`InitTalentsTree`), so the layout is
-one players recognise, at the companion's level rather than level 80. Afterwards the AI is rebuilt,
-because playerbots chooses its strategies from the trees - a retrain that skipped that step would
-leave a protection warrior playing with fury's strategies, which is exactly the bug the role
-strategy edits exist to prevent. `SpecFollowRole = 1` does the whole calculation and stops short of
-the write, so the decision can be watched in the log before it is trusted.
+With `SpecFollowRole = 2` and the `SpecMinLevel` gate met, the switch restores saved ranks or
+builds a default tree with the Playerbots template, then spends any remaining points through the
+core's `LearnTalent`. A matching existing inactive spec can be activated; no new spec is granted.
+Tank → DPS/Support can borrow Auto's saved weapons if no role kit exists, but never Auto's
+talents. A non-Auto switch must verify the mapped tree before it can succeed.
+If a switch would reconcile talents while the companion has a pet, charm, or summon, it is
+refused before changing the loadout. Dismiss the pet or release the controlled unit (or wait
+for a temporary summon to expire), then press **Apply** again.
+With `SpecFollowRole = 0` or `1`, the switch leaves talents alone (`1` logs the intended tree).
+The module verifies the hands, talents (when enabled), and AI strategies before storing the new
+role or announcing success. Failure attempts to restore the prior loadout and does not keep
+retrying automatically. This is an in-process rollback, not an atomic save across a server crash.
 
 ### What the panel says about it
 
@@ -291,9 +253,9 @@ role button's tooltip carries the second half:
 
 | Tooltip | Meaning |
 |---|---|
-| `Talents fury > protection - needs level 40` | the decision is made, the level gate has not opened |
+| `Talents fury > protection - needs level 10` | the decision is made, the level gate has not opened |
 | `Talents fury > protection - server is only logging it` | `SpecFollowRole = 1` |
-| `Talents fury > protection - next out of combat pass` | it will happen on the next settling pass |
+| A mismatch between the displayed tree and role | inspect the current tree and server settings; the tooltip is not proof of a pending request |
 | `Talents protection for the tank role` | the trees already agree with the role |
 | `Talents fury - this role asks nothing of them` | `auto`, or a class that cannot hold the role |
 

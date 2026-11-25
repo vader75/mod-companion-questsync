@@ -92,6 +92,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "WorldSessionMgr.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <deque>
@@ -144,8 +145,8 @@ namespace
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool suppressGapClosers = true;     // take Charge away from a companion that is not tanking
         uint32 roleChangeCooldown = 60;     // seconds between role changes for one companion (0 = off)
-        uint32 specFollowRole = 0;          // 0 off, 1 log the decision, 2 retrain to it
-        uint32 specMinLevel = 40;           // below this the trees are too thin to mean anything
+        uint32 specFollowRole = 2;          // 0 off, 1 log the decision, 2 restore or build talents
+        uint32 specMinLevel = 10;           // the first level with native talent points
         std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -521,7 +522,6 @@ namespace
     /// other side insists on the old one made them trade places every few seconds: "is now tank!",
     /// "is now dps!", a retrain and two whispers each time. A repeat of the role already stored is
     /// a no-op, and a fresh flip inside ten seconds is refused rather than obeyed.
-    std::unordered_map<uint32, uint32> g_roleChangedAt;
 
     /// When a kit item was last created for a body *and slot*, so one unfillable slot does not
     /// throttle the others. Purged with the companion: guids are pooled.
@@ -563,7 +563,6 @@ namespace
 
     /// Companions whose talent state has been reported this boot: one line each, so the log answers
     /// "did it take?" without a per-tick stream.
-    std::set<uint32> g_talentNotes;
     std::set<uint32> g_talentGrantNotes;
 
     /// Last shape check per companion: the hands can change outside our gear pass, so the watch
@@ -582,6 +581,34 @@ namespace
     /// per flip and fills its bags with them. These are sold at the next vendor (never destroyed,
     /// never mailed), and only pieces this module's own pass displaced are ever marked.
     std::unordered_map<uint32, std::set<uint64>> g_staleGear;
+
+    using RoleHands = std::array<ObjectGuid, 2>;
+    using RoleTalents = std::map<uint32, uint8>; // talent DBC id -> zero-based rank
+    struct SavedRoleLoadout
+    {
+        RoleHands hands;
+        RoleTalents talents;
+    };
+    struct RoleSwitchState
+    {
+        uint32 ownerGuid = 0;
+        std::string pending;
+        std::map<std::string, SavedRoleLoadout> saved;
+    };
+    std::map<uint32, RoleSwitchState> g_roleSwitches;
+
+    bool IsSavedRoleItem(uint32 botGuid, ObjectGuid guid)
+    {
+        if (guid.IsEmpty())
+            return false;
+        auto const state = g_roleSwitches.find(botGuid);
+        if (state == g_roleSwitches.end())
+            return false;
+        for (auto const& [role, loadout] : state->second.saved)
+            if (loadout.hands[0] == guid || loadout.hands[1] == guid)
+                return true;
+        return false;
+    }
 
     bool IsStaleGear(uint32 botGuid, Item* item)
     {
@@ -609,7 +636,7 @@ namespace
         uint32 since = 0;           // when the position last changed
     };
     std::map<uint32, IdleTrack> g_ownerIdle;                        // owner guid -> standing still?
-    std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategies this class lacks
+    std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategy changes that did not apply
     std::map<uint32, std::string> g_engageNotes;  // bot guid -> why engagement control is unavailable
     struct AppliedEdit
     {
@@ -758,8 +785,8 @@ namespace
         g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
         g_cfg.suppressGapClosers = sConfigMgr->GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true);
         g_cfg.roleChangeCooldown = sConfigMgr->GetOption<uint32>("CompanionQuestSync.RoleChangeCooldown", 60);
-        g_cfg.specFollowRole = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecFollowRole", 0);
-        g_cfg.specMinLevel = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecMinLevel", 40);
+        g_cfg.specFollowRole = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecFollowRole", 2);
+        g_cfg.specMinLevel = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecMinLevel", 10);
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -1284,13 +1311,17 @@ namespace
 
     ClassRule constexpr kClassRules[] = {
         // druids: bear form is chosen from the Thick Hide aura, so it has to be taken away
-        // explicitly, and cat form has to be asked for
-        { CLASS_DRUID, "dps",     "bear", BOT_STATE_COMBAT, false, 0 },
-        { CLASS_DRUID, "support", "bear", BOT_STATE_COMBAT, false, 0 },
-        { CLASS_DRUID, "healer",  "bear", BOT_STATE_COMBAT, false, 0 },
+        // explicitly; install the replacement before checking whether removal would disarm
         { CLASS_DRUID, "tank",    "bear", BOT_STATE_COMBAT, true,  5487 },   // Bear Form
         { CLASS_DRUID, "dps",     "cat",  BOT_STATE_COMBAT, true,  768  },   // Cat Form
         { CLASS_DRUID, "support", "cat",  BOT_STATE_COMBAT, true,  768  },
+        { CLASS_DRUID, "healer",  "resto", BOT_STATE_COMBAT, true, 0 },
+        { CLASS_DRUID, "dps",     "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DRUID, "support", "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DRUID, "healer",  "bear", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DEATH_KNIGHT, "tank",    "blood", BOT_STATE_COMBAT, true,  0 },
+        { CLASS_DEATH_KNIGHT, "dps",     "blood", BOT_STATE_COMBAT, false, 0 },
+        { CLASS_DEATH_KNIGHT, "support", "blood", BOT_STATE_COMBAT, false, 0 },
     };
 
     /// The strategies that *are* a spec, per class. Removing one of these is not a role change,
@@ -1299,7 +1330,7 @@ namespace
     /// it with no combat actions at all and it stopped engaging.
     constexpr char const* kSpecStrategies[] = {
         "tank", "arms", "fury", "melee", "dps", "cat", "bear", "balance", "resto", "heal",
-        "enh", "ele", "surv", "mm", "bm", "frost", "fire", "arcane", "affli", "demo", "destro",
+        "enh", "ele", "surv", "mm", "bm", "frost", "fire", "arcane", "affli", "demo", "destro", "blood", "unholy",
     };
 
     /// True when taking `removing` away would leave the companion with no combat spec.
@@ -1331,19 +1362,27 @@ namespace
         std::vector<RoleStrategyEdit> edits;
 
         bool const keepPull = (policy == "auto" || policy.empty());
+        bool const classTank = bot && (bot->getClass() == CLASS_DRUID || bot->getClass() == CLASS_DEATH_KNIGHT);
 
         if (role == "tank")
-            edits.push_back({ "tank", BOT_STATE_COMBAT, true });
+        {
+            if (!classTank)
+                edits.push_back({ "tank", BOT_STATE_COMBAT, true });
+        }
         else if (role == "healer")
         {
-            edits.push_back({ "heal", BOT_STATE_COMBAT, true });
-            edits.push_back({ "tank", BOT_STATE_COMBAT, false });
+            if (!classTank)
+            {
+                edits.push_back({ "heal", BOT_STATE_COMBAT, true });
+                edits.push_back({ "tank", BOT_STATE_COMBAT, false });
+            }
             if (!keepPull)
                 edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
         else if (role == "dps" || role == "support")
         {
-            edits.push_back({ "tank", BOT_STATE_COMBAT, false });
+            if (!classTank)
+                edits.push_back({ "tank", BOT_STATE_COMBAT, false });
             if (!keepPull)
                 edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
@@ -1363,11 +1402,11 @@ namespace
         return edits;
     }
 
-    void RevertRoleStrategies(Player* bot);
+    std::string RevertRoleStrategies(Player* bot);
     std::string CompanionEngage(uint32 botGuid);
     void ReconcileRoleSpells(Player* bot, std::string const& role);
-    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role);
-    // defined with the gear code below; a retrain needs to re-pick the kit it was wearing
+    bool ProcessPendingRoleSwitch(Player* owner, Player* bot, uint32 botGuid);
+    // defined with the gear code below
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged = false);
 
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
@@ -1375,33 +1414,43 @@ namespace
     ///
     /// Removals cannot fail in a way worth reporting: a strategy the class does not have is
     /// already absent, which is what the role asked for.
-    std::string ApplyRoleStrategies(Player* bot)
+    std::string ApplyRoleStrategies(Player* bot, std::string const& requested = {})
     {
         std::string missed;
         if (!bot || !bot->IsInWorld())
             return missed;
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
-        std::string const role = CompanionRole(botGuid);
+        std::string const role = requested.empty() ? CompanionRole(botGuid) : requested;
         if (role == "auto")
         {
             // "auto" means "as playerbots had it", so hand back exactly what we took: leaving
             // -tank and +passive in place is what made a companion stop fighting when its
             // setting was put back to auto
-            RevertRoleStrategies(bot);
-            return missed;
+            return RevertRoleStrategies(bot);
         }
 
         PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
         if (!ai)
             return missed;
 
-        std::vector<AppliedEdit> applied;
+        std::vector<AppliedEdit>& applied = g_roleApplied[botGuid];
+        auto const record = [&](std::string const& name, BotState state, bool added)
+        {
+            auto const prior = std::find_if(applied.begin(), applied.end(), [&](AppliedEdit const& old)
+            {
+                return old.name == name && old.state == int(state);
+            });
+            if (prior == applied.end())
+                applied.push_back({ name, int(state), added });
+            else if (prior->added != added)
+                applied.erase(prior);
+        };
 
         bool const quiet = CompanionQuiet(botGuid);
-        ReconcileRoleSpells(bot, role);
 
-        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot, quiet, CompanionEngage(botGuid)))
+        auto const edits = RoleStrategyEdits(role, bot, quiet, CompanionEngage(botGuid));
+        for (RoleStrategyEdit const& edit : edits)
         {
             // never disarm: a removal that would leave no spec at all is refused and reported,
             // because the companion then stands in a fight doing nothing
@@ -1417,7 +1466,13 @@ namespace
             if (edit.add == present)
                 continue;
 
+            auto const before = edit.add ? ai->GetStrategies(edit.state) : std::vector<std::string>{};
             ai->ChangeStrategy(std::string(edit.add ? "+" : "-") + edit.name, edit.state);
+            // The engine automatically removes sibling specs when a replacement is added.
+            // Record those removals too so Auto can restore the native strategy, not just drop ours.
+            for (auto const& name : before)
+                if (!ai->HasStrategy(name, edit.state))
+                    record(name, edit.state, false);
 
             // verify the edit landed, in both directions: a "+tank" that leaves the strategy
             // absent means this class has no such strategy, and a "-bear" that leaves the
@@ -1430,31 +1485,38 @@ namespace
                 missed += edit.add ? edit.name : std::string("-") + edit.name;
             }
             else
-            {
-                applied.push_back({ edit.name, int(edit.state), edit.add });
-            }
+                record(edit.name, edit.state, edit.add);
         }
 
-        g_roleApplied[botGuid] = applied;
+        // Adding another strategy can replace an earlier one in the same strategy group.
+        for (RoleStrategyEdit const& edit : edits)
+            if (ai->HasStrategy(edit.name, edit.state) != edit.add && missed.find(edit.name) == std::string::npos)
+                missed += " " + std::string(edit.name);
         return missed;
     }
 
     /// Undo the role edits this module made, and only those.
-    void RevertRoleStrategies(Player* bot)
+    std::string RevertRoleStrategies(Player* bot)
     {
         if (!bot)
-            return;
+            return "missing companion";
 
         auto const mine = g_roleApplied.find(bot->GetGUID().GetCounter());
         if (mine == g_roleApplied.end())
-            return;
+            return {};
 
         PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
-        if (ai)
-            for (AppliedEdit const& edit : mine->second)
-                ai->ChangeStrategy(std::string(edit.added ? "-" : "+") + edit.name, BotState(edit.state));
-
-        g_roleApplied.erase(mine);
+        if (!ai)
+            return "missing AI";
+        std::string missed;
+        for (auto it = mine->second.rbegin(); it != mine->second.rend(); ++it)
+            ai->ChangeStrategy(std::string(it->added ? "-" : "+") + it->name, BotState(it->state));
+        for (AppliedEdit const& edit : mine->second)
+            if (ai->HasStrategy(edit.name, BotState(edit.state)) == edit.added)
+                missed += " " + edit.name;
+        if (missed.empty())
+            g_roleApplied.erase(mine);
+        return missed;
     }
 
     // --------------------------------------------------------------- quiet
@@ -1642,7 +1704,7 @@ namespace
 
     /// The three trees of each class, in tab order. Kept as words because every line this
     /// produces is read by a person in `inspect` or in Server.log, and "tab 2" tells them nothing.
-    constexpr char const* kSpecTreeNames[11][3] =
+    constexpr char const* kSpecTreeNames[CLASS_DRUID + 1][3] =
     {
         { "?",               "?",             "?" },                 // 0 unused
         { "arms",            "fury",          "protection" },        // warrior
@@ -1654,6 +1716,7 @@ namespace
         { "elemental",       "enhancement",   "restoration" },       // shaman
         { "arcane",          "fire",          "frost" },             // mage
         { "affliction",      "demonology",    "destruction" },       // warlock
+        { "?",               "?",             "?" },                 // 10 unused
         { "balance",         "feral",         "restoration" },       // druid
     };
 
@@ -1665,7 +1728,7 @@ namespace
     /// druid honours `tank` and `dps` the same way at the talent level.
     int RoleSpecTab(uint8 cls, std::string const& role)
     {
-        if (cls < 1 || cls > 10 || role == "auto")
+        if (role == "auto")
             return -1;
 
         bool const tank = role == "tank";
@@ -1724,23 +1787,20 @@ namespace
         for (auto const& entry : bot->GetTalentMap())
         {
             PlayerTalent* talent = entry.second;
-            if (!talent || !talent->IsInSpec(spec))
+            if (!talent || talent->State == PLAYERSPELL_REMOVED || !talent->IsInSpec(spec))
                 continue;
 
-            TalentEntry const* info = ResolveTalentEntry(talent->talentID);
+            TalentEntry const* info = ResolveTalentEntry(entry.first);
             if (!info)
                 continue;
-
             TalentTabEntry const* tabInfo = sTalentTabStore.LookupEntry(info->TalentTab);
             if (!tabInfo || tabInfo->tabpage != tab)
                 continue;
 
-            // the rank is how many of this talent's RankID spells the companion knows
-            uint8 known = 0;
+            // The repack's HasTalent ignores the spec argument. Use the keyed rank and mask.
             for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
-                if (info->RankID[rank] && bot->HasSpell(info->RankID[rank]))
-                    ++known;
-            points += known;
+                if (info->RankID[rank] == entry.first)
+                    points += rank + 1;
         }
         return points;
     }
@@ -1810,14 +1870,15 @@ namespace
                 if (!info)
                     continue;
 
-                // the rank it holds is how many of this talent's RankID spells it knows
                 uint32 rank = 0;
                 for (uint8 r = 0; r < MAX_TALENT_RANK; ++r)
-                    if (info->RankID[r] && bot->HasSpell(info->RankID[r]))
-                        ++rank;
+                    if (info->RankID[r] && bot->HasTalent(info->RankID[r], bot->GetActiveSpec()))
+                        rank = r + 1;
+                if (rank == MAX_TALENT_RANK)
+                    continue;
 
                 uint32 const before = bot->GetFreeTalentPoints();
-                bot->LearnTalent(candidate.second, rank + 1);
+                bot->LearnTalent(candidate.second, rank);
                 if (bot->GetFreeTalentPoints() < before)
                 {
                     ++spent;
@@ -1826,65 +1887,6 @@ namespace
             }
         }
         return spent;
-    }
-
-    std::unordered_map<uint32, std::string> g_specNotes;   // bot guid -> the last decision logged
-
-    /// What was asked of a companion's talents, and how the asking went.
-    ///
-    /// A retrain that does not take is not worth repeating on every slow pass: the module counts
-    /// the attempt, retries on a widening interval, and then stops acting and says so once. That is
-    /// the difference between automation and a loop - and the things the decision actually depends
-    /// on (a different tree, a new level, a fresh login) start it over.
-    struct SpecAttempt
-    {
-        std::string goal;        // the tree the role wanted at the last attempt
-        uint32 tries = 0;
-        uint32 nextAt = 0;       // no attempt before this second
-        uint32 level = 0;        // the level it was tried at; a level up is a new question
-        bool gaveUp = false;
-    };
-    std::unordered_map<uint32, SpecAttempt> g_specAttempts;   // bot guid -> the attempt in flight
-
-    /// Called after a retrain or a spec switch: did the tree actually move?
-    ///
-    /// The trees are read back rather than assumed - a retrain that silently failed is exactly the
-    /// case that used to be retried every thirty seconds for the rest of the session.
-    void VerifySpecAttempt(Player* bot, std::string const& wantName)
-    {
-        if (!bot)
-            return;
-
-        uint32 const botGuid = bot->GetGUID().GetCounter();
-        SpecAttempt& attempt = g_specAttempts[botGuid];
-        attempt.goal = wantName;
-        attempt.level = bot->GetLevel();
-        ++attempt.tries;
-
-        int const now = CurrentSpecTab(bot);
-        if (now >= 0 && wantName == kSpecTreeNames[bot->getClass()][now])
-        {
-            g_specAttempts.erase(botGuid);       // landed: nothing left to remember
-            return;
-        }
-
-        // 30 seconds, two minutes, ten: the first retry is quick because the usual reasons are
-        // temporary (a cast, a trade), and the last is slow because by then it is not happening
-        static constexpr uint32 kBackoff[] = { 30, 120, 600 };
-        if (attempt.tries >= 3)
-        {
-            attempt.gaveUp = true;
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} is still {} after {} attempts at {}: leaving its "
-                                       "talents alone until its level, its role or the trees change",
-                     bot->GetName(), now >= 0 ? kSpecTreeNames[bot->getClass()][now] : "untalented",
-                     attempt.tries, wantName);
-        }
-        else
-        {
-            // the retry itself is not news: it is the same sentence at a longer interval, and
-            // nobody watching the log can tell the difference between that and a real change
-            attempt.nextAt = uint32(time(nullptr)) + kBackoff[attempt.tries - 1];
-        }
     }
 
     /// Make sure the body has the talent points its level owes it.
@@ -1923,177 +1925,6 @@ namespace
                      bot->GetName(), level, allowed, before, after);
         return after != 0;
     }
-
-    /// Make the talents follow the role, on the same terms as everything else: deliberate,
-    /// out of combat, and honest about what it is doing.
-    ///
-    /// At 40+ a companion holds two specs, and the second one is the point of this: the role's
-    /// tree is spent into whichever slot does not hold it, so flipping back is an `ActivateSpec`
-    /// and costs nothing. Below 40, or with one spec, the retrain re-spends the trees with
-    /// playerbots' own template through a forced tab, at the companion's level.
-    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)
-    {
-        // a body hired at a level never got the points that level owes; give them back before
-        // deciding that a retrain cannot work
-        if (GrantOwedTalentPoints(bot))
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} was owed {} talent point(s) at level {}: granted them",
-                     bot->GetName(), bot->GetFreeTalentPoints(), uint32(bot->GetLevel()));
-
-        if (!bot || !g_cfg.specFollowRole || role == "auto")
-            return;
-
-        int const want = RoleSpecTab(bot->getClass(), role);
-        if (want < 0)
-            return;
-
-        uint32 const botGuid = bot->GetGUID().GetCounter();
-        std::string const& wantName = kSpecTreeNames[bot->getClass()][want];
-
-        uint8 const active = bot->GetActiveSpec();
-        int const have = SpecTabOf(bot, active);
-        if (have == want)
-        {
-            // agree already: nothing to ask, and nothing to remember about asking
-            g_specNotes.erase(botGuid);
-            g_specAttempts.erase(botGuid);
-
-            // ...but agreeing on the tree is not the same as having spent everything the level owes.
-            // A body hired at 15 can sit in the right tree holding four unspent points, and the
-            // early return here meant nobody ever put them in.
-            if (bot->GetFreeTalentPoints() != 0)
-                if (uint32 const spent = SpendPointsIntoTree(bot, want); spent)
-                    LOG_INFO("server.loading", "[CompanionQuestSync] {} put {} more talent point(s) into {}, "
-                                               "which it had not spent yet",
-                             bot->GetName(), spent, wantName);
-            return;
-        }
-
-        std::string const haveName = have >= 0 ? kSpecTreeNames[bot->getClass()][have] : std::string("no points");
-
-        if (bot->GetLevel() < g_cfg.specMinLevel)
-        {
-            // one line per companion per session: the decision is made, the level is not there
-            std::string const note = wantName + "@low";
-            if (g_specNotes[botGuid] != note)
-            {
-                g_specNotes[botGuid] = note;
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} is level {}: {} would suit the {} role, "
-                                           "but trees start to mean something at {}",
-                         bot->GetName(), bot->GetLevel(), wantName, role, g_cfg.specMinLevel);
-            }
-            return;
-        }
-
-        if (bot->IsInCombat())
-            return;     // it settles out of combat, like a role change
-
-        if (g_cfg.specFollowRole < 2)
-        {
-            if (g_specNotes[botGuid] != wantName)
-            {
-                g_specNotes[botGuid] = wantName;
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} would retrain {} -> {} for the {} role "
-                                           "(SpecFollowRole=1: logging only)",
-                         bot->GetName(), haveName, wantName, role);
-            }
-            return;
-        }
-
-        // One question at a time: a goal that is already being retried is not re-asked on every
-        // pass, and a goal the module has given up on stays given up until something changes.
-        SpecAttempt& attempt = g_specAttempts[botGuid];
-        if (attempt.goal != wantName || attempt.level != bot->GetLevel())
-        {
-            attempt = SpecAttempt();
-            attempt.goal = wantName;
-            attempt.level = bot->GetLevel();
-        }
-        if (attempt.gaveUp)
-            return;
-        if (attempt.nextAt && uint32(time(nullptr)) < attempt.nextAt)
-            return;
-
-        // Dual spec exists from 40 - the core's rule, not this module's setting - and holding both
-        // trees is what makes a role flip instant instead of a talent wipe, so it is granted to the
-        // companion rather than bought. Keyed on the character's level so that lowering
-        // SpecMinLevel to try the retrain early does not quietly skip the second spec.
-        if (bot->GetLevel() >= 40 && bot->GetSpecsCount() < 2)
-        {
-            bot->UpdateSpecCount(2);
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} now holds two talent specs", bot->GetName());
-        }
-
-        uint8 const other = active == 0 ? 1 : 0;
-        bool const otherUsable = bot->GetSpecsCount() > other;
-
-        // the tree the role wants may already be sitting in the spec that is not active
-        if (otherUsable && SpecTabOf(bot, other) == want)
-        {
-            bot->ActivateSpec(other);
-            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-                ai->Reset();
-            ApplyRoleStrategies(bot);
-            ReconcileRoleSpells(bot, role);
-
-            g_specNotes[botGuid] = wantName;
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} switched to its stored {} spec for the {} role",
-                     bot->GetName(), wantName, role);
-            // playerbots picks equipment from the spec tab, so a new spec means a re-pick; the
-            // kit it is wearing was chosen for the tree it has just left
-            RefreshLevelGear(owner, bot, /*specChanged=*/true);
-            VerifySpecAttempt(bot, wantName);
-            if (owner && owner->GetSession())
-                ChatHandler(owner->GetSession()).PSendSysMessage(
-                    "|cff20ff20{}|r switched to its stored |cffffffff{}|r spec for its |cffffffff{}|r role.",
-                    bot->GetName(), wantName, role);
-            return;
-        }
-
-        // otherwise spend the want into the slot that is not in use, so the old tree survives
-        if (otherUsable)
-            bot->ActivateSpec(other);
-
-        PlayerbotFactory factory(bot, bot->GetLevel());
-        factory.InitTalentsTree(false, true, true, want);
-
-        // The template is per level and silent where it has no entry: the trees come back wiped with
-        // every point unspent, and the retrain still looks like it worked. From ten the role's tree
-        // is worth filling, so the points go in here instead of being left on the floor.
-        if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)
-        {
-            if (uint32 const spent = SpendPointsIntoTree(bot, want); spent)
-                LOG_INFO("server.loading",
-                         "[CompanionQuestSync] {} put {} talent point(s) into {} itself: "
-                         "playerbots has no build template for level {}",
-                         bot->GetName(), spent, wantName, uint32(bot->GetLevel()));
-        }
-
-        // strategies are picked from the trees, so the AI has to be rebuilt from the new ones
-        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-            ai->Reset();
-
-        ApplyRoleStrategies(bot);
-        ReconcileRoleSpells(bot, role);
-
-        // Nothing went in - the level affords no points, or the tree has no entry for it. That is
-        // not a retrain, so it is not announced, re-geared or whispered: the ladder speaks once if
-        // it gives up, and stays quiet every time in between.
-        if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)
-            return;
-
-        g_specNotes[botGuid] = wantName;
-        LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role{}",
-                 bot->GetName(), haveName, wantName, role,
-                 otherUsable ? " (the previous tree is kept in the other spec)" : "");
-        RefreshLevelGear(owner, bot, /*specChanged=*/true);
-        VerifySpecAttempt(bot, wantName);
-
-        if (owner && owner->GetSession())
-            ChatHandler(owner->GetSession()).PSendSysMessage(
-                "|cff20ff20{}|r has retrained as |cffffffff{}|r for its |cffffffff{}|r role.",
-                bot->GetName(), wantName, role);
-    }
-
 
     // --------------------------------------------------------------- engagement
     //
@@ -2411,7 +2242,7 @@ namespace
                 continue;
 
             uint8 const cls = bot->getClass();
-            if (cls < 1 || cls > 10)
+            if (cls < 1 || cls >= std::size(kSpecTreeNames) || cls == 10)
                 continue;
 
             int const have = SpecTabOf(bot, bot->GetActiveSpec());
@@ -2465,6 +2296,8 @@ namespace
         for (uint32 const botGuid : bots)
         {
             Player* bot = FindCompanionPlayer(botGuid);
+            if (ProcessPendingRoleSwitch(owner, bot, botGuid))
+                continue;
             if (!bot || !bot->IsInWorld() || !IsControlledCompanion(bot, owner))
                 continue;
 
@@ -2475,7 +2308,8 @@ namespace
             at = now;
             ReconcilePetTaunt(bot);
             ReconcileRoleSpells(bot, CompanionRole(bot->GetGUID().GetCounter()));
-            ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));
+            if (!owner->IsInCombat() && !bot->IsInCombat() && !owner->GetTradeData() && !bot->GetTradeData())
+                GrantOwedTalentPoints(bot);
             std::string const missed = ApplyRoleStrategies(bot);
             if (missed.empty())
                 g_roleNotes.erase(botGuid);
@@ -6893,27 +6727,33 @@ namespace
         uint16 dest = 0;
         if (bot->CanEquipItem(slot, dest, item, /*swap=*/true) != EQUIP_ERR_OK)
             return false;
-        return bot->EquipItem(dest, item, true) != nullptr;
+        bot->SwapItem(item->GetPos(), dest);
+        return bot->GetItemByPos(dest) == item;
     }
 
-    bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)
+    bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId, std::vector<ObjectGuid>* generated = nullptr)
     {
-        // swap: the piece being replaced goes to the bags, and the sweep that follows the pass
-        // marks it for the vendor, so the hands change without the bags filling up
-        uint16 dest = 0;
-        if (bot->CanEquipNewItem(slot, dest, itemId, /*swap=*/true) != EQUIP_ERR_OK)
+        uint16 equipDest = 0;
+        if (bot->CanEquipNewItem(slot, equipDest, itemId, /*swap=*/true) != EQUIP_ERR_OK)
             return false;
-        return bot->EquipNewItem(dest, itemId, true) != nullptr;
+        ItemPosCountVec bagDest;
+        if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, bagDest, itemId, 1) != EQUIP_ERR_OK)
+            return false;
+        Item* item = bot->StoreNewItem(bagDest, itemId, true);
+        if (item && generated)
+            generated->push_back(item->GetGUID());
+        // Outside a switch, a refused swap leaves the piece for the next carried-item attempt.
+        return item && EquipCarriedKitPiece(bot, slot, item);
     }
 
     /// Fit the best piece of a kind this companion can wear: what it carries first, a new one only
     /// when it owns nothing suitable.
-    bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece)
+    bool FitKitPiece(Player* bot, uint8 slot, KitPiece piece, std::vector<ObjectGuid>* generated = nullptr)
     {
         if (Item* carried = FindCarriedKitPiece(bot, piece))
             return EquipCarriedKitPiece(bot, slot, carried);
         uint32 const fresh = FindKitItem(bot, piece);
-        return fresh && EquipKitPiece(bot, slot, fresh);
+        return fresh && EquipKitPiece(bot, slot, fresh, generated);
     }
 
     /// The hands, in words - for the log and the card, so "refitted" is not the only evidence.
@@ -6994,7 +6834,8 @@ namespace
             if (!item || item->IsEquipped())
                 return;                             // still on the body: the change kept it
             uint64 const raw = item->GetGUID().GetRawValue();
-            if (wornBefore.count(raw) && g_staleGear[botGuid].insert(raw).second)
+            if (wornBefore.count(raw) && !IsSavedRoleItem(botGuid, item->GetGUID()) &&
+                g_staleGear[botGuid].insert(raw).second)
                 ++displaced;
         });
         return displaced;
@@ -7036,9 +6877,10 @@ namespace
     ///
     /// Returns whether anything was refitted. Damage and support roles are left alone on purpose:
     /// for them the best score *is* the answer, and a second opinion would only be taste.
-    bool RepairKitShape(Player* bot, std::string const& role)
+    bool RepairKitShape(Player* bot, std::string const& role, std::vector<ObjectGuid>* generated = nullptr)
     {
-        if (!bot || !bot->IsInWorld() || bot->IsInCombat() || role == "auto")
+        if (!bot || !bot->IsInWorld() || bot->IsInCombat() || role == "auto" ||
+            !bot->IsAlive() || bot->GetTradeData())
             return false;
 
         KitNeed const need = KitNeedFor(bot->getClass(), role);
@@ -7066,14 +6908,12 @@ namespace
             // a two-hander holds both hands, so it has to give way before a shield can go on
             if (mainProto && mainProto->InventoryType == INVTYPE_2HWEAPON)
             {
-                if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::OneHandedWeapon))
+                if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::OneHandedWeapon, generated))
                     return false;                   // no shield without a hand free: say nothing, try next pass
                 changed = true;
             }
 
-            if (!FitKitPiece(bot, EQUIPMENT_SLOT_OFFHAND, KitPiece::Shield))
-                return changed;
-            changed = true;
+            changed = FitKitPiece(bot, EQUIPMENT_SLOT_OFFHAND, KitPiece::Shield, generated) || changed;
         }
         else if (need == KitNeed::CasterWeapon)
         {
@@ -7089,7 +6929,7 @@ namespace
             if (!meleeTwoHand)
                 return false;
 
-            if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::CasterOneHand))
+            if (!FitKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, KitPiece::CasterOneHand, generated))
                 return false;
             changed = true;
         }
@@ -7099,6 +6939,20 @@ namespace
                      bot->GetName(), role, KitShapeText(bot));
         return changed;
     }
+
+    void RefitRoleHands(Player* bot, std::string const& role)
+    {
+        if (KitNeedFor(bot->getClass(), role) == KitNeed::None)
+            return;
+
+        std::set<uint64> const worn = WornGuids(bot);
+        if (RepairKitShape(bot, role))
+            if (uint32 const displaced = MarkKitDisplaced(bot, worn))
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
+                         bot->GetName(), displaced);
+    }
+
+#include "RoleSwitch.inc"
 
     /// The hands can change outside our pass: playerbots equips a world drop the moment it scores
     /// better, and a two-hander picked up by a tank puts the shield back in the bags. So the shape
@@ -7122,38 +6976,11 @@ namespace
 
         // the hands, for the roles that imply a shape - and the bag hygiene for every role, because
         // a world upgrade leaves a cast-off behind whoever the companion is
-        if (KitNeedFor(bot->getClass(), role) != KitNeed::None)
-        {
-            std::set<uint64> const worn = WornGuids(bot);
-            if (RepairKitShape(bot, role))
-            {
-                if (uint32 const displaced = MarkKitDisplaced(bot, worn))
-                    LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
-                             bot->GetName(), displaced);
-            }
-        }
+        auto const requested = g_roleSwitches.find(botGuid);
+        if (requested == g_roleSwitches.end() || requested->second.pending.empty())
+            RefitRoleHands(bot, role);
         MarkSupersededGear(owner, bot);
 
-        // The same watch keeps the talents where the role put them. playerbots re-templates on every
-        // level-up through its own InitTalentsTree(true, ...), and a reset there can wipe what the
-        // retrain spent - leaving a body with points in hand and an empty tree. That state is
-        // repaired here rather than waited out, and only ever by spending points that are free.
-        int const want = RoleSpecTab(bot->getClass(), role);
-        if (g_talentNotes.insert(botGuid).second)   // once per body per boot, not per tick
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} talents: {} point(s) in {}, {} unspent",
-                     bot->GetName(),
-                     want >= 0 ? SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) : 0u,
-                     want >= 0 ? std::string(kSpecTreeNames[bot->getClass()][want]) : std::string("no tree"),
-                     bot->GetFreeTalentPoints());
-
-        if (want >= 0 && bot->GetFreeTalentPoints() && SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) == 0)
-        {
-            if (uint32 const spent = SpendPointsIntoTree(bot, uint8(want)); spent)
-                LOG_INFO("server.loading",
-                         "[CompanionQuestSync] {} put {} talent point(s) back into {} at level {}: "
-                         "the role's tree had been emptied",
-                         bot->GetName(), spent, kSpecTreeNames[bot->getClass()][want], uint32(bot->GetLevel()));
-        }
     }
 
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)
@@ -7185,6 +7012,12 @@ namespace
             return 0;
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
+        auto const roleSwitch = g_roleSwitches.find(botGuid);
+        if (roleSwitch != g_roleSwitches.end() && !roleSwitch->second.pending.empty())
+            return 0;
+        for (ObjectGuid const guid : ReadRoleHands(bot))
+            if (IsSavedRoleItem(botGuid, guid))
+                return 0; // the level factory can destroy a replaced item shared with a saved kit
         uint32 const lastLevel = g_gearLevel[botGuid];
         if (!specChanged && lastLevel && level < lastLevel + CompanionGearStep)
             return 0;
@@ -9711,6 +9544,7 @@ namespace
         }
         if (owner)
             CancelBoundDelivery(botGuid, owner);
+        g_roleSwitches.erase(botGuid);
         PurgeCompanionState(botGuid);
         InvalidateCompanionGuid(ownerGuid);
         g_pendingRelease.push_back({ ownerGuid, botGuid, name, std::chrono::steady_clock::now() + std::chrono::seconds(15) });
@@ -10684,9 +10518,7 @@ public:
 
     /// .companionsync role <companion> [auto|tank|healer|dps|support]
     ///
-    /// Records intent per companion. Nothing about movement or combat changes yet: "auto"
-    /// and every other role behave identically until the strategy and etiquette layers land,
-    /// which is deliberate - the record is worth having before it starts steering anything.
+    /// Queue one verified loadout switch; the previous role is authoritative until it lands.
     static bool HandleRoleCommand(ChatHandler* handler, char const* args)
     {
         CommandReplyScope replies(handler);
@@ -10726,61 +10558,25 @@ public:
             return true;
         }
 
-        // a role that is already set asks nothing of the companion: say so, and do not spend
-        // the window on it
-        if (CompanionRole(botGuid) == RoleOrAuto(role))
-            return true;                       // already this: nothing to change, nothing to say
+        if (!HasCurrentCustody(ownerGuid, botGuid, true))
+            return true;
 
-        Player* botBefore = FindCompanionPlayer(botGuid);
-        if (std::string const refusal = RoleChangeRefusal(player, botBefore, botGuid); !refusal.empty())
+        RoleSwitchState& state = g_roleSwitches[botGuid];
+        if (state.ownerGuid != ownerGuid)
+            state = RoleSwitchState{ ownerGuid };
+        if (CompanionRole(botGuid) == role)
         {
-            handler->PSendSysMessage("|cffff8000role|r: {}.", refusal);
+            state.pending.clear();             // choosing the applied role cancels a queued switch
             return true;
         }
-
-        // two things send roles - the operator and the addon re-sending what it remembers - and
-        // obeying both when they disagree made them trade places every few seconds, each flip
-        // costing a retrain and a whisper
-        if (uint32 const last = g_roleChangedAt[botGuid]; last && time(nullptr) - last < 10)
-        {
-            LOG_INFO("server.loading", "[CompanionQuestSync] ignored a second role change for {} inside 10s ({})",
-                     a[0], role);
+        if (state.pending == role)
             return true;
-        }
 
-        if (!SetCompanionRole(ownerGuid, botGuid, role))
-        {
-            handler->PSendSysMessage("|cffff8000role|r: could not store {} as {}.", a[0], role);
-            return true;
-        }
-
-        g_roleChangedAt[botGuid] = uint32(time(nullptr));
-
-        handler->PSendSysMessage("|cff20ff20{}|r is now |cffffffff{}|r.", a[0], role);
-
-        // a new role asks for new talents as well; the same three rules apply (out of combat,
-        // once the window has passed, and only when the operator asked for it)
-        ReconcileCompanionSpec(player, botBefore, role);
-
-        Player* bot = FindCompanionPlayer(botGuid);
-        if (!bot || !bot->IsInWorld())
-        {
-            handler->PSendSysMessage("  It applies the moment {} is summoned.", a[0]);
-        }
-        else if (std::string const missed = ApplyRoleStrategies(bot); !missed.empty())
-        {
-            g_roleNotes[botGuid] = missed;
-            handler->PSendSysMessage("  |cffffd200this class has no {} strategy|r, so that part of "
-                                     "the role is not in force - it will fight, just not that way.",
-                                     missed);
-        }
-        else
-        {
-            g_roleNotes.erase(botGuid);
-        }
-        g_roleApplyAt[botGuid] = static_cast<uint32>(time(nullptr));
-
-        SendRoleAndSpecLines(player, ownerGuid);
+        state.pending = role;
+        ProcessPendingRoleSwitch(player, FindCompanionPlayer(botGuid), botGuid);
+        if (auto const queued = g_roleSwitches.find(botGuid);
+            queued != g_roleSwitches.end() && !queued->second.pending.empty())
+            handler->PSendSysMessage("{} will switch to {} when ready; the current role is unchanged.", a[0], role);
         return true;
     }
 
@@ -10950,7 +10746,7 @@ public:
             else
                 handler->PSendSysMessage("  active: no AI (not summoned, or not a bot)");
 
-            if (g_cfg.specFollowRole && CompanionRole(botGuid) != "auto")
+            if (bot && g_cfg.specFollowRole && CompanionRole(botGuid) != "auto")
             {
                 int const want = RoleSpecTab(bot->getClass(), CompanionRole(botGuid));
                 int const have = CurrentSpecTab(bot);
@@ -10959,19 +10755,6 @@ public:
                     std::string const haveName = have >= 0 ? kSpecTreeNames[bot->getClass()][have]
                                                            : std::string("no points yet");
                     std::string mode = g_cfg.specFollowRole >= 2 ? "" : " (dry run)";
-                    auto const inFlight = g_specAttempts.find(botGuid);
-                    if (inFlight != g_specAttempts.end() && inFlight->second.tries)
-                    {
-                        if (inFlight->second.gaveUp)
-                            mode += ", given up after " + std::to_string(inFlight->second.tries);
-                        else
-                        {
-                            mode += ", attempt " + std::to_string(inFlight->second.tries);
-                            uint32 const second = uint32(time(nullptr));
-                            if (inFlight->second.nextAt > second)
-                                mode += ", next in " + std::to_string(inFlight->second.nextAt - second) + "s";
-                        }
-                    }
                     handler->PSendSysMessage("  spec: {} |cff9d9d9drole {} wants {}{}|r",
                                              haveName, CompanionRole(botGuid),
                                              kSpecTreeNames[bot->getClass()][want], mode);
@@ -11325,6 +11108,7 @@ public:
             return true;
         }
         CancelBoundDelivery(botGuid, player);
+        g_roleSwitches.erase(botGuid);
         PurgeCompanionState(botGuid);
         InvalidateCompanionGuid(ownerGuid);
 

@@ -39,7 +39,8 @@
 
     bool CanReleaseItem(Player* bot, Player* owner, Item const* item)
     {
-        return CanReleaseTemplate(bot, owner, item->GetTemplate());
+        return !IsSavedRoleItem(bot->GetGUID().GetCounter(), item->GetGUID()) &&
+               CanReleaseTemplate(bot, owner, item->GetTemplate());
     }
 
     bool IsCraftedSupply(uint16 profession, uint32 entry)

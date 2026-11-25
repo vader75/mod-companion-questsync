@@ -288,25 +288,22 @@ CompanionQuestSync.SuppressGapClosers = 1
 
 # A role is not a checkbox: it drives strategies, and it will drive a respec and a gear swap.
 # So a companion may be given a new role once per this many seconds, and only out of combat -
-# either the companion or the player fighting refuses the change. The addon's Apply button
+# a pending change waits while either character is fighting or trading. The addon's Apply button
 # counts the window down with the number the server reports. 0 disables the rate limit (the
 # out-of-combat rule stays). Needs sql/companion-role-lock.sql.
 # Default: 60
 CompanionQuestSync.RoleChangeCooldown = 60
 
 # Whether the companion's talents follow its role.
-# 0 = leave talents alone, 1 = work out the tree the role wants and log it, 2 = retrain to it.
-# A retrain re-spends the trees with playerbots' own template at the companion's level, then
-# rebuilds its AI (strategies are chosen from the trees), so it is refused in combat exactly
-# like a role change. At 40+ the companion is given a second spec and the wanted tree is spent
-# into the slot that is not in use, so the previous tree survives and flipping back is instant. `support` uses the damage tree on purpose: support never off-heals here.
-# Default: 0
-CompanionQuestSync.SpecFollowRole = 0
+# 0 = leave talents alone, 1 = log the intended tree, 2 = restore or build that tree when
+# applying a role switch. Talent changes are verified with the hand kit and strategies before
+# the role is stored. Existing matching specs can be reused, but none are granted automatically.
+# Default: 2
+CompanionQuestSync.SpecFollowRole = 2
 
-# A tree below this level is too thin to be a spec (a level 15 warrior has six points).
-# Below it the module still records the decision it would make, in Server.log, once per session.
-# Default: 40
-CompanionQuestSync.SpecMinLevel = 40
+# Below this level a role switch changes its kit and strategies, not its talents.
+# Default: 10
+CompanionQuestSync.SpecMinLevel = 10
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.

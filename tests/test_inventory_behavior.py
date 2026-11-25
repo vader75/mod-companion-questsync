@@ -37,7 +37,8 @@ class InventoryBehavior(unittest.TestCase):
             'PLAN': fragment(POLICY, '    static std::vector<std::pair<ObjectGuid, uint32>> PlanDelivery',
                              '    static bool DeliveryStillValid'),
             'RECEIPT_TYPE': fragment(WORLD, '    struct DeliveryReceipt', '    void SendProtocolLine'),
-            'LOOKUP': fragment(WORLD, '    Player* FindCompanionPlayer(uint32 botGuid)\n', '    static bool CanTradeSurplusNow'),
+            'LOOKUP': fragment(WORLD, '    Player* FindCompanionPlayer(uint32 botGuid)\n', '    /// `Roles '),
+            'OWNER_LOOKUP': fragment(WORLD, '    static Player* FindDeliveryOwner', '    static bool CanTradeSurplusNow'),
             'RECEIPT': fragment(WORLD, '    static void ApplyDeliveryReceipts', '    static void CancelPendingDelivery'),
             'CANCELLATION': fragment(WORLD, '    static void CancelPendingDelivery', '    static void CancelBoundDelivery'),
         }

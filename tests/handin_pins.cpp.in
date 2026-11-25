@@ -125,10 +125,10 @@ int main()
     // No negotiation: old wire grammar and no promised ender for Bob or Charlie.
     assert(BuildPinLine(&owner) == "40,50,g=Stew:1/3,z=Westfall|45,51,h=Stew,z=Westfall");
     g_pinRevisions[99] = { false };
-    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45,51,h=Stew@Amy,z=Westfall");
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45,51,h=Stew@Amy + Stew@Charlie,z=Westfall");
     g_pinRevisions[99] = { true };
-    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy,z=Westfall|"
-                                   "45.0000,51.0000,p=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,u=Stew@Charlie,z=Westfall");
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|"
+                                   "45.0000,51.0000,h=Stew@Amy + Stew@Bob:1/3 + Stew@Charlie,z=Westfall");
     store.quest.RequiredItemId[0] = 7;
     store.quest.RequiredItemId[1] = 8;
     store.quest.RequiredItemCount[0] = 15;
@@ -140,25 +140,24 @@ int main()
     charlie.bags = amy.bags;
     assert(BuildPinLine(&owner).find("~i=") == std::string::npos); // Old hand-in client.
     g_pinRevisions[99].pinItems = true;
-    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy,z=Westfall|"
-                                   "45.0000,51.0000,p=Stew@Bob:1/3~i=12/15/526564204c6561746865722042616e64616e61,z=Westfall|"
-                                   "45.0000,51.0000,u=Stew@Charlie,z=Westfall");
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Bob:1/3,z=Westfall|45.0000,51.0000,h=Stew@Amy + "
+                                   "Stew@Bob:1/3~i=12/15/526564204c6561746865722042616e64616e61 + Stew@Charlie,z=Westfall");
     bob.bags[7] = 15;
     bob.bags[8] = 0;
-    assert(BuildPinLine(&owner).find("p=Stew@Bob:1/3~i=0/2/c3897c2b3b2c3d,z=Westfall") != std::string::npos);
+    assert(BuildPinLine(&owner).find("Stew@Bob:1/3~i=0/2/c3897c2b3b2c3d + Stew@Charlie") != std::string::npos);
     store.items[8].Name1 = std::string(44, 'a') + "Éabc";
     std::string expected = "~i=0/2/";
     for (int i = 0; i < 44; ++i)
         expected += "61";
-    assert(BuildPinLine(&owner).find(expected + "2e2e2e,z=Westfall") != std::string::npos);
+    assert(BuildPinLine(&owner).find(expected + "2e2e2e + Stew@Charlie") != std::string::npos);
     assert(BuildPinLine(&owner, false).find("~i=") == std::string::npos);
     g_pinRevisions[99].pinItems = false;
     amy.giver = nullptr; // Out of range is not work left and never gold.
     charlie.status = QUEST_STATUS_COMPLETE;
     charlie.bags[7] = 0;
     bob.status = QUEST_STATUS_FAILED;
-    assert(BuildPinLine(&owner) == "40,50,g=Stew@Charlie:1/3,z=Westfall|45.0000,51.0000,p=Stew@Charlie:1/3,z=Westfall|"
-                                   "45.0000,51.0000,u=Stew@Amy,z=Westfall");
+    assert(BuildPinLine(&owner) == "40,50,g=Stew@Charlie:1/3,z=Westfall|"
+                                   "45.0000,51.0000,u=Stew@Amy + Stew@Charlie:1/3,z=Westfall");
     charlie.status = QUEST_STATUS_REWARDED;
     spawns.front().zone = 0; // Use the spot's own map/phase when probing the zone.
     spawns.front().y = 100.0f; // Exact edge on reverse bounds must not serialize as negative zero.

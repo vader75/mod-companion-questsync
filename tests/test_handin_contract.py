@@ -24,7 +24,7 @@ class HandInContract(unittest.TestCase):
             ('    struct EnderPin', '    /// "map 52, 34"'),
             ('    std::optional<EnderPin> PlotEnder(EnderSpot const& spot)\n', '    /// content-keyed, bounded by the quests'),
             ('    WorldObject* FindReadyQuestEnder(Player* bot, Quest const* quest)\n', '    void DeliverHandIns('),
-            ('    std::string SafePinName(', '    /// How far each companion'),
+            ('    inline std::string TruncateUtf8(', '    /// How far each companion'),
             ('    // The per-copy suffix', '    /// Send the pin line'),
         ):
             start = SOURCE.index(first)

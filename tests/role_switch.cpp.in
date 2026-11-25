@@ -1,0 +1,281 @@
+#include <array>
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <ctime>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+using uint8 = uint8_t;
+using uint32 = uint32_t;
+constexpr int CLASS_DRUID=11, CLASS_DEATH_KNIGHT=6;
+struct ObjectGuid {
+    uint32 id = 0;
+    bool IsEmpty() const { return id == 0; }
+    uint32 GetRawValue() const { return id; }
+    uint32 GetCounter() const { return id; }
+    bool operator==(ObjectGuid const&) const = default;
+};
+using RoleHands = std::array<ObjectGuid, 2>;
+using RoleTalents = std::map<uint32, uint8>;
+struct SavedRoleLoadout { RoleHands hands; RoleTalents talents; };
+struct RoleSwitchState { uint32 ownerGuid; std::string pending; std::map<std::string, SavedRoleLoadout> saved; };
+std::map<uint32, RoleSwitchState> g_roleSwitches;
+std::map<uint32, std::set<int>> g_staleGear;
+struct AppliedEdit { std::string name; int state; bool added; };
+std::map<uint32, std::vector<AppliedEdit>> g_roleApplied;
+std::map<uint32, int> g_roleNotes, g_roleApplyAt;
+enum BotState { BOT_STATE_COMBAT, BOT_STATE_NON_COMBAT, BOT_STATE_DEAD, BOT_STATE_MAX };
+using StrategySnapshot = std::array<std::vector<std::string>, BOT_STATE_MAX>;
+struct PlayerbotAI {
+    StrategySnapshot strategies;
+    std::vector<std::string> GetStrategies(BotState state) { return strategies[state]; }
+    bool HasStrategy(std::string const& name, BotState state) {
+        auto const& names=strategies[state];
+        return std::find(names.begin(), names.end(), name)!=names.end();
+    }
+    std::string tankAlias="tank";
+    void ChangeStrategy(std::string const& change, BotState state) {
+        auto& names=strategies[state];
+        auto const name=change.substr(1);
+        std::erase(names,name);
+        if (change.front()=='+') {
+            for (auto const& siblings : {std::set<std::string>{"bear","cat","resto"},
+                                          std::set<std::string>{"blood","frost","unholy"}})
+                if (siblings.contains(name))
+                    std::erase_if(names,[&](auto const& existing) { return siblings.contains(existing); });
+            names.push_back(name == "tank" ? tankAlias : name);
+        }
+    }
+    void ResetStrategies() { strategies = {}; }
+};
+constexpr int INVENTORY_SLOT_BAG_0=0, EQUIPMENT_SLOT_MAINHAND=0, EQUIPMENT_SLOT_OFFHAND=1;
+constexpr int ITEM_CLASS_WEAPON=1, INVTYPE_2HWEAPON=2;
+struct Item {
+    int Class=ITEM_CLASS_WEAPON, InventoryType=INVTYPE_2HWEAPON;
+    Item* GetTemplate() { return this; }
+    int GetBagSlot() { return 0; }
+    int GetSlot() { return 0; }
+};
+struct Player {
+    ObjectGuid guid{2};
+    bool busy=false, trading=false;
+    ObjectGuid pet, m_SummonSlot[4];
+    std::set<int> m_Controlled;
+    int klass=1, specCalls=0;
+    unsigned spaces=10, free=0;
+    RoleHands hands{{{11}, {0}}};
+    RoleTalents talents{{101,2}};
+    PlayerbotAI ai{{{{"dps"}, {"follow"}, {}}}};
+    Item weapon;
+    ObjectGuid GetGUID() { return guid; }
+    Player* GetSession() { return this; }
+    bool IsNonMeleeSpellCast(bool) { return false; }
+    const char* GetName() { return "bot"; }
+    uint8 GetActiveSpec() { return 0; }
+    uint8 GetSpecsCount() { return 1; }
+    void ActivateSpec(uint8) {}
+    uint32 GetFreeTalentPoints() { return free; }
+    void SetFreeTalentPoints(uint32 n) { free=n; }
+    uint32 GetLevel() { return 40; }
+    uint32 CalculateTalentsPoints() { return 31; }
+    int getClass() { return klass; }
+    ObjectGuid GetCharmGUID() { return {}; }
+    uint32 GetTemporaryUnsummonedPetNumber() { return 0; }
+    void InitTalentForLevel() { ++specCalls; }
+    bool IsInWorld() { return true; }
+    bool HasSpell(uint32) { return true; }
+    ObjectGuid GetPetGUID() { return pet; }
+    unsigned GetFreeInventorySpace() { return spaces; }
+    Item* GetItemByPos(int,int) { return &weapon; }
+    void DestroyItem(int,int,bool) { assert(false); }
+};
+std::string applied;
+int writes, confirms, refusals, publishes;
+bool custody=true, failStore=false, failStrategy=false;
+struct ChatHandler {
+    ChatHandler(Player*) {}
+    template<class... Args> void PSendSysMessage(std::string const& fmt, Args...) {
+        if (fmt.find("is now") != std::string::npos) ++confirms; else ++refusals;
+    }
+};
+#define LOG_ERROR(...) ((void)0)
+#define LOG_INFO(...) ((void)0)
+#define GET_PLAYERBOT_AI(p) (&(p)->ai)
+struct { unsigned specFollowRole=2, specMinLevel=10; } g_cfg;
+constexpr char const* kSpecTreeNames[2][3] = {{}, {"arms", "fury", "protection"}};
+enum class KitNeed { Shield };
+enum class KitPiece { OneHandedWeapon };
+KitNeed KitNeedFor(int, std::string const&) { return KitNeed::Shield; }
+bool HasCurrentCustody(uint32, uint32, bool) { return custody; }
+bool CanManageBags(Player* owner, Player* bot) {
+    return bot && !owner->busy && !bot->busy && !owner->trading && !bot->trading;
+}
+bool IsControlledCompanion(Player*, Player*) { return true; }
+std::string RoleChangeRefusal(Player*,Player*,uint32) { return {}; }
+std::string CompanionRole(uint32) { return applied; }
+bool CompanionQuiet(uint32) { return false; }
+std::string CompanionEngage(uint32) { return "auto"; }
+bool SetCompanionRole(uint32,uint32,std::string const& role) { ++writes; if(failStore) return false; applied=role; return true; }
+void SendRoleAndSpecLines(Player*,uint32) { ++publishes; }
+void ReconcileRoleSpells(Player*,std::string const&) {}
+void ReconcilePetTaunt(Player*) {}
+int RoleSpecTab(int,std::string const& role) { return role=="auto" ? -1 : role=="tank" ? 2 : 1; }
+RoleHands ReadRoleHands(Player* p) { return p->hands; }
+RoleTalents ReadRoleTalents(Player* p,uint8) { return p->talents; }
+Item* FindRoleHand(Player* p, ObjectGuid) { return &p->weapon; }
+bool RestoreRoleHands(Player* p, RoleHands const& h) { p->hands=h; return true; }
+bool CanStowRoleHand(Player*, uint8) { return true; }
+bool RestoreRoleTalents(Player* p, RoleTalents const& t) { p->talents=t; return true; }
+int CurrentSpecTab(Player* p) { return p->talents.empty() ? -1 : int(p->talents.begin()->first)-100; }
+int SpecTabOf(Player* p, uint8) { return CurrentSpecTab(p); }
+void SpendPointsIntoTree(Player*, uint8) {}
+struct PlayerbotFactory {
+    Player* p;
+    PlayerbotFactory(Player* bot, uint32) : p(bot) {}
+    void InitTalentsTree(bool, bool, bool, int want) { p->talents={{uint32(want+100),3}}; p->free=0; }
+};
+// PRODUCTION_SPEC
+bool RoleHandsFit(Player* p,std::string const& role) { return role != "tank" || p->hands[1].id == 22; }
+bool FitKitPiece(Player* p,int,KitPiece,std::vector<ObjectGuid>*) { p->hands[0]={21}; return true; }
+void RepairKitShape(Player* p,std::string const&,std::vector<ObjectGuid>*) { p->hands[1]={22}; }
+std::string FixtureRevertRoleStrategies(Player*) { return {}; }
+bool RestoreRoleStrategies(PlayerbotAI* ai, StrategySnapshot const& snapshot,uint8 first=0) {
+    for(unsigned i=first;i<snapshot.size();++i) ai->strategies[i]=snapshot[i]; return true;
+}
+std::string FixtureApplyRoleStrategies(Player* p,std::string const& role) {
+    p->ai.strategies[0]={role}; return failStrategy ? "missing" : "";
+}
+
+#define ApplyRoleStrategies FixtureApplyRoleStrategies
+#define RevertRoleStrategies FixtureRevertRoleStrategies
+// PRODUCTION_PROCESS
+#undef ApplyRoleStrategies
+#undef RevertRoleStrategies
+
+// PRODUCTION_EDITS
+
+int main(int argc, char** argv)
+{
+    Player owner, bot;
+    owner.guid={1};
+    std::string const scenario = argc > 1 ? argv[1] : "round-trip";
+    if (scenario == "strategies")
+    {
+        for (auto [klass, name] : {std::pair{CLASS_DRUID, "bear"}, std::pair{CLASS_DEATH_KNIGHT, "blood"}})
+        {
+            bot.klass=klass;
+            bot.ai.tankAlias=name;
+            auto const tank=RoleStrategyEdits("tank", &bot, false, "auto");
+            assert(tank.size()==1 && tank[0].add && std::string(tank[0].name)==name);
+            for (auto role : {"dps", "support"})
+            {
+                auto const edits=RoleStrategyEdits(role, &bot, false, "auto");
+                assert(std::count_if(edits.begin(), edits.end(), [&](auto e) {
+                    return !e.add && std::string(e.name)==name;
+                })==1);
+                assert(std::none_of(edits.begin(), edits.end(), [](auto e) { return std::string(e.name)=="tank"; }));
+            }
+            std::string const native=klass==CLASS_DRUID ? "cat" : "frost";
+            bot.ai.strategies[BOT_STATE_COMBAT]={native};
+            assert(ApplyRoleStrategies(&bot,"tank").empty() && bot.ai.HasStrategy(name,BOT_STATE_COMBAT));
+            assert(!bot.ai.HasStrategy(native,BOT_STATE_COMBAT));
+            assert(ApplyRoleStrategies(&bot,"auto").empty() && bot.ai.HasStrategy(native,BOT_STATE_COMBAT));
+            assert(!bot.ai.HasStrategy(name,BOT_STATE_COMBAT));
+        }
+        bot.klass=CLASS_DRUID;
+        bot.ai.strategies[BOT_STATE_COMBAT]={"bear"};
+        assert(ApplyRoleStrategies(&bot,"dps").empty() && bot.ai.HasStrategy("cat",BOT_STATE_COMBAT));
+        assert(!bot.ai.HasStrategy("bear",BOT_STATE_COMBAT));
+        assert(ApplyRoleStrategies(&bot,"auto").empty() && bot.ai.HasStrategy("bear",BOT_STATE_COMBAT));
+        return 0;
+    }
+    if (scenario == "controlled")
+    {
+        applied="dps";
+        bot.pet={20};
+        for (int kind=0; kind<3; ++kind)
+        {
+            g_roleSwitches[2]={1,"tank",{}};
+            assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+            assert(!bot.specCalls && !writes && !confirms && g_roleSwitches[2].pending.empty());
+            bot.pet={};
+            bot.m_Controlled.clear();
+            if (kind==0) bot.m_Controlled.insert(20);
+            bot.m_SummonSlot[0]={kind==1 ? 20u : 0u};
+        }
+        assert(refusals==3);
+        g_cfg.specFollowRole=0;
+        bot.pet={20};
+        g_roleSwitches[2]={1,"tank",{{"tank", {bot.hands, {{102,3}}}}}};
+        auto const before=bot.talents;
+        assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+        assert(writes==1 && confirms==1 && bot.pet.id==20 && !bot.specCalls && bot.talents==before);
+        return 0;
+    }
+    if (scenario == "gear-only")
+    {
+        applied="tank";
+        bot.hands={{{21}, {22}}};
+        bot.talents={{102,3}};
+        RoleHands const autoHands{{{11}, {0}}};
+        g_roleSwitches[2]={1,"dps",{{"auto", {autoHands, {{102, 3}}}}}};
+        assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+        assert(applied=="dps" && bot.hands==autoHands && (bot.talents==RoleTalents{{101,3}}));
+        return 0;
+    }
+    if (scenario == "wrong-tree")
+    {
+        applied="tank";
+        bot.talents={{102,3}};
+        auto const before=bot.talents;
+        g_roleSwitches[2]={1,"dps",{{"dps", {bot.hands, {{100, 3}}}}}};
+        assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+        assert(!writes && !confirms && refusals==1 && applied=="tank" && bot.talents==before);
+        return 0;
+    }
+    applied="dps";
+    auto const dpsHands=bot.hands;
+    auto const dpsTalents=bot.talents;
+    auto const dpsStrategies=bot.ai.strategies;
+    g_roleSwitches[2]={1,"tank",{}};
+    g_staleGear[2].insert(11);
+    assert(ProcessPendingRoleSwitch(&owner,nullptr,2));
+    owner.busy=true;
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(applied=="dps" && !writes && !confirms && bot.hands==dpsHands && bot.talents==dpsTalents);
+    owner.busy=false;
+    bot.trading=true;
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(g_roleSwitches[2].pending=="tank" && !writes && !confirms && bot.hands==dpsHands);
+    bot.trading=false;
+    bot.spaces=1;
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(!writes && refusals==1 && bot.hands==dpsHands);
+    bot.spaces=10;
+    g_roleSwitches[2].pending="tank";
+    failStrategy=true;
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(!writes && refusals==2 && !confirms && !publishes && g_roleSwitches[2].pending.empty());
+    assert(bot.hands==dpsHands && bot.talents==dpsTalents && bot.ai.strategies==dpsStrategies);
+    failStrategy=false;
+    failStore=true;
+    g_roleSwitches[2].pending="tank";
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(writes==1 && refusals==3 && !confirms && !publishes && applied=="dps");
+    assert(bot.hands==dpsHands && bot.talents==dpsTalents && bot.ai.strategies==dpsStrategies);
+    failStore=false;
+    g_roleSwitches[2].pending="tank";
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(writes==2 && confirms==1 && publishes==1 && applied=="tank");
+    assert(bot.hands[0].id==21 && bot.hands[1].id==22 && g_staleGear[2].empty());
+    assert(g_roleSwitches[2].saved.at("dps").hands==dpsHands);
+    assert(!ProcessPendingRoleSwitch(&owner,&bot,2) && confirms==1);
+    auto const tankHands=bot.hands;
+    g_roleSwitches[2].pending="dps";
+    assert(ProcessPendingRoleSwitch(&owner,&bot,2));
+    assert(writes==3 && confirms==2 && publishes==2 && applied=="dps");
+    assert(bot.hands==dpsHands && bot.talents==dpsTalents && bot.ai.strategies==dpsStrategies);
+    assert(g_roleSwitches[2].saved.at("tank").hands==tankHands);
+}

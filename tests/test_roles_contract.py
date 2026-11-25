@@ -10,6 +10,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src" / "mod_companion_questsync.cpp").read_text(encoding="utf-8")
+WORKFLOW = (ROOT / "src" / "RoleSwitch.inc").read_text(encoding="utf-8")
 SQL = (ROOT / "sql" / "companion-roles.sql").read_text(encoding="utf-8")
 DOC = (ROOT / "docs" / "companion-roles.md").read_text(encoding="utf-8")
 UI = (ROOT / "addon" / "CompanionSync" / "UI.lua").read_text(encoding="utf-8")
@@ -77,11 +78,11 @@ class StrategyContract(unittest.TestCase):
     def test_auto_touches_nothing(self):
         body = slice_from("    std::vector<RoleStrategyEdit> RoleStrategyEdits(")
         self.assertIn("    else\n            return edits;   // auto: the module keeps its hands off", body)
-        apply_body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        apply_body = slice_from("    std::string ApplyRoleStrategies(Player* bot,")
         self.assertIn('if (role == "auto")', apply_body)
 
     def test_an_edit_that_did_not_take_is_verified_then_reported(self):
-        body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        body = SOURCE.split("    std::string ApplyRoleStrategies(Player* bot,", 1)[1].split("    /// Undo the role edits", 1)[0]
         self.assertIn("ai->ChangeStrategy(std::string(edit.add ? \"+\" : \"-\") + edit.name, edit.state);",
                       body)
         self.assertIn("if (ai->HasStrategy(edit.name, edit.state) != edit.add)", body)
@@ -104,8 +105,18 @@ class StrategyContract(unittest.TestCase):
 
     def test_a_shortfall_is_named_not_swallowed(self):
         body = handler_body()
-        self.assertIn("this class has no {} strategy", body)
+        self.assertNotIn("this class has no {} strategy", body)
+        self.assertIn("could not switch to", WORKFLOW)
         self.assertIn('line += ":na";', SOURCE)
+
+    def test_role_change_checks_hands_without_waiting_for_the_gear_watch(self):
+        self.assertIn("RepairKitShape(bot, role, &generated)", WORKFLOW)
+
+    def test_role_gear_uses_a_native_swap_and_verifies_the_destination(self):
+        body = slice_from("    bool EquipCarriedKitPiece(", 560)
+        self.assertIn("bot->SwapItem(item->GetPos(), dest)", body)
+        self.assertIn("bot->GetItemByPos(dest) == item", body)
+        self.assertNotIn("bot->EquipItem(", body)
 
     def test_support_does_not_heal_by_itself(self):
         # support is "stay out of the tank's way", not "off-heal": it must not add a heal
@@ -165,7 +176,7 @@ class StrategyContract(unittest.TestCase):
         self.assertIn("RoleStrategyEdits(role, bot, quiet, CompanionEngage(botGuid))", source)
 
     def test_a_removal_that_did_not_take_is_reported_as_well(self):
-        body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")
+        body = SOURCE.split("    std::string ApplyRoleStrategies(Player* bot,", 1)[1].split("    /// Undo the role edits", 1)[0]
         self.assertIn('edit.add ? edit.name : std::string("-") + edit.name', body)
 
     def test_documentation_reflects_that_it_is_live(self):
@@ -191,8 +202,8 @@ class CommandContract(unittest.TestCase):
         self.assertIn("you have no companion called", body)
 
     def test_change_is_echoed_to_the_addon(self):
-        body = slice_from("    static bool HandleRoleCommand", 4000)
-        self.assertIn('SendRoleAndSpecLines(player, ownerGuid);', body)
+        body = handler_body()
+        self.assertIn('SendRoleAndSpecLines(owner, ownerGuid);', WORKFLOW)
 
 
 class SyncContract(unittest.TestCase):
@@ -345,14 +356,12 @@ class RoleChangeWindow(unittest.TestCase):
         self.assertIn("out of combat", body)
         # and the refusal is what the command reports
         handler = handler_body("static bool HandleRoleCommand")
-        self.assertIn("RoleChangeRefusal(player, botBefore, botGuid)", handler)
+        self.assertIn("RoleChangeRefusal(owner, bot, botGuid)", WORKFLOW)
 
     def test_asking_for_the_role_it_already_has_costs_nothing(self):
         handler = handler_body("static bool HandleRoleCommand")
-        self.assertIn("CompanionRole(botGuid) == RoleOrAuto(role)", handler)
-        self.assertIn("already", handler)
-        # the no-op returns before the write, so it cannot spend the window
-        self.assertLess(handler.index("already"), handler.index("SetCompanionRole(ownerGuid"))
+        self.assertLess(handler.index("CompanionRole(botGuid) == role"), handler.index("state.pending = role"))
+        self.assertNotIn("SetCompanionRole(", handler)
 
     def test_the_addon_is_told_the_remaining_window(self):
         roles = slice_from("            if (uint32 const remaining = RoleLockRemaining(botGuid); remaining)", 200)
@@ -404,7 +413,7 @@ class SpecFollowsRole(unittest.TestCase):
         for cls in ("CLASS_WARRIOR", "CLASS_PALADIN", "CLASS_HUNTER", "CLASS_ROGUE", "CLASS_PRIEST",
                     "CLASS_DEATH_KNIGHT", "CLASS_SHAMAN", "CLASS_MAGE", "CLASS_WARLOCK", "CLASS_DRUID"):
             self.assertIn("case " + cls + ":", SOURCE)
-        self.assertIn("constexpr char const* kSpecTreeNames[11][3]", SOURCE)
+        self.assertIn("constexpr char const* kSpecTreeNames[CLASS_DRUID + 1][3]", SOURCE)
         self.assertIn('{ "arms",            "fury",          "protection" }', SOURCE)
         self.assertIn('{ "balance",         "feral",         "restoration" }', SOURCE)
 
@@ -421,57 +430,11 @@ class SpecFollowsRole(unittest.TestCase):
         # nothing in the mapping reacts to "support": it falls into the damage branch
         self.assertNotIn('support', body)
 
-    def test_the_three_gates_are_the_role_gates(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        self.assertIn("!g_cfg.specFollowRole || role == \"auto\"", body)
-        self.assertIn("bot->GetLevel() < g_cfg.specMinLevel", body)
-        self.assertIn("bot->IsInCombat()", body)
-        self.assertIn("g_cfg.specFollowRole < 2", body)      # mode 1 logs and stops
-
-    def test_it_retrains_with_a_forced_tab_and_rebuilds_the_ai(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        self.assertIn("factory.InitTalentsTree(false, true, true, want);", body)
-        self.assertIn("ai->Reset();", body)
-        self.assertIn("ApplyRoleStrategies(bot);", body)
-        self.assertIn("ReconcileRoleSpells(bot, role);", body)
-
-    def test_a_low_level_companion_is_told_not_changed(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        low = body[body.index("bot->GetLevel() < g_cfg.specMinLevel"):body.index("bot->IsInCombat()")]
-        self.assertIn("LOG_INFO", low)
-        self.assertNotIn("InitTalentsTree", low)
-
-    def test_a_second_spec_is_granted_at_the_gate(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        self.assertIn("bot->GetSpecsCount() < 2", body)
-        self.assertIn("bot->UpdateSpecCount(2);", body)
-        # the core's own level rule, not the module's config: a lowered SpecMinLevel must not
-        # skip the second spec
-        self.assertIn("bot->GetLevel() >= 40 && bot->GetSpecsCount() < 2", body)
-        self.assertNotIn("g_cfg.specMinLevel >= 40", body)
-
-    def test_a_stored_tree_is_switched_not_rebuilt(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        switch = body[body.index("if (otherUsable && SpecTabOf(bot, other) == want)"):]
-        switch = switch[:switch.index("return;")]
-        self.assertIn("bot->ActivateSpec(other);", switch)
-        self.assertNotIn("InitTalentsTree", switch)     # a stored spec is switched, never re-spent
-
-    def test_the_old_tree_survives_a_retrain(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        retrain = body[body.index("if (otherUsable)"):]
-        self.assertLess(retrain.index("ActivateSpec(other)"), retrain.index("InitTalentsTree"))
-
     def test_a_spec_is_identified_from_the_talents_themselves(self):
         body = function_body("    uint32 SpecPoints(Player* bot, uint8 spec, uint8 tab)")
         self.assertIn("talent->IsInSpec(spec)", body)
-        self.assertIn("bot->HasSpell(info->RankID[rank])", body)   # rank = known RankID spells
+        self.assertIn("info->RankID[rank] == entry.first", body)
         self.assertIn("tabInfo->tabpage != tab", body)
-
-    def test_a_spec_change_re_picks_the_kit(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner")
-        self.assertEqual(body.count("RefreshLevelGear(owner, bot, /*specChanged=*/true);"), 2,
-                         "both the switch path and the retrain path re-gear")
 
     def test_the_spec_regear_skips_only_the_level_gates(self):
         body = function_body("    uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)")
@@ -486,38 +449,6 @@ class SpecFollowsRole(unittest.TestCase):
         self.assertIn("RefreshLevelGear(master, fresh);", SOURCE)
         self.assertIn("bool specChanged = false);", SOURCE)   # the declaration carries the default
 
-
-class RetriesWidenThenStop(unittest.TestCase):
-    """A retrain that does not take must not be re-attempted every pass for the whole session.
-
-    Act, read the trees back, widen the interval, and after three attempts stop and say so once.
-    Anything the decision depends on - a different tree, a new level, a fresh body - starts over.
-    """
-
-    def test_the_trees_are_read_back_after_each_path(self):
-        body = function_body("    void VerifySpecAttempt(Player* bot, std::string const& wantName)")
-        self.assertIn("int const now = CurrentSpecTab(bot);", body)
-        self.assertIn("g_specAttempts.erase(botGuid);", body)      # landed, nothing to remember
-        self.assertIn("if (attempt.goal != wantName || attempt.level != bot->GetLevel())", SOURCE)
-        self.assertEqual(SOURCE.count("VerifySpecAttempt(bot, wantName);"), 2)   # the switch and the retrain
-
-    def test_a_stale_attempt_is_noticed_at_the_gate(self):
-        body = function_body("    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)")
-        self.assertIn("if (attempt.gaveUp)", body)
-        self.assertIn("uint32(time(nullptr)) < attempt.nextAt", body)
-        # the gate sits before the retrain, or it would ask again anyway
-        self.assertLess(body.index("attempt.gaveUp"), body.index("factory.InitTalentsTree"))
-
-    def test_the_interval_widens_and_then_stops(self):
-        body = function_body("    void VerifySpecAttempt(Player* bot, std::string const& wantName)")
-        self.assertIn("kBackoff[] = { 30, 120, 600 }", body)
-        self.assertIn("if (attempt.tries >= 3)", body)
-        self.assertIn("attempt.gaveUp = true;", body)
-
-    def test_inspect_says_where_the_attempt_stands(self):
-        self.assertIn("given up after ", SOURCE)
-        self.assertIn("attempt ", SOURCE)
-        self.assertIn("g_specAttempts.erase(botGuid);", SOURCE)   # dropped when the tree lands
 
 class SpecLineTravelsWithRoles(unittest.TestCase):
     """The card has to show the role AND what the talents did about it.
@@ -535,7 +466,7 @@ class SpecLineTravelsWithRoles(unittest.TestCase):
     def test_no_call_site_sends_roles_alone(self):
         self.assertNotIn('SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));', SOURCE)
         self.assertNotIn('SendProtocolLine(owner, "Roles " + roles);', SOURCE)
-        self.assertEqual(SOURCE.count("SendRoleAndSpecLines("), 5)   # 1 definition + 4 sites
+        self.assertEqual((SOURCE + WORKFLOW).count("SendRoleAndSpecLines("), 5)   # 1 definition + 4 sites
 
     def test_the_line_says_why_nothing_moved(self):
         body = function_body("    std::string SpecLine(uint32 ownerGuid)")
@@ -553,19 +484,14 @@ class SpecLineTravelsWithRoles(unittest.TestCase):
         self.assertIn("G.Specs[name]", ui)
         self.assertIn("specHint", ui)
 
-    def test_both_entry_points_use_it(self):
-        # the slow pass (which covers login) and the role command itself
-        self.assertIn("ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));", SOURCE)
-        self.assertIn("ReconcileCompanionSpec(player, botBefore, role);", SOURCE)
-
     def test_inspect_reports_the_tree_and_the_want(self):
         self.assertIn('handler->PSendSysMessage("  spec: {} |cff9d9d9drole {} wants {}{}|r"', SOURCE)
         self.assertIn("(dry run)", SOURCE)
 
     def test_the_keys_are_documented(self):
         dist = (ROOT / "conf" / "mod_companion_questsync.conf.dist").read_text(encoding="utf-8")
-        self.assertIn("CompanionQuestSync.SpecFollowRole = 0", dist)
-        self.assertIn("CompanionQuestSync.SpecMinLevel = 40", dist)
+        self.assertIn("CompanionQuestSync.SpecFollowRole = 2", dist)
+        self.assertIn("CompanionQuestSync.SpecMinLevel = 10", dist)
         self.assertIn("`SpecFollowRole`", README)
         self.assertIn("`SpecMinLevel`", README)
         self.assertIn("Talents follow the role", DOC)
@@ -586,7 +512,7 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertIn('uint32 SpendPointsIntoTree(Player* bot, uint8 tab)', SOURCE)
         body = SOURCE.split('uint32 SpendPointsIntoTree(Player* bot, uint8 tab)', 1)[1][:2600]
         # the core vets every pick; we only decide the order
-        self.assertIn('bot->LearnTalent(candidate.second, rank + 1);', body)
+        self.assertIn('bot->LearnTalent(candidate.second, rank);', body)
         self.assertIn('if (bot->GetFreeTalentPoints() < before)', body)   # refused pick = no progress
         self.assertIn('while (progress && bot->GetFreeTalentPoints())', body)
         self.assertIn('candidates.emplace_back(info->Row, i);', body)
@@ -611,10 +537,7 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         # the core decides what is spent; a talent map holds rows for talents never ranked, and
         # reading that as "points are spent" is what kept the grant from ever running
         self.assertNotIn('GetTalentMap()', body)
-        body_def = SOURCE.rfind('void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)')
-        reconcile = SOURCE[body_def:body_def + 1500]
-        self.assertIn('GrantOwedTalentPoints(bot)', reconcile)
-        self.assertIn('was owed', reconcile)
+        self.assertIn('bot->InitTalentForLevel();', WORKFLOW)
 
     def test_the_first_grant_check_explains_why_it_did_or_did_not_change_points(self):
         body = function_body("    bool GrantOwedTalentPoints(Player* bot)")
@@ -629,11 +552,6 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
 class TheLogDoesNotSayTheSameThingTwice(unittest.TestCase):
     """The retry ladder used to log every attempt, and the same re-gear summary was whispered on
     every pass that re-derived it - four lines of news where there had been one change."""
-
-    def test_a_widening_retry_is_silent(self):
-        self.assertNotIn('did not end up in', SOURCE)
-        self.assertIn('is still {} after {} attempts at {}', SOURCE)      # giving up is still news
-        self.assertIn('kBackoff[] = { 30, 120, 600 }', SOURCE)
 
     def test_the_same_sentence_is_not_repeated_within_a_quarter_hour(self):
         self.assertIn('std::unordered_map<uint32, std::pair<std::string, uint32>> g_lastSpoken;', SOURCE)
@@ -657,44 +575,15 @@ class TheLogDoesNotSayTheSameThingTwice(unittest.TestCase):
         self.assertIn('g_talentByRankSpell.find(id)', body)
         self.assertIn('return sTalentStore.LookupEntry(id);', body)     # the other convention
         # and every counter goes through it
-        self.assertIn('TalentEntry const* info = ResolveTalentEntry(talent->talentID);', SOURCE)
+        self.assertIn('TalentEntry const* info = ResolveTalentEntry(entry.first);', SOURCE)
         self.assertNotIn('TalentEntry const* info = sTalentStore.LookupEntry(talent->talentID);', SOURCE)
-
-    def test_the_talent_state_is_reported_once_per_body(self):
-        watch = SOURCE.split('void WatchKitShape(Player* owner, Player* bot)', 1)[1][:3200]
-        self.assertIn('g_talentNotes.insert(botGuid).second', watch)
-        self.assertIn('point(s) in', watch)
-        self.assertIn('unspent', watch)
-
-    def test_the_same_watch_puts_a_wiped_tree_back(self):
-        watch = SOURCE.split('void WatchKitShape(Player* owner, Player* bot)', 1)[1][:2600]
-        self.assertIn('int const want = RoleSpecTab(bot->getClass(), role);', watch)
-        self.assertIn('bot->GetFreeTalentPoints()', watch)
-        self.assertIn('SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) == 0', watch)
-        self.assertIn('SpendPointsIntoTree(bot, uint8(want))', watch)
-        self.assertIn("the role's tree had been emptied", watch)
-        # and it heals the tree after the hands, so one throttled pass does both
-        self.assertLess(watch.index('MarkSupersededGear(owner, bot);'), watch.index('SpendPointsIntoTree'))
-        # the refill must NOT sit behind the shape gate: a dps or support companion has no shape to
-        # keep but still owns a tree, and that is exactly who needs this most
-        self.assertIn('if (KitNeedFor(bot->getClass(), role) != KitNeed::None)', watch)
-        self.assertIn('if (role == "auto")', watch)
-        self.assertNotIn('KitNeedFor(bot->getClass(), role) == KitNeed::None',
-                     watch.split('if (KitNeedFor', 1)[0])
-
-    def test_the_retrain_uses_it_when_the_template_left_the_tree_empty(self):
-        self.assertIn('if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)', SOURCE)
-        self.assertIn('no build template for level', SOURCE)
-        retrain = SOURCE.split('factory.InitTalentsTree(false, true, true, want);', 1)[1][:1200]
-        self.assertLess(retrain.index('SpendPointsIntoTree(bot, want)'), retrain.index('ai->Reset()'))
-
 
 class ARefitNeedsOneSlotNotEight(unittest.TestCase):
     """The refit was gated on the pass's bag reserve, so it was refused exactly when it was needed:
     right after a pass that had just displaced several pieces into the bags."""
 
     def test_the_refit_gate_is_one_slot(self):
-        body = SOURCE.split('bool RepairKitShape(Player* bot, std::string const& role)', 1)[1][:900]
+        body = SOURCE.split('bool RepairKitShape(Player* bot, std::string const& role,', 1)[1][:900]
         self.assertIn('bot->GetFreeInventorySpace() < 1', body)
         self.assertNotIn('CompanionBagReserve', body)
         # the gear pass keeps its own reserve
