@@ -153,6 +153,30 @@ the module checks that the strategy actually took the first time a policy is app
 reports `|cffffd200no passive strategy in this build|r` if it did not, rather than drawing a
 control that quietly does nothing.
 
+### Engagement needs a way in, and a dps role used to take it away
+
+Two things walk a companion into a fight, and a role must leave at least one of them:
+
+- **`pull`** — how a companion *starts* a fight of its own. It is only taken away on the
+  player-directed policies (`mine`, `joined`, `never`), because there the player is the one who
+  chooses the target. On `auto` it stays: an assist-only companion reads as one that does not
+  engage, which is exactly how a dps companion was reported.
+- **the walk into melee** — `enemy out of melee -> reach melee` on the class strategy, the
+  generic path every melee class has under its own gap closer.
+
+That second one is why Charge is **muted with a cooldown, not removed from the spellbook**.
+Removing the spell does not remove the action: the charge trigger stays registered, the action
+still counts as possible, and every "enemy out of melee" tick is spent on a charge that cannot
+land. `reach melee` sits at a lower priority, so it never gets its turn and the warrior simply
+stands there — reported as "the warrior does not engage when its role is dps". A cooldown is one
+of the two things `PlayerbotAI::CanCastSpell` refuses over (the other is an unknown spell), so
+the charge goes impossible, the walk takes over, and the spellbook is untouched.
+
+The same rule applies to role edits in general: **a role never disarms the companion.** `tank`
+is both a role word and the name of a protection warrior's (or paladin's) entire combat
+strategy, so `-tank` on a protection companion would leave it with no combat actions at all.
+The module refuses that removal and reports `kept tank` in the role card instead.
+
 ## Setting it up
 
 ```sql

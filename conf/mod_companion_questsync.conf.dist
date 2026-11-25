@@ -277,9 +277,12 @@ CompanionQuestSync.Formation = auto
 
 # A warrior charges whatever it can see, in every spec and every role: the charge is a trigger
 # on the class strategy ("enemy out of melee -> charge"), not a strategy that could be dropped.
-# So for a companion whose role is not tank (or auto) the module withholds the Charge ranks
-# from its spellbook, and gives them back when it tanks again. This is the only place the module
-# edits a spellbook; `.companionsync inspect` lists what it took. Set to 0 to leave it alone.
+# So for a companion whose role is not tank (or auto) the module mutes the Charge ranks with a
+# long cooldown, and clears it again when it tanks. A cooldown, not the spellbook: removing the
+# spell leaves the charge action in place, every "enemy out of melee" tick is spent on a charge
+# that cannot land, and the companion stops walking into fights altogether. Nothing in the
+# spellbook is touched, so there is nothing to learn back.
+# `.companionsync inspect` lists what is muted. Set to 0 to leave it alone.
 # Default: 1
 CompanionQuestSync.SuppressGapClosers = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose

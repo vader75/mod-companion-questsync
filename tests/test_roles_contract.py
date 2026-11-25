@@ -129,11 +129,29 @@ class StrategyContract(unittest.TestCase):
 
     def test_forms_are_only_touched_for_druids(self):
         # the table carries the class in every row, so a form edit cannot leak to another class
-        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 1200)
+        # stop at the end of the table: the spec whitelist that follows it names bear and
+        # cat as well, and it is not a form edit
+        rules = slice_from("    ClassRule constexpr kClassRules[] = {", 1200).split("    };")[0]
         rows = [line for line in rules.splitlines() if '"bear"' in line or '"cat"' in line]
         self.assertTrue(rows)
         for row in rows:
             self.assertIn("CLASS_DRUID", row, row)
+
+    def test_a_role_change_never_disarms_the_companion(self):
+        # "tank" is a role word and a protection warrior's whole combat strategy: taking it away
+        # leaves no spec at all, and the companion stands in the fight doing nothing
+        source = SOURCE
+        self.assertIn("bool WouldDisarm(PlayerbotAI* ai, std::string const& removing)", source)
+        self.assertIn('"tank", "arms", "fury", "melee", "dps", "cat", "bear", "balance", "resto", "heal",', source)
+        self.assertIn("if (!edit.add && WouldDisarm(ai, edit.name))", source)
+        self.assertIn('missed += std::string("kept ") + edit.name;', source)
+
+    def test_pull_follows_the_engagement_policy(self):
+        # pulling is how a companion starts a fight of its own; an assist-only companion reads as
+        # one that does not engage, so only the player-directed policies take pull away
+        source = SOURCE
+        self.assertIn('bool const keepPull = (policy == "auto" || policy.empty());', source)
+        self.assertIn("RoleStrategyEdits(role, bot, quiet, CompanionEngage(botGuid))", source)
 
     def test_a_removal_that_did_not_take_is_reported_as_well(self):
         body = slice_from("    std::string ApplyRoleStrategies(Player* bot)")

@@ -107,17 +107,20 @@ class GapClosers(unittest.TestCase):
         self.assertIn('"Charge"', body)
 
     def test_only_tanking_and_auto_keep_it(self):
-        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
-        self.assertIn('bool const shouldWithhold = (role != "tank" && role != "auto");', body)
+        body = slice_from("    /// How long a gap closer is muted for.", 2600)
+        self.assertIn('bool const shouldMute = (role != "tank" && role != "auto");', body)
 
     def test_it_is_taken_away_and_verified(self):
-        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
-        self.assertIn("bot->removeSpell(closer.spell, SPEC_MASK_ALL, false);", body)
-        self.assertIn("if (bot->HasSpell(closer.spell))", body)     # never claim what did not happen
+        body = slice_from("    /// How long a gap closer is muted for.", 2600)
+        # a cooldown, not the spellbook: removing the spell leaves the charge action possible
+        # and the warrior never walks in
+        self.assertIn("bot->AddSpellCooldown(closer.spell, 0, now + kGapCloserMuteMs);", body)
+        self.assertNotIn("removeSpell", body)
+        self.assertIn("if (bot->GetSpellCooldownDelay(closer.spell) < kGapCloserMuteMs / 2)", body)
 
     def test_it_comes_back_the_same_way(self):
-        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
-        self.assertIn("bot->learnSpell(closer.spell, false, false);", body)
+        body = slice_from("    /// How long a gap closer is muted for.", 2600)
+        self.assertIn("bot->RemoveSpellCooldown(closer.spell, true);", body)
 
     def test_it_runs_with_the_role_and_on_the_slow_pass(self):
         self.assertIn("ReconcileRoleSpells(bot, role);", SOURCE)
@@ -135,7 +138,7 @@ class GapClosers(unittest.TestCase):
 
     def test_inspect_notices_a_charge_missing_from_the_spellbook(self):
         body = slice_from("    static bool HandleInspectCommand(", 6200)
-        self.assertIn("not in the spellbook (withheld by an ", body)
+        self.assertIn("missing from the spellbook (an older ", body)
         self.assertIn("bot->HasSpell(closer.spell)", body)
 
     def test_inspect_says_what_was_withheld(self):

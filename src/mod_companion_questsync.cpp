@@ -578,7 +578,7 @@ namespace
     std::atomic<int> g_quietColumn{0};            // 0 unknown, 1 present, -1 missing
     std::map<uint32, uint32> g_pinnedTarget;      // bot guid -> owner target we pointed it at
     std::map<uint32, std::vector<uint32>> g_petTauntOff;   // bot guid -> pet autocasts we turned off
-    std::map<uint32, std::vector<uint32>> g_spellsWithheld;  // bot guid -> gap closers we took away
+    std::map<uint32, std::vector<uint32>> g_spellsWithheld;  // bot guid -> gap closers we muted
     std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
     uint32 constexpr kRoleReassertSeconds = 60;   // playerbots drops strategies on spec/level change
 
@@ -1159,11 +1159,44 @@ namespace
         { CLASS_DRUID, "support", "cat",  BOT_STATE_COMBAT, true,  768  },
     };
 
+    /// The strategies that *are* a spec, per class. Removing one of these is not a role change,
+    /// it is disarming the companion: "tank" is both a role word and the name of a protection
+    /// warrior's (or paladin's) whole combat strategy, so `-tank` on a protection companion left
+    /// it with no combat actions at all and it stopped engaging.
+    constexpr char const* kSpecStrategies[] = {
+        "tank", "arms", "fury", "melee", "dps", "cat", "bear", "balance", "resto", "heal",
+        "enh", "ele", "surv", "mm", "bm", "frost", "fire", "arcane", "affli", "demo", "destro",
+    };
+
+    /// True when taking `removing` away would leave the companion with no combat spec.
+    bool WouldDisarm(PlayerbotAI* ai, std::string const& removing)
+    {
+        if (!ai || !ai->HasStrategy(removing, BOT_STATE_COMBAT))
+            return false;
+
+        for (char const* spec : kSpecStrategies)
+        {
+            if (removing == spec)
+                continue;
+            if (ai->HasStrategy(spec, BOT_STATE_COMBAT))
+                return false;
+        }
+
+        return true;
+    }
+
     /// What a role asks of playerbots, as strategy edits: the flat part every class shares,
     /// then whatever this class needs on top, then the quiet flag.
-    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role, Player* bot, bool quiet)
+    ///
+    /// `policy` is the engagement setting: "pull" is how a companion starts a fight of its own,
+    /// so on `auto` it is left alone (a companion that can only assist reads as one that does
+    /// not engage) and the player-directed policies take it away.
+    std::vector<RoleStrategyEdit> RoleStrategyEdits(std::string const& role, Player* bot, bool quiet,
+                                                    std::string const& policy)
     {
         std::vector<RoleStrategyEdit> edits;
+
+        bool const keepPull = (policy == "auto" || policy.empty());
 
         if (role == "tank")
             edits.push_back({ "tank", BOT_STATE_COMBAT, true });
@@ -1171,12 +1204,14 @@ namespace
         {
             edits.push_back({ "heal", BOT_STATE_COMBAT, true });
             edits.push_back({ "tank", BOT_STATE_COMBAT, false });
-            edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
+            if (!keepPull)
+                edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
         else if (role == "dps" || role == "support")
         {
             edits.push_back({ "tank", BOT_STATE_COMBAT, false });
-            edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
+            if (!keepPull)
+                edits.push_back({ "pull", BOT_STATE_NON_COMBAT, false });
         }
         else
             return edits;   // auto: the module keeps its hands off this companion entirely
@@ -1195,6 +1230,7 @@ namespace
     }
 
     void RevertRoleStrategies(Player* bot);
+    std::string CompanionEngage(uint32 botGuid);
     void ReconcileRoleSpells(Player* bot, std::string const& role);
 
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
@@ -1228,8 +1264,18 @@ namespace
         bool const quiet = CompanionQuiet(botGuid);
         ReconcileRoleSpells(bot, role);
 
-        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot, quiet))
+        for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot, quiet, CompanionEngage(botGuid)))
         {
+            // never disarm: a removal that would leave no spec at all is refused and reported,
+            // because the companion then stands in a fight doing nothing
+            if (!edit.add && WouldDisarm(ai, edit.name))
+            {
+                if (!missed.empty())
+                    missed += ",";
+                missed += std::string("kept ") + edit.name;
+                continue;
+            }
+
             bool const present = ai->HasStrategy(edit.name, edit.state);
             if (edit.add == present)
                 continue;
@@ -1383,11 +1429,10 @@ namespace
     // and the action is a root node nobody can add or remove by name. That is why "-tank" left
     // a dps warrior leaping in.
     //
-    // The only lever below a trigger is the spellbook. playerbots will not cast a spell the bot
-    // does not know (`PlayerbotAI::CanCastSpell` bails on `!HasSpell`), so a companion that is
-    // not tanking has the gap closer withheld, and gets it back when it tanks again - or when
-    // its role goes back to auto. This is the one place the module changes a spellbook, so it
-    // is recorded per bot, reported by `inspect`, restorable, and behind a config switch.
+    // The lever below a trigger is what playerbots will cast, and `PlayerbotAI::CanCastSpell`
+    // bails on two things worth knowing here: a spell the bot does not know, and a spell on
+    // cooldown. A cooldown is the honest one - it leaves the spellbook alone, it is reversible,
+    // and it cannot strand the warrior (see ReconcileRoleSpells).
     struct GapCloser
     {
         uint8 klass;
@@ -1401,7 +1446,20 @@ namespace
         { CLASS_WARRIOR, 11578, "Charge" },      // rank 3
     };
 
-    /// Take away, or give back, the abilities that belong to a role other than the one set.
+    /// How long a gap closer is muted for. The reconcile pass re-applies it long before this
+    /// runs out, so the number only has to outlast a pass and a fight.
+    uint32 constexpr kGapCloserMuteMs = 10 * 60 * 1000;
+
+    /// A gap closer is *muted with a cooldown*, not taken out of the spellbook.
+    ///
+    /// Removing the spell does not remove the action. The charge trigger stays registered, its
+    /// action still counts as possible, and every "enemy out of melee" tick is spent on a charge
+    /// that cannot land - so the warrior never walks into the fight, because playerbots' own
+    /// "reach melee" sits at a lower priority and never gets its turn. That is what "the warrior
+    /// stopped engaging when I set it to dps" looked like. A cooldown is one of the things
+    /// PlayerbotAI::CanCastSpell checks, so the charge goes impossible, the walk takes over, and
+    /// the spellbook is never touched (nothing to repair after a restart, and nothing to learn
+    /// back).
     void ReconcileRoleSpells(Player* bot, std::string const& role)
     {
         if (!bot || !g_cfg.suppressGapClosers)
@@ -1411,36 +1469,35 @@ namespace
         std::vector<uint32>& withheld = g_spellsWithheld[botGuid];
 
         // tank and auto keep everything: auto means the module is not steering this companion
-        bool const shouldWithhold = (role != "tank" && role != "auto");
+        bool const shouldMute = (role != "tank" && role != "auto");
+        uint32 const now = getMSTime();
 
         for (GapCloser const& closer : kGapClosers)
         {
-            if (bot->getClass() != closer.klass)
+            if (bot->getClass() != closer.klass || !bot->HasSpell(closer.spell))
                 continue;
 
             bool const held = std::find(withheld.begin(), withheld.end(), closer.spell) != withheld.end();
 
-            if (shouldWithhold && !held && bot->HasSpell(closer.spell))
+            if (shouldMute)
             {
-                bot->removeSpell(closer.spell, SPEC_MASK_ALL, false);
+                // re-applied on every pass on purpose: it is cheap, and it survives a cooldown
+                // clear (a death, a respec, a client-side reset) without an event hook
+                if (bot->GetSpellCooldownDelay(closer.spell) < kGapCloserMuteMs / 2)
+                    bot->AddSpellCooldown(closer.spell, 0, now + kGapCloserMuteMs);
 
-                if (bot->HasSpell(closer.spell))
+                if (!held)
                 {
-                    LOG_WARN("server.loading",
-                             "[CompanionQuestSync] could not withhold {} from {} - it may still charge",
-                             closer.name, bot->GetName());
-                    continue;
+                    withheld.push_back(closer.spell);
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} muted {} (role {})",
+                             bot->GetName(), closer.name, role);
                 }
-
-                withheld.push_back(closer.spell);
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} withheld {} (role {})",
-                         bot->GetName(), closer.name, role);
             }
-            else if (!shouldWithhold && held)
+            else if (held)
             {
-                bot->learnSpell(closer.spell, false, false);
+                bot->RemoveSpellCooldown(closer.spell, true);
                 withheld.erase(std::remove(withheld.begin(), withheld.end(), closer.spell), withheld.end());
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} learned {} back (role {})",
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} can use {} again (role {})",
                          bot->GetName(), closer.name, role);
             }
         }
@@ -9756,9 +9813,9 @@ public:
             auto const withheldSpells = g_spellsWithheld.find(botGuid);
             if (withheldSpells == g_spellsWithheld.end() || withheldSpells->second.empty())
             {
-                // The record of a withholding is per session; the withholding is not. After a
-                // restart a Charge taken last week is still missing, so say what the spellbook
-                // says instead of letting the silence look like "all fine".
+                // A muted spell is a cooldown, so the silence here is honest - but a spell that
+                // an older build removed from the spellbook is not, and it has to be named
+                // because only a retrain puts it back.
                 std::string absent;
                 for (GapCloser const& closer : kGapClosers)
                 {
@@ -9770,8 +9827,8 @@ public:
                 }
 
                 if (!absent.empty())
-                    handler->PSendSysMessage("  gap closers: {} not in the spellbook (withheld by an "
-                                             "earlier session, or never trained)", absent);
+                    handler->PSendSysMessage("  gap closers: {} missing from the spellbook (an older "
+                                             "build removed it) - retrain to restore", absent);
             }
             else
             {
