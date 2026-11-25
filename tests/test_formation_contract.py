@@ -105,15 +105,11 @@ class ClampContract(unittest.TestCase):
     def test_a_gossip_menu_counts_as_an_interaction(self):
         self.assertIn("owner->PlayerTalkClass->GetGossipMenu().GetMenuItemCount() > 0", SOURCE)
 
-    def test_standing_still_gathers_one_step_tighter(self):
-        self.assertIn("if (!owner->IsInCombat() && OwnerStandingStill(owner))", self.body())
-        self.assertIn("return OneStepTighter(shape);", self.body())
-
-    def test_one_step_tighter_reads_the_way_the_shapes_do(self):
-        body = slice_from("    std::string OneStepTighter(std::string const& shape)", 500)
-        self.assertIn('return "circle";', body)
-        self.assertIn('return "queue";', body)
-        self.assertIn('return "near";', body)
+    def test_standing_still_gathers_at_arms_length(self):
+        body = self.body()
+        self.assertIn("if (!owner->IsInCombat() && OwnerStandingStill(owner))", body)
+        at = body.index("if (!owner->IsInCombat() && OwnerStandingStill(owner))")
+        self.assertIn('return "near";', body[at:at + 400])
 
     def test_the_gather_waits_a_moment(self):
         self.assertIn("kIdleGatherSeconds = 3", SOURCE)

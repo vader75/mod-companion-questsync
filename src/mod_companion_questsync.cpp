@@ -141,6 +141,7 @@ namespace
         bool trimSurplus       = true;      // spare trade goods, at a vendor, only when bags are tight
         bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
+        bool suppressGapClosers = true;     // take Charge away from a companion that is not tanking
         std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -577,6 +578,7 @@ namespace
     std::atomic<int> g_quietColumn{0};            // 0 unknown, 1 present, -1 missing
     std::map<uint32, uint32> g_pinnedTarget;      // bot guid -> owner target we pointed it at
     std::map<uint32, std::vector<uint32>> g_petTauntOff;   // bot guid -> pet autocasts we turned off
+    std::map<uint32, std::vector<uint32>> g_spellsWithheld;  // bot guid -> gap closers we took away
     std::map<uint32, uint32> g_roleApplyAt;       // bot guid -> last reconcile
     uint32 constexpr kRoleReassertSeconds = 60;   // playerbots drops strategies on spec/level change
 
@@ -707,6 +709,7 @@ namespace
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
         g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
+        g_cfg.suppressGapClosers = sConfigMgr->GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true);
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -902,6 +905,7 @@ namespace
         g_passiveHeld.erase(botGuid);
         g_pinnedTarget.erase(botGuid);
         g_petTauntOff.erase(botGuid);
+        g_spellsWithheld.erase(botGuid);
         g_formationApplied.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
@@ -1191,6 +1195,7 @@ namespace
     }
 
     void RevertRoleStrategies(Player* bot);
+    void ReconcileRoleSpells(Player* bot, std::string const& role);
 
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
     /// can say "no tank strategy for this class" rather than showing a control that lies.
@@ -1221,6 +1226,7 @@ namespace
         std::vector<AppliedEdit> applied;
 
         bool const quiet = CompanionQuiet(botGuid);
+        ReconcileRoleSpells(bot, role);
 
         for (RoleStrategyEdit const& edit : RoleStrategyEdits(role, bot, quiet))
         {
@@ -1366,6 +1372,76 @@ namespace
             {
                 pet->ToggleAutocast(info, false);
                 off.push_back(spellId);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- gap closers
+    //
+    // A warrior charges whatever it can see, in every spec and every role, because the charge
+    // is not a strategy: each warrior strategy hangs `enemy out of melee -> charge` on itself,
+    // and the action is a root node nobody can add or remove by name. That is why "-tank" left
+    // a dps warrior leaping in.
+    //
+    // The only lever below a trigger is the spellbook. playerbots will not cast a spell the bot
+    // does not know (`PlayerbotAI::CanCastSpell` bails on `!HasSpell`), so a companion that is
+    // not tanking has the gap closer withheld, and gets it back when it tanks again - or when
+    // its role goes back to auto. This is the one place the module changes a spellbook, so it
+    // is recorded per bot, reported by `inspect`, restorable, and behind a config switch.
+    struct GapCloser
+    {
+        uint8 klass;
+        uint32 spell;
+        char const* name;
+    };
+
+    GapCloser constexpr kGapClosers[] = {
+        { CLASS_WARRIOR, 100,   "Charge" },      // rank 1 unlearns the chain
+        { CLASS_WARRIOR, 6178,  "Charge" },      // rank 2
+        { CLASS_WARRIOR, 11578, "Charge" },      // rank 3
+    };
+
+    /// Take away, or give back, the abilities that belong to a role other than the one set.
+    void ReconcileRoleSpells(Player* bot, std::string const& role)
+    {
+        if (!bot || !g_cfg.suppressGapClosers)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::vector<uint32>& withheld = g_spellsWithheld[botGuid];
+
+        // tank and auto keep everything: auto means the module is not steering this companion
+        bool const shouldWithhold = (role != "tank" && role != "auto");
+
+        for (GapCloser const& closer : kGapClosers)
+        {
+            if (bot->getClass() != closer.klass)
+                continue;
+
+            bool const held = std::find(withheld.begin(), withheld.end(), closer.spell) != withheld.end();
+
+            if (shouldWithhold && !held && bot->HasSpell(closer.spell))
+            {
+                bot->removeSpell(closer.spell, SPEC_MASK_ALL, false);
+
+                if (bot->HasSpell(closer.spell))
+                {
+                    LOG_WARN("server.loading",
+                             "[CompanionQuestSync] could not withhold {} from {} - it may still charge",
+                             closer.name, bot->GetName());
+                    continue;
+                }
+
+                withheld.push_back(closer.spell);
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} withheld {} (role {})",
+                         bot->GetName(), closer.name, role);
+            }
+            else if (!shouldWithhold && held)
+            {
+                bot->learnSpell(closer.spell, false, false);
+                withheld.erase(std::remove(withheld.begin(), withheld.end(), closer.spell), withheld.end());
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} learned {} back (role {})",
+                         bot->GetName(), closer.name, role);
             }
         }
     }
@@ -1687,6 +1763,7 @@ namespace
 
             at = now;
             ReconcilePetTaunt(bot);
+            ReconcileRoleSpells(bot, CompanionRole(bot->GetGUID().GetCounter()));
             std::string const missed = ApplyRoleStrategies(bot);
             if (missed.empty())
                 g_roleNotes.erase(botGuid);
@@ -3995,18 +4072,6 @@ namespace
                owner->PlayerTalkClass->GetGossipMenu().GetMenuItemCount() > 0;
     }
 
-    /// One step tighter - what "gather for a moment" means, per shape.
-    std::string OneStepTighter(std::string const& shape)
-    {
-        if (shape == "far")
-            return "circle";
-        if (shape == "circle")
-            return "queue";
-        if (shape == "melee" || shape == "shield" || shape == "arrow" || shape == "queue")
-            return "near";
-        return shape;                   // near, chaos: nothing tighter that reads well
-    }
-
     /// Has the player been on the same spot for a moment?
     ///
     /// Tracked rather than asked of the client: an unchanged position is the same signal the
@@ -4086,9 +4151,11 @@ namespace
                 shape = "chaos";         // out of a fight, an auto companion is unmanaged
         }
 
-        // out of a fight, a player who has stopped moving lets the party gather
+        // Out of a fight, a player who has stopped moving gets the party at arm's length: if
+        // nothing is happening, distance is only ever a way to be out of reach of a hand-over,
+        // a vendor or a body to loot. Moving again restores the shape the role asked for.
         if (!owner->IsInCombat() && OwnerStandingStill(owner))
-            return OneStepTighter(shape);
+            return "near";
 
         return shape;
     }
@@ -9669,6 +9736,23 @@ public:
             auto const engageNote = g_engageNotes.find(botGuid);
             if (engageNote != g_engageNotes.end())
                 handler->PSendSysMessage("  |cffffd200engagement:|r {}", engageNote->second);
+
+            auto const withheldSpells = g_spellsWithheld.find(botGuid);
+            if (withheldSpells != g_spellsWithheld.end() && !withheldSpells->second.empty())
+            {
+                std::string names;
+                for (uint32 const spell : withheldSpells->second)
+                {
+                    char const* label = "a spell";
+                    for (GapCloser const& closer : kGapClosers)
+                        if (closer.spell == spell)
+                            label = closer.name;
+                    if (!names.empty())
+                        names += ", ";
+                    names += label;
+                }
+                handler->PSendSysMessage("  gap closers withheld: {}", names);
+            }
 
             auto const petOff = g_petTauntOff.find(botGuid);
             if (petOff != g_petTauntOff.end() && !petOff->second.empty())

@@ -80,7 +80,7 @@ class Pets(unittest.TestCase):
 
 class Observability(unittest.TestCase):
     def test_inspect_reports_the_setting_the_ledger_and_the_pitfalls(self):
-        body = slice_from("    static bool HandleInspectCommand(", 3000)
+        body = slice_from("    static bool HandleInspectCommand(", 4600)
         self.assertIn("StrategySnapshot(ai)", body)
         self.assertIn("LedgerSnapshot(botGuid)", body)
         self.assertIn("g_engageNotes.find(botGuid)", body)
@@ -95,6 +95,40 @@ class Observability(unittest.TestCase):
         self.assertIn("return CompanionQuiet(botGuid) == quiet;", body)
         sql = (ROOT / "sql" / "companion-quiet.sql").read_text(encoding="utf-8")
         self.assertIn("ADD COLUMN quiet TINYINT UNSIGNED NOT NULL DEFAULT 0", sql)
+
+
+class GapClosers(unittest.TestCase):
+    """A dps warrior must not charge: the charge is a trigger on the class strategy, not a lever."""
+
+    def test_charge_is_known_to_playerbots_as_a_spell_not_a_strategy(self):
+        body = slice_from("    GapCloser constexpr kGapClosers[] = {", 400)
+        for rank in ("100", "6178", "11578"):
+            self.assertIn(rank, body)
+        self.assertIn('"Charge"', body)
+
+    def test_only_tanking_and_auto_keep_it(self):
+        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
+        self.assertIn('bool const shouldWithhold = (role != "tank" && role != "auto");', body)
+
+    def test_it_is_taken_away_and_verified(self):
+        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
+        self.assertIn("bot->removeSpell(closer.spell, SPEC_MASK_ALL, false);", body)
+        self.assertIn("if (bot->HasSpell(closer.spell))", body)     # never claim what did not happen
+
+    def test_it_comes_back_the_same_way(self):
+        body = slice_from("    /// Take away, or give back, the abilities that belong to a role", 2200)
+        self.assertIn("bot->learnSpell(closer.spell, false, false);", body)
+
+    def test_it_runs_with_the_role_and_on_the_slow_pass(self):
+        self.assertIn("ReconcileRoleSpells(bot, role);", SOURCE)
+        self.assertIn("ReconcileRoleSpells(bot, CompanionRole(", SOURCE)
+
+    def test_it_is_behind_a_config_switch(self):
+        self.assertIn('GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true)', SOURCE)
+
+    def test_inspect_says_what_was_withheld(self):
+        body = slice_from("    static bool HandleInspectCommand(", 4600)
+        self.assertIn("gap closers withheld", body)
 
 
 class Addon(unittest.TestCase):

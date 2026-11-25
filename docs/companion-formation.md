@@ -45,9 +45,9 @@ formation while you are not fighting:
 - **Interaction** - a trade window on *either* side, or an open gossip menu, puts the party at
   `near`. This is the case the old trade clamp missed: it only looked at the bot's own window,
   so the trade *you* opened was not covered.
-- **Idle gather** - once you have stood on the same spot for three seconds, the shape goes one
-  step tighter (`far` → `circle` → `queue` → `near`). Start moving and the role formation comes
-  straight back.
+- **Idle gather** - once you have stood on the same spot for three seconds, everyone comes to
+  arm's length (`near`), whatever the role. Nothing is happening, so the only thing distance can
+  do is put a hand-over out of reach. Start moving and the role formation comes straight back.
 
 Both are deliberately out of combat only, because in a fight distance belongs to the role. Neither
 of them moves anybody by hand: they change which formation you are in, and playerbots walks it.

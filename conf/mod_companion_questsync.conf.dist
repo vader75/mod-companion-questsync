@@ -274,6 +274,14 @@ CompanionQuestSync.MapPins = 1
 # playerbots. The setting is per player per session and resets to this default at login.
 # See docs/companion-distance-review.md. Default: auto
 CompanionQuestSync.Formation = auto
+
+# A warrior charges whatever it can see, in every spec and every role: the charge is a trigger
+# on the class strategy ("enemy out of melee -> charge"), not a strategy that could be dropped.
+# So for a companion whose role is not tank (or auto) the module withholds the Charge ranks
+# from its spellbook, and gives them back when it tanks again. This is the only place the module
+# edits a spellbook; `.companionsync inspect` lists what it took. Set to 0 to leave it alone.
+# Default: 1
+CompanionQuestSync.SuppressGapClosers = 1
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
