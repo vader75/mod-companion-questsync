@@ -4,7 +4,9 @@ What changed in the layout, and the rules that follow from it. Any session worki
 module should read this before touching files — the copies used to drift and this is how
 that was fixed.
 
-*Last updated: 14 November 2026, at `6965d98`.*
+*Last updated: 25 November 2026, at `6fcbd15`. If you are picking this module up in a fresh
+session, read this page, then `README.md` (install, commands, config, test commands) and
+`docs/companion-roles.md` (roles → gear/talents/strategies).*
 
 ## Where the code lives
 
@@ -61,21 +63,68 @@ module, so they now live in `docs/` here.
   that touches companion behaviour.
 - The lifecycle report is a dated snapshot (r76, 12–13 November). History, not design.
 
-## Verified at this revision
+## Verified at this revision (`6fcbd15`, 25 Nov 2026)
 
-- `python tests/lua_sandbox.py` — PASS (Core.lua and UI.lua load, launcher built, `/csync` answers)
+- `python -B -m unittest discover -s tests` — 369 passed, 13 skipped
+- `python -B addon/CompanionSync/test_parse.py` — 14/14 payload cases
+- `python -B tests/lua_sandbox.py` — PASS (Core.lua and UI.lua load, launcher built, `/csync` answers)
 - Lua syntax compiles for `CompanionPins.lua`, `CompanionSync/Core.lua`, `CompanionSync/UI.lua`
 - `src/mod_companion_questsync.cpp` byte-identical across the working clone, the realm clone
   and the build tree (check with `md5sum` on the three paths; CRLF differences alone are not
   drift)
 - Both addons installed in the client as `CompanionPins` + `CompanionSync`
 
+## Flows, in the order they run
+
+1. **Change** the module in this clone — never in the realm copy, never in the build tree.
+2. **Refresh the build tree**: `scripts/install-to-server.sh D:/Build/WOW_Legends_Server_Source`,
+   then `touch` the changed `.cpp`: a build can otherwise report success without recompiling it.
+3. **Build** (cmake is not on PATH):
+   `"D:/Applications/VisualStudio2022BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"`
+   `--build D:/Build/build --config RelWithDebInfo --target worldserver --parallel 12`, and expect
+   `0` matches for `error C|error LNK|error MSB`. The `rc.exe` step dies with
+   `MSB6003 … The filename or extension is too long` at ~31 KB of include dirs: trim the four
+   `ResourceCompile` items in the generated `D:/Build/build/src/server/apps/worldserver.vcxproj`
+   to `D:\Build\build;D:\Build\WOW_Legends_Server_Source\src\server\apps` and rebuild. No source
+   changes, and a CMake reconfigure undoes it.
+4. **Prove it compiled**: the module `.obj` must be newer than the source it came from, and any
+   change that adds a *string literal* should be checkable in
+   `build/bin/RelWithDebInfo/worldserver.exe` (`python -c` over the bytes — comments and static
+   function names prove nothing).
+5. **Stage** a copy as `D:/AppData/wow-legends/builds/worldserver-<date>-<slug>.exe`. Staged is a
+   finished state: the running realm keeps the previous binary until the user restarts.
+6. **Deploy only on the user's word**, and only through the portal
+   (`http://127.0.0.1:8080/#/server`): Stop the Worldserver card → wait for `:8085` to leave
+   netstat *and* the process to exit → copy the exe → Start once. Never signal or spawn the
+   worldserver by hand; the portal is its parent.
+7. **Verify the boot**: one pid on `:8085` and `:7878`, `server info` answering with a small
+   uptime, `[CompanionQuestSync] enabled (…)` in `Server.log`, no `Missing property
+   CompanionQuestSync`, nothing new in `Crashes/`.
+8. **Commit per logical change and push**, then close with `HEAD == origin/master`, 0 dirty,
+   0 unpushed in both repos. A verified fix does not wait to be asked for.
+
+## Checking the live realm
+
+- `.companionadmin integrity` over SOAP is the read-only health check (owners gone, bodies gone,
+  bound twice, also in `wowlegends_companion`, ledger orphans). It works with nobody logged in.
+- SOAP authenticates against the account table; the credentials are in
+  `D:/AppData/wow-legends/portal.json` (`security.soapUser` / `security.soapPassword`), and the
+  envelope needs a bare `<command>` child — `<ns1:command>` returns "Command can not be empty".
+- Player commands (`.companionsync …`, `.companion …`) do **not** work over SOAP; the
+  `.companionadmin` twins do.
+- Module log lines go to `D:/Applications/wow-legends-server/Server.log`, which is truncated on
+  every boot — collect evidence before a restart.
+- This realm runs `cq_bindings` / `cq_pool` with **four** companions bound to one owner,
+  `LevelMode 2`, `SpecFollowRole 2`, `Debug 2`, `IntervalSeconds 30`.
+
 ## Still open
 
 - `docs/verification-open.md`: one whisper per pass under contention, and the 300 s nudge
   throttle that may be suppressing the second candidate before the selection rule sees it.
-- The pins addon has not been exercised in the client since the rename — first login after
-  this change is the real proof that map pins still draw.
+- Pin *payloads* are in the live log (`pin sync -> … 2 part(s)`), but whether the client actually
+  draws them after the `CompanionPins` rename is still a player's-eye check.
+- Role switching (gear + talents + strategies together) is gated at `SpecMinLevel 10` and has run
+  against a level-15 owner, but the switch itself has not been observed in a live session.
 
 ## Deep-review builds (21 Nov 2026, three passes over module + addons)
 
