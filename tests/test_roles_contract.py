@@ -608,8 +608,9 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         body = SOURCE.split('bool GrantOwedTalentPoints(Player* bot)', 1)[1][:1200]
         self.assertIn('bot->InitTalentForLevel();', body)          # the core owns the arithmetic
         self.assertIn('bot->GetFreeTalentPoints() != 0', body)
-        # it must never reset a tree somebody chose
-        self.assertIn('return false;                  // something is spent; this is not our business', body)
+        # the core decides what is spent; a talent map holds rows for talents never ranked, and
+        # reading that as "points are spent" is what kept the grant from ever running
+        self.assertNotIn('GetTalentMap()', body)
         body_def = SOURCE.rfind('void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)')
         reconcile = SOURCE[body_def:body_def + 1500]
         self.assertIn('GrantOwedTalentPoints(bot)', reconcile)

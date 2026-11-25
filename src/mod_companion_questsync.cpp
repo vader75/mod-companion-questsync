@@ -1884,17 +1884,13 @@ namespace
     /// talent points never fired: the point counter stayed at zero, every tree read empty with
     /// nothing to spend, and the retrain had literally nothing to work with - which is exactly what
     /// `talents: 0 point(s) in fury, 0 unspent` reported on four level-15 companions. The core's own
-    /// `InitTalentForLevel` is the authority on how many points a level affords, so it is asked
-    /// rather than reimplemented - and only when nothing has been spent, so it can never reset a
-    /// tree somebody chose.
+    /// `InitTalentForLevel` is the authority on how many points a level affords and what is already
+    /// spent, so it is asked rather than reimplemented: it tops the free points up to `affords minus
+    /// spent` and leaves a body that has spent more than it affords alone rather than guessing.
     bool GrantOwedTalentPoints(Player* bot)
     {
         if (!bot || bot->GetLevel() < CompanionTalentsFrom || bot->GetFreeTalentPoints() != 0)
             return false;
-
-        for (auto const& entry : bot->GetTalentMap())
-            if (entry.second)
-                return false;                  // something is spent; this is not our business
 
         bot->InitTalentForLevel();
         return bot->GetFreeTalentPoints() != 0;
@@ -2041,6 +2037,12 @@ namespace
 
         ApplyRoleStrategies(bot);
         ReconcileRoleSpells(bot, role);
+
+        // Nothing went in - the level affords no points, or the tree has no entry for it. That is
+        // not a retrain, so it is not announced, re-geared or whispered: the ladder speaks once if
+        // it gives up, and stays quiet every time in between.
+        if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)
+            return;
 
         g_specNotes[botGuid] = wantName;
         LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role{}",
@@ -7192,10 +7194,13 @@ namespace
 
         LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {}{} (item level {} -> {})",
                  bot->GetName(), uint32(level), specChanged ? " after a spec change" : "", before, after);
-        SayToOwner(bot, owner,
-                   "I traded my starter kit for what a level " + std::to_string(level) +
-                   " can carry - average item level " + std::to_string(before) + " to " + std::to_string(after) + ".",
-                   30);
+        // only worth saying when the kit actually moved: "17 to 17" is a receipt for nothing, and a
+        // spec change that keeps the same average said it on every attempt
+        if (after != before)
+            SayToOwner(bot, owner,
+                       "I traded my starter kit for what a level " + std::to_string(level) +
+                       " can carry - average item level " + std::to_string(before) + " to " + std::to_string(after) + ".",
+                       30);
         return after - before;
     }
 
