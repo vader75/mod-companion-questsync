@@ -1,5 +1,68 @@
 # Companion formation
 
+> **This document was rewritten when the module adopted playerbots' formations.** It used to
+> describe a ring the module walked companions onto with `MoveFollow`, out of combat only. That
+> was a second spacing system, and the weaker one: it could not position anybody during a fight.
+> The presets below are now names for playerbots' own formations, and movement is the bot's.
+> The reasoning and the alternatives are in `docs/companion-distance-review.md`.
+
+The module adopts playerbots' formation system rather than re-implementing it: it tells each
+companion which formation to stand in, and playerbots' formation strategy does the walking -
+including in combat, with combat movement priority. Because a formation is persisted by the bot
+itself, the module re-sends it on change, after every summon, and on the slow reconcile.
+
+| Preset | playerbots formation | Reads as |
+|---|---|---|
+| `auto` (default) | by role | a tank leads, a healer keeps its distance, melee closes |
+| `close` | `near` | arm's length, for handing items over |
+| `lead` | `shield` | a wall between you and the mob |
+| `tight` | `queue` | single file behind you |
+| `loose` | `circle` | a ring around you, out of cleave |
+| `spread` | `far` | out of each other's way |
+| `off` | *(untouched)* | distance entirely playerbots' business |
+
+`auto` resolves per companion:
+
+| Role | Formation |
+|---|---|
+| `tank` | `shield` |
+| `healer` | `far` |
+| `support` | `circle` |
+| `dps` melee | `melee` |
+| `dps` ranged | `far` |
+| `auto` | `chaos` |
+
+Two overrides sit on top, and both are temporary by construction: an open trade window puts the
+companion at `near` so a hand-over is not a walk, and a companion engaged `never` takes `far`
+once you are fighting - a companion that refuses the fight also refuses to stand in it.
+
+## Out of a fight, distance serves the interaction
+
+A vendor, a quest giver, a trade window and a body to loot all happen out of combat, and all of
+them are spoiled by a companion standing twelve yards away. Two clamps sit on top of the
+formation while you are not fighting:
+
+- **Interaction** - a trade window on *either* side, or an open gossip menu, puts the party at
+  `near`. This is the case the old trade clamp missed: it only looked at the bot's own window,
+  so the trade *you* opened was not covered.
+- **Idle gather** - once you have stood on the same spot for three seconds, the shape goes one
+  step tighter (`far` → `circle` → `queue` → `near`). Start moving and the role formation comes
+  straight back.
+
+Both are deliberately out of combat only, because in a fight distance belongs to the role. Neither
+of them moves anybody by hand: they change which formation you are in, and playerbots walks it.
+
+## Distance is also the leash
+
+The same number answers "how far will it follow me into a fight". The module will not pin a
+target (`engage mine`) for a companion further behind than its formation works - 5 yd for
+`near`, 9 for `melee`/`shield`, 15 for `circle`, 25 for `far`, plus 5 yd of slack - because
+ordering a bot in from across the field is how companions sprint at a mob that is already dead.
+
+`WowLegends.BotPitchIn.Radius` stays untouched and realm-wide: the leash is per companion, in
+the module, and it does not change what the server considers "close enough to help".
+
+
 Companions follow at a spacing the player chooses. Four presets, one per owner, changed
 from the addon header or with a slash command:
 

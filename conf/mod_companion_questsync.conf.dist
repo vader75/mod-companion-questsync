@@ -265,11 +265,15 @@ CompanionQuestSync.LevelGear = 1
 CompanionQuestSync.MapPins = 1
 # How far behind you companions hold when they follow: off, close (2 yd), tight (4 yd),
 # loose (12 yd) or spread (20 yd). An open trade window pulls a companion to 2 yd
-# whatever the preset is, so an item hand-over is not a walk. Combat hands movement
-# straight back to the bot's own AI; the
-# setting is per player per session and resets to this default at the next login.
-# See docs/companion-formation.md. Default: off
-CompanionQuestSync.Formation = off
+# whatever the preset is, so an item hand-over is not a walk.
+#
+# Presets are a friendly face for playerbots' own formations: close->near, tight->queue,
+# loose->circle, spread->far, lead->shield. "auto" (the default) asks the ROLE instead: a
+# tank takes shield and stands between you and the mob, a healer takes far, melee dps takes
+# melee, ranged dps and support keep their distance. "off" leaves distance entirely to
+# playerbots. The setting is per player per session and resets to this default at login.
+# See docs/companion-distance-review.md. Default: auto
+CompanionQuestSync.Formation = auto
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
@@ -305,7 +309,8 @@ CompanionQuestSync.ExtraBags = 4
 #
 
 #    CompanionQuestSync.Formation
-#        Follow spacing for the player's companions: off, close (2 yd), tight (4 yd),
+#        Distance for the player's companions. auto (by role, default), close (near),
+#        tight (queue), loose (circle), spread (far), lead (shield), off. Was:
 #        loose (12 yd) or spread (20 yd). While a companion has a trade window open with
 #        you it closes to 2 yd regardless, so item hand-overs are not a walk. Only the distance is managed; combat
 #        returns movement to the bot's own AI. Players change it per session with

@@ -141,7 +141,7 @@ namespace
         bool trimSurplus       = true;      // spare trade goods, at a vendor, only when bags are tight
         bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
-        std::string formation  = "off";     // off | tight | loose | spread (docs/companion-formation.md)
+        std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
@@ -554,6 +554,13 @@ namespace
     std::map<std::pair<uint32, uint32>, uint32> g_vanishLogged;      // (bot, quest) -> unix time
     std::unordered_map<uint32, std::string> g_pinnedQuests;        // owner guid -> pinned set
     std::map<uint32, std::string> g_formation;                     // owner guid -> formation preset
+    std::map<uint32, std::string> g_formationApplied;              // bot guid -> formation we set
+    struct IdleTrack
+    {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        uint32 since = 0;           // when the position last changed
+    };
+    std::map<uint32, IdleTrack> g_ownerIdle;                        // owner guid -> standing still?
     std::map<uint32, std::string> g_roleNotes;    // bot guid -> strategies this class lacks
     std::map<uint32, std::string> g_engageNotes;  // bot guid -> why engagement control is unavailable
     struct AppliedEdit
@@ -699,7 +706,7 @@ namespace
         g_cfg.levelGear           = sConfigMgr->GetOption<bool>("CompanionQuestSync.LevelGear", true);
 
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
-        g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "off");
+        g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -895,6 +902,7 @@ namespace
         g_passiveHeld.erase(botGuid);
         g_pinnedTarget.erase(botGuid);
         g_petTauntOff.erase(botGuid);
+        g_formationApplied.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
@@ -1481,6 +1489,9 @@ namespace
 
     /// Hold a companion to its engagement policy. Runs on the fast tick; every branch is a
     /// no-op for "auto", which is what keeps the setting honest.
+    std::string EffectiveFormation(Player* owner, Player* bot);
+    float FormationLeash(std::string const& formation);
+
     void ApplyEngagement(Player* owner, Player* bot)
     {
         if (!owner || !bot || !EngageColumnPresent())
@@ -1544,6 +1555,10 @@ namespace
         // targets, so repeating it is noise that fights the AI's own targeting.
         if (policy == "mine")
         {
+            // the leash: never order a companion in from further away than its formation works
+            if (owner->GetDistance(bot) > FormationLeash(EffectiveFormation(owner, bot)) + 5.0f)
+                return;
+
             uint32 const wantTarget = (ownerFighting && ownerHitsSomething)
                                           ? ownerTarget->GetGUID().GetCounter()
                                           : 0;
@@ -3888,34 +3903,60 @@ namespace
         return tookUp;
     }
 
-    /// Formation presets: the distance each companion keeps behind its owner.
+    /// Distance: presets are a friendly face for playerbots' own formations.
     ///
-    /// Only the *spacing* belongs to the module. The angle mirrors playerbots' own follow
-    /// formula, and combat hands movement straight back to the bot.
-    constexpr float FormationCloseSpacing  = 2.0f;
-    constexpr float FormationTightSpacing  = 4.0f;
-    constexpr float FormationLooseSpacing  = 12.0f;
-    constexpr float FormationSpreadSpacing = 20.0f;
+    /// The module used to walk bots onto a ring itself, out of combat, with its own spacing
+    /// maths. playerbots ships nine formations that already move bots with combat priority
+    /// (`CombatStrategy` named "formation"), persist per bot, and understand geometry
+    /// (a shield wall, a wedge, single file). Re-implementing that was the wrong shape: ours
+    /// could not position anybody during a fight, which is when positioning matters.
+    ///
+    /// So a preset now means "put this companion in that formation", and `auto` means "let its
+    /// role choose": a tank leads, a healer keeps its distance, melee closes.
+    char const* kFormationPresets[] = { "off", "auto", "close", "tight", "loose", "spread", "lead" };
 
-    float FormationSpacing(std::string const& preset)
+    /// The playerbots formation an explicit preset stands for, or "" when the preset is not one.
+    std::string FormationForPreset(std::string const& preset)
     {
         if (preset == "close")
-            return FormationCloseSpacing;
+            return "near";
         if (preset == "tight")
-            return FormationTightSpacing;
+            return "queue";
         if (preset == "loose")
-            return FormationLooseSpacing;
+            return "circle";
         if (preset == "spread")
-            return FormationSpreadSpacing;
-        return 0.0f;                        // "off", or a name we do not know: leave the AI alone
+            return "far";
+        if (preset == "lead")
+            return "shield";
+        return std::string();
+    }
+
+    /// How far, roughly, a formation lets a companion work from its owner.
+    ///
+    /// This is the leash. The module will not pin a target for a companion further behind than
+    /// this: ordering a bot into a fight it is nowhere near is how companions sprint across a
+    /// zone at a mob that is already dead.
+    float FormationLeash(std::string const& formation)
+    {
+        if (formation == "near")
+            return 5.0f;
+        if (formation == "queue")
+            return 7.0f;
+        if (formation == "melee" || formation == "shield" || formation == "arrow")
+            return 9.0f;
+        if (formation == "circle")
+            return 15.0f;
+        if (formation == "far")
+            return 25.0f;
+        return 12.0f;                    // chaos, or a formation we have not measured
     }
 
     /// A preset name the module accepts, or an empty string for a typo.
     std::string FormationPreset(std::string const& name)
     {
-        if (name == "off" || name == "close" || name == "tight" || name == "loose" ||
-            name == "spread")
-            return name;
+        for (char const* preset : kFormationPresets)
+            if (name == preset)
+                return name;
         return std::string();
     }
 
@@ -3927,9 +3968,129 @@ namespace
         if (it == g_formation.end())
         {
             std::string const configured = FormationPreset(FormationLower(g_cfg.formation));
-            it = g_formation.emplace(guid, configured.empty() ? std::string("off") : configured).first;
+            it = g_formation.emplace(guid, configured.empty() ? std::string("auto") : configured).first;
         }
         return it->second;
+    }
+
+    /// How long a player has to stand still before the party may gather.
+    ///
+    /// Long enough that walking between two mobs does not flip the formation back and forth,
+    /// short enough that stopping at a vendor or a body to loot feels immediate.
+    uint32 constexpr kIdleGatherSeconds = 3;
+
+    /// Is the player in the middle of something distance could spoil?
+    ///
+    /// A gossip menu or a trade window on *either* side. Only the bot's own window was checked
+    /// before, which missed the case that actually bites: the player opens the trade.
+    bool OwnerIsInteracting(Player* owner)
+    {
+        if (!owner)
+            return false;
+
+        if (owner->GetTradeData())
+            return true;
+
+        return owner->PlayerTalkClass &&
+               owner->PlayerTalkClass->GetGossipMenu().GetMenuItemCount() > 0;
+    }
+
+    /// One step tighter - what "gather for a moment" means, per shape.
+    std::string OneStepTighter(std::string const& shape)
+    {
+        if (shape == "far")
+            return "circle";
+        if (shape == "circle")
+            return "queue";
+        if (shape == "melee" || shape == "shield" || shape == "arrow" || shape == "queue")
+            return "near";
+        return shape;                   // near, chaos: nothing tighter that reads well
+    }
+
+    /// Has the player been on the same spot for a moment?
+    ///
+    /// Tracked rather than asked of the client: an unchanged position is the same signal the
+    /// movement flags give, and it survives sitting, casting, looting and reading a quest text.
+    bool OwnerStandingStill(Player* owner)
+    {
+        if (!owner)
+            return false;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        IdleTrack& track = g_ownerIdle[owner->GetGUID().GetCounter()];
+
+        float const dx = track.x - owner->GetPositionX();
+        float const dy = track.y - owner->GetPositionY();
+        float const dz = track.z - owner->GetPositionZ();
+
+        if (!track.since || dx * dx + dy * dy + dz * dz > 1.0f)      // moved a yard or more
+        {
+            track.x = owner->GetPositionX();
+            track.y = owner->GetPositionY();
+            track.z = owner->GetPositionZ();
+            track.since = now;
+            return false;
+        }
+
+        return now - track.since >= kIdleGatherSeconds;
+    }
+
+    /// The formation a companion should be in right now.
+    ///
+    /// Three things, in order: an interaction you opened (trade on either side, a gossip menu)
+    /// puts the party at your elbow; otherwise the preset wins if you set one, else the role
+    /// decides; and out of a fight, if you have stopped moving, the shape gathers one step
+    /// tighter. Nothing here moves anybody - playerbots' formation strategy does the walking.
+    ///
+    /// "" means the module is not managing this companion's distance: the old "off", kept as an
+    /// escape hatch for anyone who would rather playerbots' default `chaos` stood.
+    std::string EffectiveFormation(Player* owner, Player* bot)
+    {
+        if (!owner || !bot)
+            return std::string();
+
+        std::string const preset = FormationFor(owner);
+        if (preset == "off")
+            return std::string();
+
+        // the bot's own trade window, and yours: both mean "hand it over, not a walk"
+        if (bot->GetTradeData() || OwnerIsInteracting(owner))
+            return "near";
+
+        std::string shape = FormationForPreset(preset);      // "" for "auto"
+
+        if (shape.empty())
+        {
+            if (owner->IsInCombat())
+            {
+                uint32 const botGuid = bot->GetGUID().GetCounter();
+                std::string const role = CompanionRole(botGuid);
+                std::string const policy = CompanionEngage(botGuid);
+
+                // a companion that refuses the fight also refuses to stand in it
+                if (policy == "never")
+                    return "far";
+
+                if (role == "tank")
+                    shape = "shield";    // between you and the mob: what tanking means
+                else if (role == "healer")
+                    shape = "far";       // inside heal range, outside cleave
+                else if (role == "support")
+                    shape = "circle";
+                else if (role == "dps")
+                    shape = PlayerbotAI::IsMelee(bot) ? "melee" : "far";
+                else
+                    shape = "chaos";     // auto: exactly what playerbots would have done
+            }
+            else
+                shape = "chaos";         // out of a fight, an auto companion is unmanaged
+        }
+
+        // out of a fight, a player who has stopped moving lets the party gather
+        if (!owner->IsInCombat() && OwnerStandingStill(owner))
+            return OneStepTighter(shape);
+
+        return shape;
     }
 
     /// Bring a companion's spells, talents and professions up to the level it carries.
@@ -8577,59 +8738,39 @@ namespace
     }
 
     /// Keep the owner's summoned companions at the preset spacing.
+    /// Puts each companion into the formation its role asks for, and speaks only on change.
     ///
-    /// Re-issues only when a companion is meaningfully off its mark, or is not following at
-    /// all: restarting the motion generator every tick fights the AI's own pathing and makes
-    /// companions jitter instead of walk. Combat is the AI's business - we simply stop asking.
+    /// No motion is generated here any more. playerbots' formation strategy owns movement -
+    /// including in combat, which is the point - and re-asserting a formation a bot already has
+    /// would only cost a whisper. It is re-sent on change, after a summon, and on the slow
+    /// reconcile, because a bot can be recreated with its own persisted formation.
     void ApplyFormation(Player* owner)
     {
         if (!owner || !owner->IsInWorld() || !owner->IsAlive())
-            return;
-
-        float spacing = FormationSpacing(FormationFor(owner));
-        if (spacing <= 0.0f)
             return;
 
         std::vector<uint32> bots;
         if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
             return;
 
-        std::sort(bots.begin(), bots.end());      // stable index: a resummon must not shuffle the ring
-
-        std::vector<Player*> live;
         for (uint32 const botGuid : bots)
         {
             Player* bot = FindCompanionPlayer(botGuid);
-            if (bot && bot->IsInWorld() && IsControlledCompanion(bot, owner))
-                live.push_back(bot);
-        }
-        if (live.empty())
-            return;
-
-        float const start = owner->GetOrientation();
-        float const total = float(live.size());
-        for (size_t i = 0; i < live.size(); ++i)
-        {
-            Player* bot = live[i];
-            if (!bot->IsAlive() || bot->IsInCombat() || bot->GetMapId() != owner->GetMapId() ||
-                bot->IsInFlight() || bot->GetVehicle())
+            if (!bot || !bot->IsInWorld() || !IsControlledCompanion(bot, owner))
                 continue;
 
-            // playerbots' own follow angle, so the ring reads the way its AI draws it
-            float const angle = start + (0.125f + 1.75f * float(i + 1) / total +
-                                         (live.size() == 2 ? 0.125f : 0.0f)) * float(M_PI);
-
-            // An open trade window overrides the preset: a companion you are handing items
-            // to should be at arm's length, not wherever the formation happens to put it.
-            float const wanted = bot->GetTradeData() ? std::min(spacing, FormationCloseSpacing)
-                                                     : spacing;
-
-            // Distance hysteresis alone: re-issuing while a companion already sits on its mark
-            // restarts the generator every tick and makes it jitter instead of walk.
-            if (std::fabs(bot->GetDistance(owner) - wanted) <= 2.5f)
+            std::string const wanted = EffectiveFormation(owner, bot);
+            std::string const target = wanted.empty() ? std::string("chaos") : wanted;
+            auto const applied = g_formationApplied.find(botGuid);
+            if (applied != g_formationApplied.end() && applied->second == target)
                 continue;
 
-            bot->GetMotionMaster()->MoveFollow(owner, wanted, angle);
+            PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+            if (!ai)
+                continue;
+
+            ai->HandleCommand(CHAT_MSG_WHISPER, "formation " + target, owner);
+            g_formationApplied[botGuid] = target;
         }
     }
 
@@ -9636,17 +9777,17 @@ public:
 
         if (a.empty())
         {
-            handler->PSendSysMessage("|cffff8000formation|r: {} ({:.0f} yd behind you). "
-                                     "Use close | tight | loose | spread | off.",
-                                     current, FormationSpacing(current));
+            handler->PSendSysMessage("|cffff8000formation|r: {} (leash {:.0f} yd). Use auto | close | "
+                                     "tight | loose | spread | lead | off.",
+                                     current, FormationLeash(FormationForPreset(current)));
             return true;
         }
 
         std::string const wanted = FormationPreset(FormationLower(a[0]));
         if (wanted.empty())
         {
-            handler->PSendSysMessage("|cffff8000formation|r: '{}' is not one of close, tight, loose, "
-                                     "spread, off.", a[0]);
+            handler->PSendSysMessage("|cffff8000formation|r: '{}' is not one of auto, close, tight, loose, "
+                                     "spread, lead, off.", a[0]);
             return true;
         }
 
@@ -9654,11 +9795,14 @@ public:
         ApplyFormation(player);              // take effect now, not on the next tick
 
         if (wanted == "off")
-            handler->PSendSysMessage("Formation off - your companions follow as their own AI sees fit.");
+            handler->PSendSysMessage("Formation off - distance is left entirely to playerbots.");
+        else if (wanted == "auto")
+            handler->PSendSysMessage("Formation |cff20ff20auto|r - each companion takes the shape its role "
+                                     "asks for: a tank leads, a healer keeps its distance, melee closes.");
         else
-            handler->PSendSysMessage("Formation |cff20ff20{}|r - companions hold about {:.0f} yd behind you "
-                                     "and hand movement back to their AI in combat.",
-                                     wanted, FormationSpacing(wanted));
+            handler->PSendSysMessage("Formation |cff20ff20{}|r - every companion takes playerbots' "
+                                     "|cffffffff{}|r formation, and keeps its own movement in combat.",
+                                     wanted, FormationForPreset(wanted));
 
         SendProtocolLine(player, "Formation " + wanted);
         return true;
@@ -11349,6 +11493,7 @@ public:
         g_lastPoolStock.erase(ownerGuid);
         g_pinSyncAt.erase(ownerGuid);
         g_formation.erase(ownerGuid);
+        g_ownerIdle.erase(ownerGuid);
         g_pinRevisions.erase(ownerGuid);
         g_pinRequestAt.erase(ownerGuid);
         g_requestedSupplies.erase(ownerGuid);

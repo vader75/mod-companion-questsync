@@ -103,6 +103,28 @@ staying out of the AoE. `quiet` keeps its formation - it is fighting, just softl
 limit is binding: `leash 17 yd (spacing 12 + 5) vs pitch-in 20` - so the next "why did it run
 in" is one line rather than a source dive.
 
+## What landed
+
+All of it, in one pass:
+
+- **S1** - presets map to playerbots formations (`close`→`near`, `tight`→`queue`, `loose`→
+  `circle`, `spread`→`far`, `lead`→`shield`); the module sends the bot's own `formation` verb
+  on change and no longer calls `MoveFollow` at all.
+- **S2** - `auto` is the default and resolves per role: tank `shield`, healer `far`, support
+  `circle`, melee dps `melee`, ranged dps `far`, `auto` `chaos`.
+- **S3** - the leash gates the pin: no target is pinned for a companion further behind than
+  its formation works, plus 5 yd.
+- **S4** - `never` takes `far` while you fight.
+- **S5** - `inspect` reports the formation next to the role.
+
+Two clamps were added after the first pass, for the interaction case a flat formation cannot
+serve: an open trade window on **either** side or a gossip menu puts the party at `near`, and
+standing still for three seconds gathers the shape one step tighter (`far` → `circle` → `queue`
+→ `near`). Both apply out of combat only - in a fight, distance belongs to the role.
+
+The trade-window clamp survives as an override rather than a distance calculation: an open
+trade window means `near`, whatever the preset says.
+
 ## Recommendation
 
 Do **S1 + S2** together, then **S3**:

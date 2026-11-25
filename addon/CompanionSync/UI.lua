@@ -1074,9 +1074,11 @@ local function CreateWindow()
     -- sit in the header next to Add companion. Only the distance is ours - combat hands movement
     -- straight back to the bot's own AI, which is why there is no "attack" button here.
     local FORMATIONS = {
-        { name = "close",  label = "Close",  hint = "2 yd behind you - arm's length, for handing items over" },
-        { name = "tight",  label = "Tight",  hint = "4 yd behind you - close enough to see your back" },
-        { name = "loose",  label = "Loose",  hint = "12 yd behind you - room to cast" },
+        { name = "auto",   label = "Auto",   hint = "Each companion takes the shape its role asks for - a tank leads, a healer keeps its distance" },
+        { name = "close",  label = "Close",  hint = "Arm's length, for handing items over" },
+        { name = "lead",   label = "Lead",   hint = "Companions form a shield wall in front of you" },
+        { name = "tight",  label = "Tight",  hint = "Single file behind you - doors and corridors" },
+        { name = "loose",  label = "Loose",  hint = "A ring around you - room to cast, out of cleave" },
         { name = "spread", label = "Spread", hint = "20 yd behind you - out of each other's way" },
         { name = "off",    label = "Off",    hint = "leave the bot's own follow alone" },
     }
@@ -1093,7 +1095,7 @@ local function CreateWindow()
     end
 
     G.RefreshFormation = function()
-        local active = G.Formation or "off"
+        local active = G.Formation or "auto"
         for name, button in pairs(frame.formation) do
             local text = button:GetFontString()
             if name == active then text:SetTextColor(1.0, 0.82, 0.30)
