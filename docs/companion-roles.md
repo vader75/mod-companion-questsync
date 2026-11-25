@@ -245,6 +245,15 @@ tanks and death knights are asked for nothing: for them the two-hander *is* the 
 that comes off goes to the bags and is then marked for the vendor, so the hands change without the
 bags filling.
 
+playerbots fills the trees from a per-level build table, and that table has no entry for the
+levels it was not authored for: `InitTalentsTree` wipes the trees, spends nothing, and reports
+success. Measured at level 15: the retrain logged `no points -> protection`, the trees came back
+empty, and the card said `none`. So from ten points upward - where a tree starts to mean something -
+a retrain that leaves the role's tree empty spends the free points itself: lowest row first, one
+rank at a time, with the core vetting every pick through `LearnTalent`, so prerequisites, tier gates
+and rank caps are its call and not ours. The log says how many points went in and why
+(`no build template for level 15`).
+
 When a retrain does not take, it is not repeated every pass. The module reads the trees back after
 each attempt, retries on a widening interval (30 seconds, two minutes, ten), and after three
 attempts stops and says so once - `is still fury after 3 attempts at protection: leaving its talents

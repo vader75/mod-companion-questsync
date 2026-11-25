@@ -552,6 +552,10 @@ namespace
     /// is throttled rather than tied to the pass.
     std::unordered_map<uint32, uint32> g_kitWatchAt;
 
+    /// Where talents start to mean something. Below this a tree is a handful of points wide and a
+    /// spec is theatre; from here the role's tree is worth filling, template or no template.
+    uint8 const CompanionTalentsFrom = 10;
+
     /// Pieces a re-gear pulled out of a slot and left in the bags, bot guid -> item guid.
     ///
     /// playerbots destroys the item it replaces *in* a slot, so a plain upgrade leaves the bags
@@ -1717,6 +1721,68 @@ namespace
         return SpecTabOf(bot, bot->GetActiveSpec());
     }
 
+    /// Spend the companion's free points into a tree, without playerbots' build templates.
+    ///
+    /// `InitTalentsTree` fills the trees from `parsedSpecLinkOrder[class][spec][level]`, and it
+    /// returns having spent nothing when that table has no entry for the level - it wipes the tree,
+    /// learns nothing, and reports success. At ten points the tree is worth filling anyway, so when
+    /// the template leaves the wanted tree empty the points go in here: lowest row first, one rank at
+    /// a time, and the core vetting every pick through `LearnTalent` (prerequisites, tier gates,
+    /// rank caps). A pick the core refuses leaves the point count unchanged, which is how the loop
+    /// knows to stop rather than spin.
+    uint32 SpendPointsIntoTree(Player* bot, uint8 tab)
+    {
+        if (!bot || tab > 2 || bot->GetLevel() < CompanionTalentsFrom)
+            return 0;
+
+        uint32 const classMask = bot->getClassMask();
+        std::vector<std::pair<uint32, uint32>> candidates;      // row, then talent id: stable order
+        for (uint32 i = 1; i < sTalentStore.GetNumRows(); ++i)
+        {
+            TalentEntry const* info = sTalentStore.LookupEntry(i);
+            if (!info)
+                continue;
+
+            TalentTabEntry const* tabInfo = sTalentTabStore.LookupEntry(info->TalentTab);
+            if (!tabInfo || tabInfo->tabpage != tab || !(classMask & tabInfo->ClassMask))
+                continue;
+
+            candidates.emplace_back(info->Row, i);
+        }
+        std::sort(candidates.begin(), candidates.end());
+
+        uint32 spent = 0;
+        bool progress = true;
+        while (progress && bot->GetFreeTalentPoints())
+        {
+            progress = false;
+            for (auto const& candidate : candidates)
+            {
+                if (!bot->GetFreeTalentPoints())
+                    break;
+
+                TalentEntry const* info = sTalentStore.LookupEntry(candidate.second);
+                if (!info)
+                    continue;
+
+                // the rank it holds is how many of this talent's RankID spells it knows
+                uint32 rank = 0;
+                for (uint8 r = 0; r < MAX_TALENT_RANK; ++r)
+                    if (info->RankID[r] && bot->HasSpell(info->RankID[r]))
+                        ++rank;
+
+                uint32 const before = bot->GetFreeTalentPoints();
+                bot->LearnTalent(candidate.second, rank + 1);
+                if (bot->GetFreeTalentPoints() < before)
+                {
+                    ++spent;
+                    progress = true;
+                }
+            }
+        }
+        return spent;
+    }
+
     std::unordered_map<uint32, std::string> g_specNotes;   // bot guid -> the last decision logged
 
     /// What was asked of a companion's talents, and how the asking went.
@@ -1894,6 +1960,18 @@ namespace
 
         PlayerbotFactory factory(bot, bot->GetLevel());
         factory.InitTalentsTree(false, true, true, want);
+
+        // The template is per level and silent where it has no entry: the trees come back wiped with
+        // every point unspent, and the retrain still looks like it worked. From ten the role's tree
+        // is worth filling, so the points go in here instead of being left on the floor.
+        if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)
+        {
+            if (uint32 const spent = SpendPointsIntoTree(bot, want); spent)
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] {} put {} talent point(s) into {} itself: "
+                         "playerbots has no build template for level {}",
+                         bot->GetName(), spent, wantName, uint32(bot->GetLevel()));
+        }
 
         // strategies are picked from the trees, so the AI has to be rebuilt from the new ones
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
@@ -6846,8 +6924,10 @@ namespace
         if (need == KitNeed::None)
             return false;
 
-        // the refit pushes what it replaces into the bags, so it needs the same room the pass does
-        if (bot->GetFreeInventorySpace() < CompanionBagReserve)
+        // a refit swaps one piece out, so it needs somewhere to put that piece - not the room the
+        // whole pass wants. Holding it to the pass's reserve meant the refit was refused precisely
+        // when it was most needed: right after a pass that had just displaced several pieces.
+        if (bot->GetFreeInventorySpace() < 1)
             return false;
 
         Item* mainhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);

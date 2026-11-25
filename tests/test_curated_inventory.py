@@ -288,7 +288,7 @@ class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
         body = fn_body('bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)')
         self.assertIn('/*swap=*/true', body)
         refit = fn_body('bool RepairKitShape(Player* bot, std::string const& role)')
-        self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', refit)
+        self.assertIn('bot->GetFreeInventorySpace() < 1', refit)   # one slot for the piece it swaps out
         # the sweep that marks displaced pieces runs after the refit, so swapped pieces are vendored
         pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
         self.assertLess(pass_.index('RepairKitShape(bot'), pass_.index('MarkKitDisplaced(bot, wornBefore)'))

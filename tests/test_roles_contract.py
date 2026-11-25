@@ -574,3 +574,48 @@ class SpecLineTravelsWithRoles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TalentsArriveWithoutATemplate(unittest.TestCase):
+    """playerbots fills the trees from `parsedSpecLinkOrder[class][spec][level]` and returns having
+    spent nothing when that table has no entry for the level - wiping the tree and reporting
+    success. So a retrain has to be able to spend the points itself, from level ten up.
+    """
+
+    def test_there_is_a_fallback_allocation_at_all(self):
+        self.assertIn('uint32 SpendPointsIntoTree(Player* bot, uint8 tab)', SOURCE)
+        body = SOURCE.split('uint32 SpendPointsIntoTree(Player* bot, uint8 tab)', 1)[1][:2600]
+        # the core vets every pick; we only decide the order
+        self.assertIn('bot->LearnTalent(candidate.second, rank + 1);', body)
+        self.assertIn('if (bot->GetFreeTalentPoints() < before)', body)   # refused pick = no progress
+        self.assertIn('while (progress && bot->GetFreeTalentPoints())', body)
+        self.assertIn('candidates.emplace_back(info->Row, i);', body)
+        self.assertIn('std::sort(candidates.begin(), candidates.end());', body)   # lowest row first
+        self.assertIn('!(classMask & tabInfo->ClassMask)', body)                  # never another class's tree
+
+    def test_it_engages_from_level_ten(self):
+        self.assertIn('uint8 const CompanionTalentsFrom = 10;', SOURCE)
+        body = SOURCE.split('uint32 SpendPointsIntoTree(Player* bot, uint8 tab)', 1)[1][:600]
+        self.assertIn('bot->GetLevel() < CompanionTalentsFrom', body)
+        # a level gate that would keep the low levels out is exactly what this replaces
+        self.assertNotIn('< 40', body)
+        self.assertNotIn('specMinLevel', body)
+
+    def test_the_retrain_uses_it_when_the_template_left_the_tree_empty(self):
+        self.assertIn('if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)', SOURCE)
+        self.assertIn('no build template for level', SOURCE)
+        retrain = SOURCE.split('factory.InitTalentsTree(false, true, true, want);', 1)[1][:1200]
+        self.assertLess(retrain.index('SpendPointsIntoTree(bot, want)'), retrain.index('ai->Reset()'))
+
+
+class ARefitNeedsOneSlotNotEight(unittest.TestCase):
+    """The refit was gated on the pass's bag reserve, so it was refused exactly when it was needed:
+    right after a pass that had just displaced several pieces into the bags."""
+
+    def test_the_refit_gate_is_one_slot(self):
+        body = SOURCE.split('bool RepairKitShape(Player* bot, std::string const& role)', 1)[1][:900]
+        self.assertIn('bot->GetFreeInventorySpace() < 1', body)
+        self.assertNotIn('CompanionBagReserve', body)
+        # the gear pass keeps its own reserve
+        pass_ = SOURCE.split('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 1)[1][:9000]
+        self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', pass_)
