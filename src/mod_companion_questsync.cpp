@@ -9754,7 +9754,26 @@ public:
                 handler->PSendSysMessage("  |cffffd200engagement:|r {}", engageNote->second);
 
             auto const withheldSpells = g_spellsWithheld.find(botGuid);
-            if (withheldSpells != g_spellsWithheld.end() && !withheldSpells->second.empty())
+            if (withheldSpells == g_spellsWithheld.end() || withheldSpells->second.empty())
+            {
+                // The record of a withholding is per session; the withholding is not. After a
+                // restart a Charge taken last week is still missing, so say what the spellbook
+                // says instead of letting the silence look like "all fine".
+                std::string absent;
+                for (GapCloser const& closer : kGapClosers)
+                {
+                    if (bot->getClass() != closer.klass || bot->HasSpell(closer.spell))
+                        continue;
+                    if (!absent.empty())
+                        absent += ", ";
+                    absent += closer.name;
+                }
+
+                if (!absent.empty())
+                    handler->PSendSysMessage("  gap closers: {} not in the spellbook (withheld by an "
+                                             "earlier session, or never trained)", absent);
+            }
+            else
             {
                 std::string names;
                 for (uint32 const spell : withheldSpells->second)
