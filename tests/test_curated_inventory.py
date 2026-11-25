@@ -244,3 +244,62 @@ class DisplacedGearGoesToTheVendor(unittest.TestCase):
     def test_a_pass_that_changed_nothing_says_so(self):
         body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
         self.assertIn('no slot needed changing', body)
+
+
+def fn_body(signature: str, budget: int = 4000) -> str:
+    """A window over a helper, wide enough for the assertions without a fragile end anchor."""
+    return SOURCE.split(signature, 1)[1][:budget]
+
+
+class TheRoleDecidesTheShapeOfTheKit(unittest.TestCase):
+    """Score cannot see shape. A tank with a two-hander has given up its shield, and the factory
+    will happily hand it one because the two-hander scores highest for the spec.
+
+    Only the roles that imply a shape get one: tank on a class that can hold a shield, and healer
+    whose hands are full of a melee two-hander. Damage and support are left to best score.
+    """
+
+    def test_only_shape_roles_are_asked_for_anything(self):
+        need = fn_body('KitNeed KitNeedFor(uint8 cls, std::string const& role)')
+        self.assertIn('cls == CLASS_WARRIOR || cls == CLASS_PALADIN || cls == CLASS_SHAMAN', need)
+        self.assertIn('return canShield ? KitNeed::Shield : KitNeed::None;', need)
+        self.assertIn('role == "healer"', need)
+        self.assertIn('return KitNeed::CasterWeapon;', need)
+        # a druid tank is a bear and a death knight has no shield slot: no requirement
+        self.assertNotIn('CLASS_DRUID', need)
+        self.assertNotIn('CLASS_DEATH_KNIGHT', need)
+        # and nothing is asked of damage or support
+        for role in ('dps', 'support'):
+            self.assertNotIn('role == "%s"' % role, need)
+
+    def test_a_staff_is_not_a_melee_two_hander(self):
+        body = fn_body('bool RepairKitShape(Player* bot, std::string const& role)')
+        melee = body[body.index('bool const meleeTwoHand'):]
+        melee = melee[:melee.index(';')]
+        for weapon in ('AXE2', 'MACE2', 'SWORD2', 'POLEARM'):
+            self.assertIn('ITEM_SUBCLASS_WEAPON_' + weapon, melee)
+        self.assertNotIn('STAFF', melee)          # a caster's two-hander is exactly right
+        self.assertIn('ITEM_SUBCLASS_WEAPON_STAFF ? "staff"', SOURCE)
+
+    def test_the_hands_change_without_the_bags_filling(self):
+        body = fn_body('bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)')
+        self.assertIn('/*swap=*/true', body)
+        refit = fn_body('bool RepairKitShape(Player* bot, std::string const& role)')
+        self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', refit)
+        # the sweep that marks displaced pieces runs after the refit, so swapped pieces are vendored
+        pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
+        self.assertLess(pass_.index('RepairKitShape(bot'), pass_.index('g_staleGear[botGuid].insert(raw)'))
+
+    def test_the_refit_runs_after_the_factory_that_it_corrects(self):
+        pass_ = fn_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 8000)
+        self.assertLess(pass_.index('factory.InitEquipment'), pass_.index('RepairKitShape(bot'))
+
+    def test_candidates_are_scanned_once_per_piece_and_level_band(self):
+        body = fn_body('uint32 FindKitItem(Player* bot, KitPiece piece)')
+        self.assertIn('uint32 const key = uint32(piece) * 100 + level / 5;', body)
+        self.assertIn('GetItemTemplateStoreFast()', body)
+        self.assertIn('bot->CanUseItem(proto) == EQUIP_ERR_OK', body)
+
+    def test_inspect_says_what_the_hands_are(self):
+        self.assertIn('"  kit: {} ', SOURCE)
+        self.assertIn('KitShapeText(bot)', SOURCE)

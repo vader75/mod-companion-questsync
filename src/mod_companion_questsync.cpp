@@ -6554,6 +6554,220 @@ namespace
     /// what the bag happens to hold. Playerbots already knows how to dress a bot of a given
     /// level, so a kit that lags is rebuilt incrementally - slots are upgraded, nothing is
     /// re-rolled wholesale, and the bag, quest items and profession tools are untouched.
+    // ------------------------------------------------------- the shape a role insists on
+    //
+    // The factory picks by score for the spec tab, which is the right answer for damage and
+    // support - and the wrong one for the two roles that imply a shape rather than a number: a
+    // tank holding a two-hander has given up its shield, and a healer holding a melee two-hander
+    // has given up its caster weapon. Score cannot see that; a player does. So the pass is
+    // followed by one check and, at most, one refit.
+
+    enum class KitNeed
+    {
+        None,
+        Shield,          // tank on a class that can carry one
+        CasterWeapon     // healer whose hands are full of a melee two-hander
+    };
+
+    /// What the role asks of the kit's shape, as opposed to its score.
+    KitNeed KitNeedFor(uint8 cls, std::string const& role)
+    {
+        if (role == "tank")
+        {
+            // a druid is a bear and a death knight has no shield slot: for them the tank shape
+            // *is* the two-hander, so asking for a shield would fight the class
+            bool const canShield = cls == CLASS_WARRIOR || cls == CLASS_PALADIN || cls == CLASS_SHAMAN;
+            return canShield ? KitNeed::Shield : KitNeed::None;
+        }
+        if (role == "healer")
+            return KitNeed::CasterWeapon;
+        return KitNeed::None;
+    }
+
+    enum class KitPiece
+    {
+        Shield,
+        OneHandedWeapon,     // what a shield needs in the other hand
+        CasterOneHand
+    };
+
+    bool MatchesKitPiece(KitPiece piece, ItemTemplate const* proto)
+    {
+        if (!proto || proto->Class != (piece == KitPiece::Shield ? ITEM_CLASS_ARMOR : ITEM_CLASS_WEAPON) ||
+            proto->ItemLevel < 5)
+            return false;
+
+        switch (piece)
+        {
+            case KitPiece::Shield:
+                return proto->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD;
+            case KitPiece::OneHandedWeapon:
+                return proto->InventoryType == INVTYPE_WEAPON &&
+                       (proto->SubClass == ITEM_SUBCLASS_WEAPON_MACE || proto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD ||
+                        proto->SubClass == ITEM_SUBCLASS_WEAPON_AXE || proto->SubClass == ITEM_SUBCLASS_WEAPON_FIST);
+            case KitPiece::CasterOneHand:
+                return proto->InventoryType == INVTYPE_WEAPON &&
+                       (proto->SubClass == ITEM_SUBCLASS_WEAPON_MACE || proto->SubClass == ITEM_SUBCLASS_WEAPON_DAGGER);
+        }
+        return false;
+    }
+
+    std::unordered_map<uint32, std::vector<uint32>> g_kitCandidates;   // piece * 100 + level band
+
+    /// The best piece of its kind this body can use, from the template store.
+    ///
+    /// Scanned once per piece and level band: the store holds tens of thousands of templates, the
+    /// answer barely moves inside five levels, and the cache is filtered again on the way out
+    /// because a second companion may be a different class.
+    uint32 FindKitItem(Player* bot, KitPiece piece)
+    {
+        uint8 const level = bot->GetLevel();
+        uint32 const key = uint32(piece) * 100 + level / 5;
+
+        auto const cached = g_kitCandidates.find(key);
+        std::vector<uint32> const* ids = cached == g_kitCandidates.end() ? nullptr : &cached->second;
+
+        std::vector<uint32> scanned;
+        if (!ids)
+        {
+            for (ItemTemplate* proto : *sObjectMgr->GetItemTemplateStoreFast())
+            {
+                if (!proto || proto->RequiredLevel > level || !MatchesKitPiece(piece, proto))
+                    continue;
+                scanned.push_back(proto->ItemId);
+            }
+
+            // the best a level can actually reach first, then stable by id so the choice is the
+            // same on every realm and every rerun
+            std::sort(scanned.begin(), scanned.end(), [&](uint32 a, uint32 b)
+            {
+                ItemTemplate const* pa = sObjectMgr->GetItemTemplate(a);
+                ItemTemplate const* pb = sObjectMgr->GetItemTemplate(b);
+                if (!pa || !pb)
+                    return a < b;
+                if (pa->ItemLevel != pb->ItemLevel)
+                    return pa->ItemLevel > pb->ItemLevel;
+                return a < b;
+            });
+
+            g_kitCandidates[key] = std::move(scanned);
+            ids = &g_kitCandidates[key];
+        }
+
+        for (uint32 const id : *ids)
+            if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(id))
+                if (bot->CanUseItem(proto) == EQUIP_ERR_OK)
+                    return id;
+        return 0;
+    }
+
+    bool EquipKitPiece(Player* bot, uint8 slot, uint32 itemId)
+    {
+        // swap: the piece being replaced goes to the bags, and the sweep that follows the pass
+        // marks it for the vendor, so the hands change without the bags filling up
+        uint16 dest = 0;
+        if (bot->CanEquipNewItem(slot, dest, itemId, /*swap=*/true) != EQUIP_ERR_OK)
+            return false;
+        return bot->EquipNewItem(dest, itemId, true) != nullptr;
+    }
+
+    /// The hands, in words - for the log and the card, so "refitted" is not the only evidence.
+    std::string KitShapeText(Player* bot)
+    {
+        auto describe = [&](uint16 slot) -> std::string
+        {
+            Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!item)
+                return "empty";
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto)
+                return "a piece";
+            switch (proto->InventoryType)
+            {
+                case INVTYPE_2HWEAPON:
+                    return proto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ? "staff" : "two-hander";
+                case INVTYPE_SHIELD:
+                    return "shield";
+                case INVTYPE_HOLDABLE:
+                    return "held offhand";
+                case INVTYPE_WEAPON:
+                    return "one-hander";
+                default:
+                    return "mainhand";
+            }
+        };
+        return describe(EQUIPMENT_SLOT_MAINHAND) + " + " + describe(EQUIPMENT_SLOT_OFFHAND);
+    }
+
+    /// Fit the piece the role insists on, when the score-driven kit contradicts it.
+    ///
+    /// Returns whether anything was refitted. Damage and support roles are left alone on purpose:
+    /// for them the best score *is* the answer, and a second opinion would only be taste.
+    bool RepairKitShape(Player* bot, std::string const& role)
+    {
+        if (!bot || !bot->IsInWorld() || bot->IsInCombat() || role == "auto")
+            return false;
+
+        KitNeed const need = KitNeedFor(bot->getClass(), role);
+        if (need == KitNeed::None)
+            return false;
+
+        // the refit pushes what it replaces into the bags, so it needs the same room the pass does
+        if (bot->GetFreeInventorySpace() < CompanionBagReserve)
+            return false;
+
+        Item* mainhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+        Item* offhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+        ItemTemplate const* mainProto = mainhand ? mainhand->GetTemplate() : nullptr;
+
+        bool changed = false;
+        if (need == KitNeed::Shield)
+        {
+            // the shape is already right, or the shield slot is not this class's problem
+            if (offhand && offhand->GetTemplate() && offhand->GetTemplate()->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD &&
+                offhand->GetTemplate()->Class == ITEM_CLASS_ARMOR)
+                return false;
+
+            // a two-hander holds both hands, so it has to give way before a shield can go on
+            if (mainProto && mainProto->InventoryType == INVTYPE_2HWEAPON)
+            {
+                uint32 const oneHand = FindKitItem(bot, KitPiece::OneHandedWeapon);
+                if (!oneHand || !EquipKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, oneHand))
+                    return false;                   // no shield without a hand free: say nothing, try next pass
+                changed = true;
+            }
+
+            uint32 const shield = FindKitItem(bot, KitPiece::Shield);
+            if (!shield || !EquipKitPiece(bot, EQUIPMENT_SLOT_OFFHAND, shield))
+                return changed;
+            changed = true;
+        }
+        else if (need == KitNeed::CasterWeapon)
+        {
+            if (!mainProto || mainProto->InventoryType != INVTYPE_2HWEAPON)
+                return false;
+
+            // a staff is a caster's two-hander and is exactly what a healer wants; only a melee
+            // two-hander costs it the offhand it could be casting from
+            bool const meleeTwoHand = mainProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 ||
+                                      mainProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 ||
+                                      mainProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2 ||
+                                      mainProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM;
+            if (!meleeTwoHand)
+                return false;
+
+            uint32 const caster = FindKitItem(bot, KitPiece::CasterOneHand);
+            if (!caster || !EquipKitPiece(bot, EQUIPMENT_SLOT_MAINHAND, caster))
+                return false;
+            changed = true;
+        }
+
+        if (changed)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} refitted its hands for the {} role: {}",
+                     bot->GetName(), role, KitShapeText(bot));
+        return changed;
+    }
+
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)
     {
         if (!g_cfg.levelGear || !bot || !bot->IsInWorld() || !bot->IsAlive() ||
@@ -6601,6 +6815,9 @@ namespace
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
 #endif
+
+        // the factory picked by score; the role may still insist on one piece of shape
+        RepairKitShape(bot, CompanionRole(botGuid));
 
         // anything that was worn and is now carried was displaced by this pass: the vendor's, not
         // the bags'. playerbots destroys the piece it replaces in a slot, so in the ordinary case
@@ -10374,6 +10591,12 @@ public:
                                              kSpecTreeNames[bot->getClass()][want], mode);
                 }
             }
+
+            if (bot && CompanionRole(botGuid) != "auto")
+                handler->PSendSysMessage("  kit: {} |cff9d9d9d({})|r", KitShapeText(bot),
+                                         KitNeedFor(bot->getClass(), CompanionRole(botGuid)) == KitNeed::None
+                                             ? "the role asks nothing of its shape"
+                                             : "the shape this role needs");
 
             handler->PSendSysMessage("  edits: {}", LedgerSnapshot(botGuid));
 

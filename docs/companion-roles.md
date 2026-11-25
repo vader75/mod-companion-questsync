@@ -228,6 +228,16 @@ the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe
 granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
 and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
 
+The kit is then checked for *shape*, not score. playerbots picks by score for the spec tab, which
+is right for damage and support and wrong for the two roles that imply a shape: a tank on a class
+that can carry a shield should be holding one, and a healer should not be holding a melee
+two-hander with both hands. If the score-driven kit contradicts that, the module refits the one
+piece itself - a shield and, if needed, a one-hander to hold beside it; a caster one-hander in
+place of a melee two-hander. A staff is left alone, because a staff is what a healer wants. Druid
+tanks and death knights are asked for nothing: for them the two-hander *is* the shape. The piece
+that comes off goes to the bags and is then marked for the vendor, so the hands change without the
+bags filling.
+
 When a retrain does not take, it is not repeated every pass. The module reads the trees back after
 each attempt, retries on a widening interval (30 seconds, two minutes, ten), and after three
 attempts stops and says so once - `is still fury after 3 attempts at protection: leaving its talents
