@@ -564,6 +564,7 @@ namespace
     /// Companions whose talent state has been reported this boot: one line each, so the log answers
     /// "did it take?" without a per-tick stream.
     std::set<uint32> g_talentNotes;
+    std::set<uint32> g_talentGrantNotes;
 
     /// Last shape check per companion: the hands can change outside our gear pass, so the watch
     /// is throttled rather than tied to the pass.
@@ -957,6 +958,7 @@ namespace
         g_spellsWithheld.erase(botGuid);
         g_formationApplied.erase(botGuid);
         g_roleApplyAt.erase(botGuid);
+        g_talentGrantNotes.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
         g_staleGear.erase(botGuid);
@@ -1896,11 +1898,30 @@ namespace
     /// spent` and leaves a body that has spent more than it affords alone rather than guessing.
     bool GrantOwedTalentPoints(Player* bot)
     {
-        if (!bot || bot->GetLevel() < CompanionTalentsFrom || bot->GetFreeTalentPoints() != 0)
+        if (!bot)
             return false;
 
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        uint32 const level = bot->GetLevel();
+        uint32 const before = bot->GetFreeTalentPoints();
+        uint32 const allowed = bot->CalculateTalentsPoints();
+        if (level < CompanionTalentsFrom || before != 0)
+        {
+            if (g_talentGrantNotes.insert(botGuid).second)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} talent grant check: level {}, core allows {}, "
+                                           "free before {}, skipped ({})",
+                         bot->GetName(), level, allowed, before,
+                         level < CompanionTalentsFrom ? "below talent level" : "points already available");
+            return false;
+        }
+
         bot->InitTalentForLevel();
-        return bot->GetFreeTalentPoints() != 0;
+        uint32 const after = bot->GetFreeTalentPoints();
+        if (g_talentGrantNotes.insert(botGuid).second)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} talent grant check: level {}, core allows {}, "
+                                       "free before {}, free after {}",
+                     bot->GetName(), level, allowed, before, after);
+        return after != 0;
     }
 
     /// Make the talents follow the role, on the same terms as everything else: deliberate,

@@ -607,7 +607,7 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertIn('bool GrantOwedTalentPoints(Player* bot)', SOURCE)
         body = SOURCE.split('bool GrantOwedTalentPoints(Player* bot)', 1)[1][:1200]
         self.assertIn('bot->InitTalentForLevel();', body)          # the core owns the arithmetic
-        self.assertIn('bot->GetFreeTalentPoints() != 0', body)
+        self.assertIn('before != 0', body)
         # the core decides what is spent; a talent map holds rows for talents never ranked, and
         # reading that as "points are spent" is what kept the grant from ever running
         self.assertNotIn('GetTalentMap()', body)
@@ -615,6 +615,15 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         reconcile = SOURCE[body_def:body_def + 1500]
         self.assertIn('GrantOwedTalentPoints(bot)', reconcile)
         self.assertIn('was owed', reconcile)
+
+    def test_the_first_grant_check_explains_why_it_did_or_did_not_change_points(self):
+        body = function_body("    bool GrantOwedTalentPoints(Player* bot)")
+        self.assertIn("g_talentGrantNotes.insert(botGuid).second", body)
+        self.assertIn("GetFreeTalentPoints()", body)
+        self.assertIn("CalculateTalentsPoints()", body)
+        self.assertIn("InitTalentForLevel()", body)
+        self.assertIn("free before", body)
+        self.assertIn("free after", body)
 
 
 class TheLogDoesNotSayTheSameThingTwice(unittest.TestCase):
