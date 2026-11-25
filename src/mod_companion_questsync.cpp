@@ -1321,6 +1321,8 @@ namespace
     std::string CompanionEngage(uint32 botGuid);
     void ReconcileRoleSpells(Player* bot, std::string const& role);
     void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role);
+    // defined with the gear code below; a retrain needs to re-pick the kit it was wearing
+    uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged = false);
 
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
     /// can say "no tank strategy for this class" rather than showing a control that lies.
@@ -1775,6 +1777,9 @@ namespace
             g_specNotes[botGuid] = wantName;
             LOG_INFO("server.loading", "[CompanionQuestSync] {} switched to its stored {} spec for the {} role",
                      bot->GetName(), wantName, role);
+            // playerbots picks equipment from the spec tab, so a new spec means a re-pick; the
+            // kit it is wearing was chosen for the tree it has just left
+            RefreshLevelGear(owner, bot, /*specChanged=*/true);
             if (owner && owner->GetSession())
                 ChatHandler(owner->GetSession()).PSendSysMessage(
                     "|cff20ff20{}|r switched to its stored |cffffffff{}|r spec for its |cffffffff{}|r role.",
@@ -1800,6 +1805,7 @@ namespace
         LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role{}",
                  bot->GetName(), haveName, wantName, role,
                  otherUsable ? " (the previous tree is kept in the other spec)" : "");
+        RefreshLevelGear(owner, bot, /*specChanged=*/true);
 
         if (owner && owner->GetSession())
             ChatHandler(owner->GetSession()).PSendSysMessage(
@@ -6371,7 +6377,7 @@ namespace
     /// what the bag happens to hold. Playerbots already knows how to dress a bot of a given
     /// level, so a kit that lags is rebuilt incrementally - slots are upgraded, nothing is
     /// re-rolled wholesale, and the bag, quest items and profession tools are untouched.
-    uint32 RefreshLevelGear(Player* owner, Player* bot)
+    uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)
     {
         if (!g_cfg.levelGear || !bot || !bot->IsInWorld() || !bot->IsAlive() ||
             bot->IsInCombat() || !bot->GetSession() || bot->GetTradeData())
@@ -6390,8 +6396,10 @@ namespace
                 itemLevelSum += item->GetTemplate()->ItemLevel;
             }
         uint32 const average = pieces ? itemLevelSum / pieces : 0;
-        // A kit that already matches the level is left exactly as it is.
-        if (pieces && average + CompanionGearLag >= level)
+        // A kit that already matches the level is left exactly as it is - unless the spec just
+        // changed, in which case the kit's *shape* is wrong even though its item level is fine
+        // (a protection warrior in the fury gear it was handed is dressed for the wrong fight).
+        if (!specChanged && pieces && average + CompanionGearLag >= level)
             return 0;
         // The factory unequips before it equips, so it needs room to work in.
         if (bot->GetFreeInventorySpace() < CompanionBagReserve)
@@ -6399,7 +6407,7 @@ namespace
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 const lastLevel = g_gearLevel[botGuid];
-        if (lastLevel && level < lastLevel + CompanionGearStep)
+        if (!specChanged && lastLevel && level < lastLevel + CompanionGearStep)
             return 0;
 
         uint32 const before = DescribeGearItemLevel(bot);
@@ -6418,8 +6426,8 @@ namespace
         if (after == before)
             return 0;
 
-        LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {} (item level {} -> {})",
-                 bot->GetName(), uint32(level), before, after);
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {}{} (item level {} -> {})",
+                 bot->GetName(), uint32(level), specChanged ? " after a spec change" : "", before, after);
         SayToOwner(bot, owner,
                    "I traded my starter kit for what a level " + std::to_string(level) +
                    " can carry - average item level " + std::to_string(before) + " to " + std::to_string(after) + ".",

@@ -228,6 +228,12 @@ the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe
 granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
 and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
 
+A spec change also re-picks the kit. playerbots dresses a bot from its spec tab, so the gear a
+companion is wearing was chosen for the tree it has just left - a protection warrior in fury's gear
+is dressed for the wrong fight. The two "the kit still fits the level" gates in `LevelGear` are
+bypassed for that one pass (bags, combat and an open trade window are still respected), which is
+why `LevelGear` has to be on for a retrain to re-kit anything.
+
 The retrain uses playerbots' own template with a forced tab (`InitTalentsTree`), so the layout is
 one players recognise, at the companion's level rather than level 80. Afterwards the AI is rebuilt,
 because playerbots chooses its strategies from the trees - a retrain that skipped that step would

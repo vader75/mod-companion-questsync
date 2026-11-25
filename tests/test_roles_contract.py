@@ -464,6 +464,24 @@ class SpecFollowsRole(unittest.TestCase):
         self.assertIn("bot->HasSpell(info->RankID[rank])", body)   # rank = known RankID spells
         self.assertIn("tabInfo->tabpage != tab", body)
 
+    def test_a_spec_change_re_picks_the_kit(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        self.assertEqual(body.count("RefreshLevelGear(owner, bot, /*specChanged=*/true);"), 2,
+                         "both the switch path and the retrain path re-gear")
+
+    def test_the_spec_regear_skips_only_the_level_gates(self):
+        body = function_body("    uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)")
+        self.assertIn("if (!specChanged && pieces && average + CompanionGearLag >= level)", body)
+        self.assertIn("if (!specChanged && lastLevel && level < lastLevel + CompanionGearStep)", body)
+        # the safety gates are not conditional on the reason
+        self.assertIn("bot->IsInCombat() || !bot->GetSession() || bot->GetTradeData()", body)
+        self.assertIn("bot->GetFreeInventorySpace() < CompanionBagReserve", body)
+
+    def test_the_default_call_sites_are_unchanged(self):
+        self.assertIn("RefreshLevelGear(owner, bot);", SOURCE)
+        self.assertIn("RefreshLevelGear(master, fresh);", SOURCE)
+        self.assertIn("bool specChanged = false);", SOURCE)   # the declaration carries the default
+
     def test_both_entry_points_use_it(self):
         # the slow pass (which covers login) and the role command itself
         self.assertIn("ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));", SOURCE)

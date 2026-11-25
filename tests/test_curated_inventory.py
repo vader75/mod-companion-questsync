@@ -28,9 +28,10 @@ class ManagedInventory(unittest.TestCase):
             self.assertIn(constant, SOURCE)
 
     def test_level_gear_refreshes_a_kit_that_lags_the_level(self):
-        refresh = SOURCE.split('uint32 RefreshLevelGear(', 1)[1].split('/// ', 1)[0]
+        # the definition, not the forward declaration the spec code needs
+        refresh = SOURCE.split('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)', 1)[1].split('/// ', 1)[0]
         # A kit that matches the level is never touched; only a lagging one is re-geared.
-        self.assertIn('average + CompanionGearLag >= level', refresh)
+        self.assertIn('!specChanged && pieces && average + CompanionGearLag >= level', refresh)
         self.assertIn('CompanionGearLag = 4', SOURCE)
         # The factory needs inventory room for the swap and a real level to dress for.
         self.assertIn('bot->GetFreeInventorySpace() < CompanionBagReserve', refresh)
