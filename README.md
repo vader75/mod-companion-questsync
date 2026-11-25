@@ -99,11 +99,18 @@ Keeper stock stays with the companion. The server can offer curated trades autom
 2. From the QuestSync repository root, import both SQL files. Replace `acore_characters` and `your_db_user` with your realm's actual database and user. Do not import into the world, auth, or Playerbots database.
 
    ```sh
-   mysql -u your_db_user -p acore_characters < sql/companion-questsync.sql &&
-     mysql -u your_db_user -p acore_characters < sql/companion-custody.sql
+   for f in companion-questsync companion-custody companion-roles companion-engage companion-quiet; do
+     mysql -u your_db_user -p acore_characters < "sql/$f.sql" || break
+   done
    ```
 
-   The SQL adds tables if absent. It does not migrate old bindings, repair old indexes, or populate stock. `cq_bindings` is the roster, `cq_companion_custody` holds reviewed reservations, and `cq_pool` is historical only. An empty custody table is a safe starting point, not a ready-to-use pool. Use the [custody guide](docs/companion-custody.md) to review and enroll existing owners or clean AddClass stock offline. AddClass account type alone is not proof that a character is safe to claim.
+   The four custody files are additive: `companion-roles`, `companion-engage` and `companion-quiet`
+   add the `role`, `engage` and `quiet` columns the behaviour controls read. Skip any that are
+   already applied — the module probes for each column and says so instead of pretending, and
+   `.companionsync role` answers "roles are not set up yet on this realm" when the column is
+   missing.
+
+   The SQL adds tables if absent. It does not migrate old bindings, repair old indexes, or populate stock. `cq_bindings` is the roster, `cq_companion_custody` holds reviewed reservations and each companion's `role`, `engage` and `quiet`, and `cq_pool` is historical only. An empty custody table is a safe starting point, not a ready-to-use pool. Use the [custody guide](docs/companion-custody.md) to review and enroll existing owners or clean AddClass stock offline. AddClass account type alone is not proof that a character is safe to claim.
 
    If you built with the Playerbots initialization patch, apply the [starter-bag migration](sql/companion-starter-bags.sql) **once**, after the custody schema and before starting worldserver:
 
@@ -151,7 +158,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 | A new companion didn't receive Portable Holes | Confirm the patched build and starter-bag migration were in place before the claim. The grant only fills empty slots and will not retry after the attempt has been spent. |
 | Quest missing or won't turn in | Check eligibility, quest-log and bag space, and the companion's own objectives. Summon it and bring it to a live, usable ender. Mode `0` disables the module's own hand-ins. |
 | No pins | Open the matching **zone** map, check both server pin settings and the addon, then use `/cpins refresh` with the map open. Check `DataDir` if zone mapping looks wrong. |
-| A warrior charges although it is not the tank | Check its role is `dps`/`support`/`healer` (not `auto`) and `SuppressGapClosers=1`, then `.companionsync inspect <name>`: a withheld Charge is listed, and a Charge missing from the spellbook is named. `tank` and `auto` keep the charge by design. |
+| A warrior charges although it is not the tank | Check its role is `dps`/`support`/`healer` (not `auto`), that `sql/companion-roles.sql` was imported, and `SuppressGapClosers=1`, then `.companionsync inspect <name>`: a withheld Charge is listed, and a Charge missing from the spellbook is named. `tank` and `auto` keep the charge by design. |
 | Companions stand too far away, or too close | `.companionsync inspect <name>` prints the formation the server believes, the leash it implies and the realm's pitch-in radius. `Formation=off` leaves distance entirely to Playerbots, and a role's `auto` shape follows the role, not the last preset. |
 | Supplies unavailable or trade cancels | Confirm server patch support, companion control, range, combat state, and free bag space. For Craft, also check materials and any required station. Refresh the picker before retrying. |
 
