@@ -222,6 +222,12 @@ Three things gate it, and they are the same three as a role change: the role mus
 `SpecMinLevel` (40). Below that level the trees are six points wide and a "spec" is theatre, so the
 module records the decision it *would* take in `Server.log` once per session and changes nothing.
 
+From level 40 a companion holds **two** specs, and that is what makes a role flip cheap: the
+tree the role wants is spent into the slot that is not in use, so the tree it was in survives in
+the other slot, and flipping back is an `ActivateSpec` rather than a talent wipe. The second spec is
+granted to the companion (nothing is bought); it is identified by reading the talents' `specMask`
+and summing each tree's known ranks, because the core does not store a "which spec is this" flag.
+
 The retrain uses playerbots' own template with a forced tab (`InitTalentsTree`), so the layout is
 one players recognise, at the companion's level rather than level 80. Afterwards the AI is rebuilt,
 because playerbots chooses its strategies from the trees - a retrain that skipped that step would

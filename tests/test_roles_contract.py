@@ -441,6 +441,29 @@ class SpecFollowsRole(unittest.TestCase):
         self.assertIn("LOG_INFO", low)
         self.assertNotIn("InitTalentsTree", low)
 
+    def test_a_second_spec_is_granted_at_the_gate(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        self.assertIn("bot->GetSpecsCount() < 2", body)
+        self.assertIn("bot->UpdateSpecCount(2);", body)
+
+    def test_a_stored_tree_is_switched_not_rebuilt(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        switch = body[body.index("if (otherUsable && SpecTabOf(bot, other) == want)"):]
+        switch = switch[:switch.index("return;")]
+        self.assertIn("bot->ActivateSpec(other);", switch)
+        self.assertNotIn("InitTalentsTree", switch)     # a stored spec is switched, never re-spent
+
+    def test_the_old_tree_survives_a_retrain(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        retrain = body[body.index("if (otherUsable)"):]
+        self.assertLess(retrain.index("ActivateSpec(other)"), retrain.index("InitTalentsTree"))
+
+    def test_a_spec_is_identified_from_the_talents_themselves(self):
+        body = function_body("    uint32 SpecPoints(Player* bot, uint8 spec, uint8 tab)")
+        self.assertIn("talent->IsInSpec(spec)", body)
+        self.assertIn("bot->HasSpell(info->RankID[rank])", body)   # rank = known RankID spells
+        self.assertIn("tabInfo->tabpage != tab", body)
+
     def test_both_entry_points_use_it(self):
         # the slow pass (which covers login) and the role command itself
         self.assertIn("ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));", SOURCE)

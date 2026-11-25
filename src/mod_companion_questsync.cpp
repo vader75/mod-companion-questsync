@@ -1639,22 +1639,57 @@ namespace
         }
     }
 
-    /// The tree the companion is actually in: the one holding the most points, or -1 with none.
-    int CurrentSpecTab(Player* bot)
+    /// Points a talent tree holds for one spec slot.
+    ///
+    /// `specMask` on each talent is what tells the two specs apart; the rank is not stored, it is
+    /// the highest RankID spell the companion actually knows, which is also what the talent pane
+    /// shows. Summing it per tab is how a slot is identified without asking the client.
+    uint32 SpecPoints(Player* bot, uint8 spec, uint8 tab)
     {
-        std::map<uint8, uint32> const tabs = AiFactory::GetPlayerSpecTabs(bot);
+        uint32 points = 0;
+        for (auto const& entry : bot->GetTalentMap())
+        {
+            PlayerTalent* talent = entry.second;
+            if (!talent || !talent->IsInSpec(spec))
+                continue;
+
+            TalentEntry const* info = sTalentStore.LookupEntry(talent->talentID);
+            if (!info)
+                continue;
+
+            TalentTabEntry const* tabInfo = sTalentTabStore.LookupEntry(info->TalentTab);
+            if (!tabInfo || tabInfo->tabpage != tab)
+                continue;
+
+            // the rank is how many of this talent's RankID spells the companion knows
+            uint8 known = 0;
+            for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+                if (info->RankID[rank] && bot->HasSpell(info->RankID[rank]))
+                    ++known;
+            points += known;
+        }
+        return points;
+    }
+
+    /// The tree a spec slot is actually in: the one holding the most points, or -1 with none.
+    int SpecTabOf(Player* bot, uint8 spec)
+    {
         int best = -1;
         uint32 bestPoints = 0;
         for (uint8 tab = 0; tab < 3; ++tab)
         {
-            auto const it = tabs.find(tab);
-            if (it != tabs.end() && it->second > bestPoints)
+            if (uint32 const points = SpecPoints(bot, spec, tab); points > bestPoints)
             {
-                bestPoints = it->second;
+                bestPoints = points;
                 best = tab;
             }
         }
         return bestPoints ? best : -1;
+    }
+
+    int CurrentSpecTab(Player* bot)
+    {
+        return SpecTabOf(bot, bot->GetActiveSpec());
     }
 
     std::unordered_map<uint32, std::string> g_specNotes;   // bot guid -> the last decision logged
@@ -1662,9 +1697,10 @@ namespace
     /// Make the talents follow the role, on the same terms as everything else: deliberate,
     /// out of combat, and honest about what it is doing.
     ///
-    /// Trees are re-spent with playerbots' own template (`InitTalentsTree` with a forced tab) so
-    /// the point layout is one players recognise, at the companion's level rather than level 80,
-    /// and the AI is re-initialised afterwards because strategies are chosen from the trees.
+    /// At 40+ a companion holds two specs, and the second one is the point of this: the role's
+    /// tree is spent into whichever slot does not hold it, so flipping back is an `ActivateSpec`
+    /// and costs nothing. Below 40, or with one spec, the retrain re-spends the trees with
+    /// playerbots' own template through a forced tab, at the companion's level.
     void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)
     {
         if (!bot || !g_cfg.specFollowRole || role == "auto")
@@ -1677,7 +1713,8 @@ namespace
         uint32 const botGuid = bot->GetGUID().GetCounter();
         std::string const& wantName = kSpecTreeNames[bot->getClass()][want];
 
-        int const have = CurrentSpecTab(bot);
+        uint8 const active = bot->GetActiveSpec();
+        int const have = SpecTabOf(bot, active);
         if (have == want)
         {
             g_specNotes.erase(botGuid);
@@ -1715,6 +1752,40 @@ namespace
             return;
         }
 
+        // Dual spec exists from 40; holding both trees is what makes a role flip instant instead
+        // of a talent wipe, so it is granted to the companion rather than bought.
+        if (g_cfg.specMinLevel >= 40 && bot->GetSpecsCount() < 2)
+        {
+            bot->UpdateSpecCount(2);
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} now holds two talent specs", bot->GetName());
+        }
+
+        uint8 const other = active == 0 ? 1 : 0;
+        bool const otherUsable = bot->GetSpecsCount() > other;
+
+        // the tree the role wants may already be sitting in the spec that is not active
+        if (otherUsable && SpecTabOf(bot, other) == want)
+        {
+            bot->ActivateSpec(other);
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                ai->Reset();
+            ApplyRoleStrategies(bot);
+            ReconcileRoleSpells(bot, role);
+
+            g_specNotes[botGuid] = wantName;
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} switched to its stored {} spec for the {} role",
+                     bot->GetName(), wantName, role);
+            if (owner && owner->GetSession())
+                ChatHandler(owner->GetSession()).PSendSysMessage(
+                    "|cff20ff20{}|r switched to its stored |cffffffff{}|r spec for its |cffffffff{}|r role.",
+                    bot->GetName(), wantName, role);
+            return;
+        }
+
+        // otherwise spend the want into the slot that is not in use, so the old tree survives
+        if (otherUsable)
+            bot->ActivateSpec(other);
+
         PlayerbotFactory factory(bot, bot->GetLevel());
         factory.InitTalentsTree(false, true, true, want);
 
@@ -1726,14 +1797,16 @@ namespace
         ReconcileRoleSpells(bot, role);
 
         g_specNotes[botGuid] = wantName;
-        LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role",
-                 bot->GetName(), haveName, wantName, role);
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role{}",
+                 bot->GetName(), haveName, wantName, role,
+                 otherUsable ? " (the previous tree is kept in the other spec)" : "");
 
         if (owner && owner->GetSession())
             ChatHandler(owner->GetSession()).PSendSysMessage(
                 "|cff20ff20{}|r has retrained as |cffffffff{}|r for its |cffffffff{}|r role.",
                 bot->GetName(), wantName, role);
     }
+
 
     // --------------------------------------------------------------- engagement
     //

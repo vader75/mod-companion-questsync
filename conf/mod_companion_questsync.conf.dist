@@ -298,7 +298,8 @@ CompanionQuestSync.RoleChangeCooldown = 60
 # 0 = leave talents alone, 1 = work out the tree the role wants and log it, 2 = retrain to it.
 # A retrain re-spends the trees with playerbots' own template at the companion's level, then
 # rebuilds its AI (strategies are chosen from the trees), so it is refused in combat exactly
-# like a role change. `support` uses the damage tree on purpose: support never off-heals here.
+# like a role change. At 40+ the companion is given a second spec and the wanted tree is spent
+# into the slot that is not in use, so the previous tree survives and flipping back is instant. `support` uses the damage tree on purpose: support never off-heals here.
 # Default: 0
 CompanionQuestSync.SpecFollowRole = 0
 
