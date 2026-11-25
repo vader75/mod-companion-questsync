@@ -510,6 +510,12 @@ namespace
     std::unordered_map<uint32, uint32> g_lastWhisperAt;     // owner guid -> unix time
     std::unordered_map<uint32, uint32> g_lastWhisperByBot;
 
+    /// What each companion last said, and when. A gear pass re-derives the same re-gear sentence on
+    /// every tick, and the queue only deduped against things still waiting to be spoken - so the
+    /// player heard the same line three and four times. Repeats inside a quarter of an hour are
+    /// dropped now: the world has not changed between them, so the news has not either.
+    std::unordered_map<uint32, std::pair<std::string, uint32>> g_lastSpoken;
+
     /// When a kit item was last created for a body *and slot*, so one unfillable slot does not
     /// throttle the others. Purged with the companion: guids are pooled.
     std::map<uint64, uint32> g_gearCreatedAt;  // bot guid -> unix time, for fairness
@@ -1866,12 +1872,32 @@ namespace
         }
         else
         {
+            // the retry itself is not news: it is the same sentence at a longer interval, and
+            // nobody watching the log can tell the difference between that and a real change
             attempt.nextAt = uint32(time(nullptr)) + kBackoff[attempt.tries - 1];
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} did not end up in {} (still {}): retrying in {}s",
-                     bot->GetName(), wantName,
-                     now >= 0 ? kSpecTreeNames[bot->getClass()][now] : "untalented",
-                     kBackoff[attempt.tries - 1]);
         }
+    }
+
+    /// Make sure the body has the talent points its level owes it.
+    ///
+    /// Companions arrive at a level rather than levelled into it, so the level-up hook that grants
+    /// talent points never fired: the point counter stayed at zero, every tree read empty with
+    /// nothing to spend, and the retrain had literally nothing to work with - which is exactly what
+    /// `talents: 0 point(s) in fury, 0 unspent` reported on four level-15 companions. The core's own
+    /// `InitTalentForLevel` is the authority on how many points a level affords, so it is asked
+    /// rather than reimplemented - and only when nothing has been spent, so it can never reset a
+    /// tree somebody chose.
+    bool GrantOwedTalentPoints(Player* bot)
+    {
+        if (!bot || bot->GetLevel() < CompanionTalentsFrom || bot->GetFreeTalentPoints() != 0)
+            return false;
+
+        for (auto const& entry : bot->GetTalentMap())
+            if (entry.second)
+                return false;                  // something is spent; this is not our business
+
+        bot->InitTalentForLevel();
+        return bot->GetFreeTalentPoints() != 0;
     }
 
     /// Make the talents follow the role, on the same terms as everything else: deliberate,
@@ -1883,6 +1909,12 @@ namespace
     /// playerbots' own template through a forced tab, at the companion's level.
     void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)
     {
+        // a body hired at a level never got the points that level owes; give them back before
+        // deciding that a retrain cannot work
+        if (GrantOwedTalentPoints(bot))
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} was owed {} talent point(s) at level {}: granted them",
+                     bot->GetName(), bot->GetFreeTalentPoints(), uint32(bot->GetLevel()));
+
         if (!bot || !g_cfg.specFollowRole || role == "auto")
             return;
 
@@ -2910,6 +2942,16 @@ namespace
         // Replies on the command stack can speak immediately. Ambient hand-in
         // notices stay paced even if the command synchronously runs a quest pass.
         bool const commandReply = g_commandReplyOwner == ownerGuid && !handIn;
+
+        // asked-for replies answer every time; ambient news that has not changed does not repeat
+        if (!commandReply && !handIn && tradeNoticeId == 0 && !text.empty())
+        {
+            auto const memory = g_lastSpoken.find(botGuid);
+            if (memory != g_lastSpoken.end() && memory->second.first == text && now >= memory->second.second &&
+                now - memory->second.second < 900)
+                return false;
+            g_lastSpoken[botGuid] = { text, now };
+        }
         if (!commandReply && last && now - last < minGap)
         {
             // Hold it, do not lose it. The one-shot "help me finish this quest"
@@ -2989,7 +3031,17 @@ namespace
     /// leaves and re-enters the owner's log.
     void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)
     {
-        bool const wanted = (refusal.expected ? g_cfg.notifySkipped >= 1 : g_cfg.notifySkipped >= 2);
+        // "it is a class quest my class cannot take" is not an ask the player can answer, so it is
+        // never whispered: it goes to the log once and stays there
+        if (refusal.expected)
+        {
+            if (g_cfg.debug >= 1)
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} could not take '{}' ({}): {}",
+                         bot->GetName(), quest->GetTitle(), quest->GetQuestId(), refusal.reason);
+            return;
+        }
+
+        bool const wanted = g_cfg.notifySkipped >= 2;
         if (!wanted)
             return;
 

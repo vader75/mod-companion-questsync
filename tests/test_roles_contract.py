@@ -601,6 +601,43 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertNotIn('< 40', body)
         self.assertNotIn('specMinLevel', body)
 
+    def test_a_body_hired_at_its_level_is_given_the_points_it_is_owed(self):
+        """Four level-15 companions reported `0 unspent`: they arrived at that level instead of
+        levelling into it, so the hook that grants talent points never ran."""
+        self.assertIn('bool GrantOwedTalentPoints(Player* bot)', SOURCE)
+        body = SOURCE.split('bool GrantOwedTalentPoints(Player* bot)', 1)[1][:1200]
+        self.assertIn('bot->InitTalentForLevel();', body)          # the core owns the arithmetic
+        self.assertIn('bot->GetFreeTalentPoints() != 0', body)
+        # it must never reset a tree somebody chose
+        self.assertIn('return false;                  // something is spent; this is not our business', body)
+        body_def = SOURCE.rfind('void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)')
+        reconcile = SOURCE[body_def:body_def + 1500]
+        self.assertIn('GrantOwedTalentPoints(bot)', reconcile)
+        self.assertIn('was owed', reconcile)
+
+
+class TheLogDoesNotSayTheSameThingTwice(unittest.TestCase):
+    """The retry ladder used to log every attempt, and the same re-gear summary was whispered on
+    every pass that re-derived it - four lines of news where there had been one change."""
+
+    def test_a_widening_retry_is_silent(self):
+        self.assertNotIn('did not end up in', SOURCE)
+        self.assertIn('is still {} after {} attempts at {}', SOURCE)      # giving up is still news
+        self.assertIn('kBackoff[] = { 30, 120, 600 }', SOURCE)
+
+    def test_the_same_sentence_is_not_repeated_within_a_quarter_hour(self):
+        self.assertIn('std::unordered_map<uint32, std::pair<std::string, uint32>> g_lastSpoken;', SOURCE)
+        say = SOURCE.split('bool SayToOwner(Player* bot, Player* owner, std::string const& text, uint32 minGap,', 1)[1][:4000]
+        self.assertIn('g_lastSpoken[botGuid] = { text, now };', say)
+        self.assertIn('now - memory->second.second < 900', say)
+        self.assertIn('!commandReply && !handIn && tradeNoticeId == 0', say)   # replies and hand-ins still speak
+
+    def test_a_class_quest_is_never_whispered_as_an_ask(self):
+        refusal = SOURCE.split('void NotifyRefusal(Player* owner, Player* bot, Quest const* quest, Refusal const& refusal)', 1)[1][:900]
+        self.assertIn('if (refusal.expected)', refusal)
+        self.assertLess(refusal.index('if (refusal.expected)'), refusal.index('g_notified'))
+        self.assertIn('bool const wanted = g_cfg.notifySkipped >= 2;', refusal)
+
     def test_a_stored_talent_is_found_whichever_way_it_is_spelled(self):
         """character_talent holds either the talent's DBC id or its rank spell id depending on the
         core. Looking up only one convention made every counter here read zero."""
