@@ -610,6 +610,12 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertIn("the role's tree had been emptied", watch)
         # and it heals the tree after the hands, so one throttled pass does both
         self.assertLess(watch.index('MarkSupersededGear(owner, bot);'), watch.index('SpendPointsIntoTree'))
+        # the refill must NOT sit behind the shape gate: a dps or support companion has no shape to
+        # keep but still owns a tree, and that is exactly who needs this most
+        self.assertIn('if (KitNeedFor(bot->getClass(), role) != KitNeed::None)', watch)
+        self.assertIn('if (role == "auto")', watch)
+        self.assertNotIn('KitNeedFor(bot->getClass(), role) == KitNeed::None',
+                     watch.split('if (KitNeedFor', 1)[0])
 
     def test_the_retrain_uses_it_when_the_template_left_the_tree_empty(self):
         self.assertIn('if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)', SOURCE)

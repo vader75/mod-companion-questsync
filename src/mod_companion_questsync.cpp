@@ -6990,8 +6990,8 @@ namespace
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
         std::string const role = CompanionRole(botGuid);
-        if (KitNeedFor(bot->getClass(), role) == KitNeed::None)
-            return;                                 // damage and support have no shape to keep
+        if (role == "auto")
+            return;                                 // nothing was asked of this body at all
 
         uint32& last = g_kitWatchAt[botGuid];
         uint32 const now = uint32(time(nullptr));
@@ -6999,15 +6999,18 @@ namespace
             return;
         last = now;
 
-        std::set<uint64> const worn = WornGuids(bot);
-        if (RepairKitShape(bot, role))
+        // the hands, for the roles that imply a shape - and the bag hygiene for every role, because
+        // a world upgrade leaves a cast-off behind whoever the companion is
+        if (KitNeedFor(bot->getClass(), role) != KitNeed::None)
         {
-            if (uint32 const displaced = MarkKitDisplaced(bot, worn))
-                LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
-                         bot->GetName(), displaced);
+            std::set<uint64> const worn = WornGuids(bot);
+            if (RepairKitShape(bot, role))
+            {
+                if (uint32 const displaced = MarkKitDisplaced(bot, worn))
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
+                             bot->GetName(), displaced);
+            }
         }
-
-        // a drop that beat a worn piece left the old one in the bags; it goes the same way
         MarkSupersededGear(owner, bot);
 
         // The same watch keeps the talents where the role put them. playerbots re-templates on every

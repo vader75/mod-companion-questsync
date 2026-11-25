@@ -321,7 +321,7 @@ class AWorldUpgradeIsRespected(unittest.TestCase):
         self.assertIn("WatchKitShape(owner, bot);", SOURCE)
         body = fn_body('void WatchKitShape(Player* owner, Player* bot)')
         self.assertIn("if (last && now - last < 60)", body)
-        self.assertIn("KitNeedFor(bot->getClass(), role) == KitNeed::None", body)
+        self.assertIn("KitNeedFor(bot->getClass(), role) != KitNeed::None", body)   # shape roles only
         # and it fits the same shape the pass does
         self.assertIn("RepairKitShape(bot, role)", body)
 
