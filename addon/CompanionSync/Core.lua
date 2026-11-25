@@ -630,6 +630,30 @@ listener:SetScript("OnEvent", function(_, event, message)
         if G.OnCompanionsChanged then G.OnCompanionsChanged() end
         return
     end
+    local specs = text:match("^Specs (.*)$")
+    if specs then
+        G.Specs = {}
+        for pair in specs:gmatch("[^|]+") do
+            local name, rest = pair:match("^(.-)=(.*)$")
+            if name and rest ~= "" then
+                -- name=have[>want@min][!flag]; "!low" = below the server's level gate,
+                -- "!off" = the server is only logging the decision, so nothing moves yet
+                local have, want, minLevel, flag = rest:match("^([^>]+)>?([^@]*)@?(%d*)(.*)$")
+                if have then
+                    local entry = { have = have }
+                    if want and want ~= "" then entry.want = want end
+                    if minLevel and minLevel ~= "" then entry.min = tonumber(minLevel) end
+                    if flag and flag ~= "" then
+                        entry.low = flag:find("!low") and true or nil
+                        entry.off = flag:find("!off") and true or nil
+                    end
+                    G.Specs[name] = entry
+                end
+            end
+        end
+        if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+        return
+    end
     local formation = text:match("^Formation (%a+)$")
     if formation then
         G.Formation = formation

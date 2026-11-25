@@ -113,6 +113,18 @@ Dismissed companions do not show live quest, bag, or profession data.
 Two other payloads share the channel: `Pool stock N: race-class=count|…` for the
 create panel, and `Pin sync N: x,y,h|g=Name|…` for the world map.
 
+Roles and talents travel together:
+
+    Roles Vorrin=tank/joined:q:l42|Bess=dps
+    Specs Vorrin=fury>protection@40!low|Bess=beast mastery>marksmanship@40
+
+`name=have[>want@min][!low|!off]` - the tree the companion is actually in, the tree its
+role asks for, the level the server starts caring, and why it has not happened yet:
+`!low` is the level gate, `!off` a server that is only logging the decision. A companion
+whose role asks nothing of its class arrives as just `name=have`. Both lines are sent
+whenever either changes; the role button's tooltip shows the talents block, so a role
+that has not reached them yet says whether it is the level or the setting.
+
 The system line `Delivery receipts 1` enables delivery progress and receipts. It
 is independent of `Sync capabilities 1`, which covers snapshots and heartbeat.
 

@@ -2106,6 +2106,66 @@ namespace
         return line;
     }
 
+    /// What each companion's talents are, and what its role is asking of them.
+    ///
+    /// `name=fury>protection@40` and then a suffix for why it has not happened yet: `!low` below
+    /// the level gate, `!off` when the server is only logging. A companion whose role asks nothing
+    /// of its class is sent as just `name=fury`, so the addon can say "talents left alone" rather
+    /// than inventing an intent.
+    std::string SpecLine(uint32 ownerGuid)
+    {
+        std::vector<uint32> bots;
+        if (!FindCompanions(ownerGuid, bots))
+            return std::string();
+
+        std::string line;
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld())
+                continue;                    // no live body, no talents worth reporting
+
+            std::string const name = bot->GetName();
+            if (name.find('|') != std::string::npos || name.find('=') != std::string::npos)
+                continue;
+
+            uint8 const cls = bot->getClass();
+            if (cls < 1 || cls > 10)
+                continue;
+
+            int const have = SpecTabOf(bot, bot->GetActiveSpec());
+            int const want = RoleSpecTab(cls, CompanionRole(botGuid));
+
+            if (!line.empty())
+                line += "|";
+            line += name + "=" + (have >= 0 ? kSpecTreeNames[cls][have] : "none");
+            if (want < 0)
+                continue;                    // the role does not ask this class for a tree
+
+            line += ">" + std::string(kSpecTreeNames[cls][want]);
+            line += "@" + std::to_string(g_cfg.specMinLevel);
+            if (g_cfg.specFollowRole < 2)
+                line += "!off";
+            else if (bot->GetLevel() < g_cfg.specMinLevel)
+                line += "!low";
+        }
+        return line;
+    }
+
+    /// Roles and talents travel together: the role is what the player asked for, the talents are
+    /// what actually happened, and a card that shows one without the other is how a companion
+    /// keeps an old tree for a week without anyone noticing.
+    void SendRoleAndSpecLines(Player* target, uint32 ownerGuid)
+    {
+        if (!target)
+            return;
+
+        if (std::string const roles = RoleLine(ownerGuid); !roles.empty())
+            SendProtocolLine(target, "Roles " + roles);
+        if (std::string const specs = SpecLine(ownerGuid); !specs.empty())
+            SendProtocolLine(target, "Specs " + specs);
+    }
+
     /// Re-assert every owned companion's role, throttled.
     ///
     /// A one-shot apply silently lapses: playerbots resets strategies when the spec or level
@@ -7722,8 +7782,7 @@ namespace
         SendProtocolLine(owner, fmt::format("Sync capabilities 1 {} {}",
             kAddonHeartbeatSeconds, g_cfg.allowCreate ? 1 : 0));
         SendProtocolLine(owner, "Formation " + FormationFor(owner));
-        if (std::string const roles = RoleLine(owner->GetGUID().GetCounter()); !roles.empty())
-            SendProtocolLine(owner, "Roles " + roles);
+        SendRoleAndSpecLines(owner, owner->GetGUID().GetCounter());
 #ifdef AC_TRADE_OFFER_COMMIT
         SendProtocolLine(owner, "Delivery receipts 1");
 #endif
@@ -9966,7 +10025,7 @@ public:
         }
         g_roleApplyAt[botGuid] = static_cast<uint32>(time(nullptr));
 
-        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        SendRoleAndSpecLines(player, ownerGuid);
         return true;
     }
 
@@ -10022,7 +10081,7 @@ public:
         handler->PSendSysMessage("|cff20ff20{}|r is {}quiet.{}", a[0], on ? "|cffffffff" : "",
                                  on ? "|r It will work at holding threat down, and hit softer."
                                     : "|r It fights at full strength.");
-        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        SendRoleAndSpecLines(player, ownerGuid);
         return true;
     }
 
@@ -10284,7 +10343,7 @@ public:
                                          note->second);
         }
 
-        SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));
+        SendRoleAndSpecLines(player, ownerGuid);
         return true;
     }
 

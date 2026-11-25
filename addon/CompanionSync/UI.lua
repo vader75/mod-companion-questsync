@@ -425,6 +425,16 @@ local function CreateCard()
     end, "What this companion is for. Auto leaves it entirely to its own AI. Pick, then Apply.", false)
     card.roleButton:SetPoint("TOPLEFT", 16, -132)
 
+    -- the role button carries two questions (what it is for, what its talents are), so the
+    -- tooltip is where the second one fits without another row on the card
+    card.roleButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Role: " .. ((G.Roles and card.companion and G.Roles[card.companion.name]) or "auto"))
+        if self.specHint then GameTooltip:AddLine(self.specHint, 1, 1, 1, true) end
+        GameTooltip:Show()
+    end)
+    card.roleButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
     card.roleApply = Button(card, "Apply", 58, function()
         if not (card.companion and card.rolePending) then return end
         if UnitAffectingCombat("player") then
@@ -453,6 +463,25 @@ local function CreateCard()
         elseif pending then text:SetTextColor(1.0, 0.82, 0.30)
         elseif current == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
         else text:SetTextColor(1.0, 0.82, 0.30) end
+
+        -- What the talents actually are, against what the role asks: a role that has not reached
+        -- the companion's tree yet is the level gate or a log-only server, and saying which is the
+        -- difference between "working as configured" and "broken".
+        local spec = name and G.Specs and G.Specs[name]
+        target.roleButton.specHint = nil
+        if spec then
+            if spec.want and spec.want ~= spec.have then
+                local why = ""
+                if spec.low then why = " - needs level " .. (spec.min or 0)
+                elseif spec.off then why = " - server is only logging it"
+                else why = " - next out of combat pass" end
+                target.roleButton.specHint = "|cffffd200Talents|r " .. spec.have .. " > " .. spec.want .. why
+            elseif spec.want then
+                target.roleButton.specHint = "|cff20ff20Talents|r " .. spec.have .. " for the " .. (current or "?") .. " role"
+            else
+                target.roleButton.specHint = "|cff9d9d9dTalents|r " .. spec.have .. " - this role asks nothing of them"
+            end
+        end
 
         local untilAt = name and G.RoleLockAt and G.RoleLockAt[name]
         local left = untilAt and math.ceil(untilAt - GetTime()) or 0

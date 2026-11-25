@@ -241,6 +241,22 @@ leave a protection warrior playing with fury's strategies, which is exactly the 
 strategy edits exist to prevent. `SpecFollowRole = 1` does the whole calculation and stops short of
 the write, so the decision can be watched in the log before it is trusted.
 
+### What the panel says about it
+
+The addon gets the role and the talents on the same refresh (`Roles` and `Specs` lines), and the
+role button's tooltip carries the second half:
+
+| Tooltip | Meaning |
+|---|---|
+| `Talents fury > protection - needs level 40` | the decision is made, the level gate has not opened |
+| `Talents fury > protection - server is only logging it` | `SpecFollowRole = 1` |
+| `Talents fury > protection - next out of combat pass` | it will happen on the next settling pass |
+| `Talents protection for the tank role` | the trees already agree with the role |
+| `Talents fury - this role asks nothing of them` | `auto`, or a class that cannot hold the role |
+
+Sending them together is deliberate: a card that shows the role and not the talents is how a
+companion keeps last week's tree with nobody noticing.
+
 ## Setting it up
 
 ```sql

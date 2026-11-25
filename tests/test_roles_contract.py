@@ -192,12 +192,12 @@ class CommandContract(unittest.TestCase):
 
     def test_change_is_echoed_to_the_addon(self):
         body = slice_from("    static bool HandleRoleCommand", 4000)
-        self.assertIn('SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));', body)
+        self.assertIn('SendRoleAndSpecLines(player, ownerGuid);', body)
 
 
 class SyncContract(unittest.TestCase):
     def test_login_announces_roles(self):
-        self.assertIn('SendProtocolLine(owner, "Roles " + roles);', SOURCE)
+        self.assertIn("SendRoleAndSpecLines(owner, owner->GetGUID().GetCounter());", SOURCE)
 
     def test_line_is_name_equals_role_pairs(self):
         body = slice_from("    std::string RoleLine(")
@@ -481,6 +481,41 @@ class SpecFollowsRole(unittest.TestCase):
         self.assertIn("RefreshLevelGear(owner, bot);", SOURCE)
         self.assertIn("RefreshLevelGear(master, fresh);", SOURCE)
         self.assertIn("bool specChanged = false);", SOURCE)   # the declaration carries the default
+
+
+class SpecLineTravelsWithRoles(unittest.TestCase):
+    """The card has to show the role AND what the talents did about it.
+
+    A companion that keeps its old tree for a week is invisible when the panel only shows the
+    role, so the two lines are sent together and cannot drift apart.
+    """
+
+    def test_the_two_lines_are_sent_together(self):
+        body = function_body("    void SendRoleAndSpecLines(Player* target, uint32 ownerGuid)")
+        self.assertIn('"Roles " + roles', body)
+        self.assertIn('"Specs " + specs', body)
+        self.assertLess(body.index('"Roles "'), body.index('"Specs "'))
+
+    def test_no_call_site_sends_roles_alone(self):
+        self.assertNotIn('SendProtocolLine(player, "Roles " + RoleLine(ownerGuid));', SOURCE)
+        self.assertNotIn('SendProtocolLine(owner, "Roles " + roles);', SOURCE)
+        self.assertEqual(SOURCE.count("SendRoleAndSpecLines("), 5)   # 1 definition + 4 sites
+
+    def test_the_line_says_why_nothing_moved(self):
+        body = function_body("    std::string SpecLine(uint32 ownerGuid)")
+        self.assertIn('line += "!off"', body)          # the server is only logging
+        self.assertIn('line += "!low"', body)          # below SpecMinLevel
+        self.assertIn('"@" + std::to_string(g_cfg.specMinLevel)', body)
+        # a role that asks nothing of the class sends just the tree it is in
+        self.assertIn("if (want < 0)", body)
+
+    def test_the_addon_reads_the_line(self):
+        core = (ROOT / "addon" / "CompanionSync" / "Core.lua").read_text(encoding="utf-8")
+        self.assertIn('text:match("^Specs (.*)$")', core)
+        self.assertIn("G.Specs[name] = entry", core)
+        ui = (ROOT / "addon" / "CompanionSync" / "UI.lua").read_text(encoding="utf-8")
+        self.assertIn("G.Specs[name]", ui)
+        self.assertIn("specHint", ui)
 
     def test_both_entry_points_use_it(self):
         # the slow pass (which covers login) and the role command itself

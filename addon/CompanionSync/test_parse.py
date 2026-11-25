@@ -74,6 +74,35 @@ CASES = [
 ]
 
 
+SPEC = re.compile(r"^([^>]+)>?([^@]*)@?(\d*)(.*)$")
+
+
+def parse_specs(payload: str) -> dict:
+    """Same rules as the Specs branch in Core.lua: name=have[>want@min][!low|!off]."""
+    out = {}
+    for pair in [p for p in payload.split("|") if p]:
+        name, _, rest = pair.partition("=")
+        if not name or not rest:
+            continue
+
+        match = SPEC.match(rest)
+        if not match:
+            continue
+
+        have, want, minimum, flag = match.groups()
+        entry = {"have": have}
+        if want:
+            entry["want"] = want
+        if minimum:
+            entry["min"] = int(minimum)
+        if "!low" in (flag or ""):
+            entry["low"] = True
+        if "!off" in (flag or ""):
+            entry["off"] = True
+        out[name] = entry
+    return out
+
+
 def main() -> int:
     failures = 0
 
@@ -126,7 +155,26 @@ def main() -> int:
         failures += 1
         print("FAIL role window not readable")
 
-    total = len(CASES) + 6
+    # the Specs line: what the talents are against what the role asks, and why a role has not
+    # reached them yet - "!low" is the server's level gate, "!off" a log-only server
+    spec_cases = [
+        ("Vorrin=fury", {"Vorrin": {"have": "fury"}}),
+        ("Vorrin=fury>protection@40", {"Vorrin": {"have": "fury", "want": "protection", "min": 40}}),
+        ("Vorrin=fury>protection@40!low",
+         {"Vorrin": {"have": "fury", "want": "protection", "min": 40, "low": True}}),
+        ("Vorrin=fury>protection@40!off",
+         {"Vorrin": {"have": "fury", "want": "protection", "min": 40, "off": True}}),
+        ("Bess=beast mastery>marksmanship@40|Vorrin=none>arms@40!low",
+         {"Bess": {"have": "beast mastery", "want": "marksmanship", "min": 40},
+          "Vorrin": {"have": "none", "want": "arms", "min": 40, "low": True}}),
+    ]
+    for payload, expected in spec_cases:
+        got = parse_specs(payload)
+        if got != expected:
+            failures += 1
+            print(f"FAIL specs {payload!r}\n  expected {expected}\n  got      {got}")
+
+    total = len(CASES) + 6 + len(spec_cases)
     print(f"{total - failures}/{total} payload cases passed")
     return 1 if failures else 0
 
