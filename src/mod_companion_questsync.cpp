@@ -548,6 +548,10 @@ namespace
     std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_gearLevel;         // bot guid -> level the kit was built for
 
+    /// Companions whose talent state has been reported this boot: one line each, so the log answers
+    /// "did it take?" without a per-tick stream.
+    std::set<uint32> g_talentNotes;
+
     /// Last shape check per companion: the hands can change outside our gear pass, so the watch
     /// is throttled rather than tied to the pass.
     std::unordered_map<uint32, uint32> g_kitWatchAt;
@@ -1673,6 +1677,32 @@ namespace
     /// `specMask` on each talent is what tells the two specs apart; the rank is not stored, it is
     /// the highest RankID spell the companion actually knows, which is also what the talent pane
     /// shows. Summing it per tab is how a slot is identified without asking the client.
+    /// A stored talent, however this build spells it.
+    ///
+    /// `character_talent` carries an id per talent, and different cores store either the talent's own
+    /// DBC id or the spell id of the rank it sits at. Looking up only the first convention made every
+    /// counter in this module read zero - "still untalented" for talents that were plainly there and
+    /// `none` on the card - so both are resolved, rank spell first because that is what this database
+    /// holds.
+    std::unordered_map<uint32, TalentEntry const*> g_talentByRankSpell;
+
+    TalentEntry const* ResolveTalentEntry(uint32 id)
+    {
+        if (g_talentByRankSpell.empty())
+        {
+            for (uint32 i = 1; i < sTalentStore.GetNumRows(); ++i)
+                if (TalentEntry const* info = sTalentStore.LookupEntry(i))
+                    for (uint8 r = 0; r < MAX_TALENT_RANK; ++r)
+                        if (info->RankID[r])
+                            g_talentByRankSpell.emplace(info->RankID[r], info);
+        }
+
+        auto const byRank = g_talentByRankSpell.find(id);
+        if (byRank != g_talentByRankSpell.end())
+            return byRank->second;
+        return sTalentStore.LookupEntry(id);
+    }
+
     uint32 SpecPoints(Player* bot, uint8 spec, uint8 tab)
     {
         uint32 points = 0;
@@ -1682,7 +1712,7 @@ namespace
             if (!talent || !talent->IsInSpec(spec))
                 continue;
 
-            TalentEntry const* info = sTalentStore.LookupEntry(talent->talentID);
+            TalentEntry const* info = ResolveTalentEntry(talent->talentID);
             if (!info)
                 continue;
 
@@ -7018,6 +7048,13 @@ namespace
         // retrain spent - leaving a body with points in hand and an empty tree. That state is
         // repaired here rather than waited out, and only ever by spending points that are free.
         int const want = RoleSpecTab(bot->getClass(), role);
+        if (g_talentNotes.insert(botGuid).second)   // once per body per boot, not per tick
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} talents: {} point(s) in {}, {} unspent",
+                     bot->GetName(),
+                     want >= 0 ? SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) : 0u,
+                     want >= 0 ? std::string(kSpecTreeNames[bot->getClass()][want]) : std::string("no tree"),
+                     bot->GetFreeTalentPoints());
+
         if (want >= 0 && bot->GetFreeTalentPoints() && SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) == 0)
         {
             if (uint32 const spent = SpendPointsIntoTree(bot, uint8(want)); spent)

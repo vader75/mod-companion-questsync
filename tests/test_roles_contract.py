@@ -601,6 +601,24 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertNotIn('< 40', body)
         self.assertNotIn('specMinLevel', body)
 
+    def test_a_stored_talent_is_found_whichever_way_it_is_spelled(self):
+        """character_talent holds either the talent's DBC id or its rank spell id depending on the
+        core. Looking up only one convention made every counter here read zero."""
+        self.assertIn('TalentEntry const* ResolveTalentEntry(uint32 id)', SOURCE)
+        body = SOURCE.split('TalentEntry const* ResolveTalentEntry(uint32 id)', 1)[1][:900]
+        self.assertIn('g_talentByRankSpell.emplace(info->RankID[r], info);', body)
+        self.assertIn('g_talentByRankSpell.find(id)', body)
+        self.assertIn('return sTalentStore.LookupEntry(id);', body)     # the other convention
+        # and every counter goes through it
+        self.assertIn('TalentEntry const* info = ResolveTalentEntry(talent->talentID);', SOURCE)
+        self.assertNotIn('TalentEntry const* info = sTalentStore.LookupEntry(talent->talentID);', SOURCE)
+
+    def test_the_talent_state_is_reported_once_per_body(self):
+        watch = SOURCE.split('void WatchKitShape(Player* owner, Player* bot)', 1)[1][:3200]
+        self.assertIn('g_talentNotes.insert(botGuid).second', watch)
+        self.assertIn('point(s) in', watch)
+        self.assertIn('unspent', watch)
+
     def test_the_same_watch_puts_a_wiped_tree_back(self):
         watch = SOURCE.split('void WatchKitShape(Player* owner, Player* bot)', 1)[1][:2600]
         self.assertIn('int const want = RoleSpecTab(bot->getClass(), role);', watch)
