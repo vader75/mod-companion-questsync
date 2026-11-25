@@ -11,7 +11,7 @@ Play with up to four persistent Playerbots companions. QuestSync helps them pick
 3. Accept a quest and play normally. The selected companion's **Quests** section shows their active quest count. Use **Group quests** for a comparison or **Map** for locations. With CompanionPins enabled, hover a green `!` for objective details or a gold `?` for a ready hand-in. These markers are separate from your own quest markers. Bring the companion within interaction range of the actual NPC or object to turn in; a location hint alone does not mean the giver is usable.
 4. Use **Dismiss** to send a companion away without giving it up. **Untrack** pauses tracking but keeps ownership and the occupied roster slot. **Release** requests retirement: it does not wipe the character, free its name, or make it available to other players. An operator must finish retirement offline to free the slot.
 
-Both addons are optional: the module can be used with in-game commands alone. Use the addons from the same checkout as the server module where possible. The checked-in versions are CompanionSync **2.7.0** and CompanionPins **1.2.3**; the [CompanionSync TOC](addon/CompanionSync/CompanionSync.toc) and [CompanionPins TOC](addon/CompanionPins/CompanionPins.toc) are the version sources. DragonUI is optional; see the [CompanionSync guide](addon/CompanionSync/README.md) and [CompanionPins guide](addon/CompanionPins/README.md).
+Both addons are optional: the module can be used with in-game commands alone. Use the addons from the same checkout as the server module where possible. The checked-in versions are CompanionSync **2.8.0** and CompanionPins **1.2.3**; the [CompanionSync TOC](addon/CompanionSync/CompanionSync.toc) and [CompanionPins TOC](addon/CompanionPins/CompanionPins.toc) are the version sources. DragonUI is optional; see the [CompanionSync guide](addon/CompanionSync/README.md) and [CompanionPins guide](addon/CompanionPins/README.md).
 
 ### Ask for supplies
 
@@ -99,13 +99,14 @@ Keeper stock stays with the companion. The server can offer curated trades autom
 2. From the QuestSync repository root, import both SQL files. Replace `acore_characters` and `your_db_user` with your realm's actual database and user. Do not import into the world, auth, or Playerbots database.
 
    ```sh
-   for f in companion-questsync companion-custody companion-roles companion-engage companion-quiet; do
+   for f in companion-questsync companion-custody companion-roles companion-engage companion-quiet \n         companion-role-lock; do
      mysql -u your_db_user -p acore_characters < "sql/$f.sql" || break
    done
    ```
 
-   The four custody files are additive: `companion-roles`, `companion-engage` and `companion-quiet`
-   add the `role`, `engage` and `quiet` columns the behaviour controls read. Skip any that are
+   The custody files are additive: `companion-roles`, `companion-engage` and `companion-quiet`
+   add the `role`, `engage` and `quiet` columns the behaviour controls read, and
+   `companion-role-lock` adds `role_changed_at`, the timestamp the rate limit reads. Skip any that are
    already applied — the module probes for each column and says so instead of pretending, and
    `.companionsync role` answers "roles are not set up yet on this realm" when the column is
    missing.
@@ -138,6 +139,7 @@ All module keys below use the `CompanionQuestSync.` prefix. The [config template
 | `Formation` | `auto` | Distance: `auto` by role, or `close`/`tight`/`loose`/`spread`/`lead`/`off`. Presets map to Playerbots' own formations (`close`→`near`, `tight`→`queue`, `loose`→`circle`, `spread`→`far`, `lead`→`shield`), so combat movement stays Playerbots'. Out of combat a trade window, gossip menu or standing still gathers everyone at arm's length. |
 | `SuppressGapClosers` | `1` | Mutes Charge for a companion whose role is not `tank` or `auto`, and clears the mute when it tanks again. A warrior's charge is a trigger on its class strategy, not a strategy, so this is the only lever that reaches it. It puts the spell on a long cooldown rather than removing it: removing it leaves the charge action registered, which costs the companion its whole walk into combat. Set to `0` to leave companions alone. |
 | `AllowCreate` / `PoolAccountType` | `1` / `2` | Player-side claims need reviewed stock on eligible AddClass accounts. Disabling player creation is not a substitute for guarding all allocators. |
+| `RoleChangeCooldown` | `60` | Seconds before one companion may be given a different role again (the change is also refused while the companion or the player is fighting). The panel stages a role and an **Apply** button sends it; while the window is open the button counts down with the number the server reports. `0` disables the rate limit, never the out-of-combat rule. Needs `sql/companion-role-lock.sql`. |
 | `AutoProduce` / `AutoTrade` / `MailHome` | `1` / `1` / `1` | Background crafting, guarded town trades, and curated mail are separate switches. `AutoTrade=0` leaves manual offers available on a patched build. |
 
 In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots does not force-complete copies independently of QuestSync's objective checks. Review `AiPlayerbot.LootNeedRollLevel = 2`, `AiPlayerbot.LootGreedRollLevel = 1`, and `AiPlayerbot.AutoPickReward = yes` if you want the intended upgrade rolls and automatic reward choice. These settings affect Playerbots realm-wide. In `worldserver.conf`, point `DataDir` at your extracted server data; QuestSync uses `dbc/WorldMapArea.dbc` for pin coordinates.
@@ -158,6 +160,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 | A new companion didn't receive Portable Holes | Confirm the patched build and starter-bag migration were in place before the claim. The grant only fills empty slots and will not retry after the attempt has been spent. |
 | Quest missing or won't turn in | Check eligibility, quest-log and bag space, and the companion's own objectives. Summon it and bring it to a live, usable ender. Mode `0` disables the module's own hand-ins. |
 | No pins | Open the matching **zone** map, check both server pin settings and the addon, then use `/cpins refresh` with the map open. Check `DataDir` if zone mapping looks wrong. |
+| The Apply button is greyed | It says why: `In fight` means you or the companion is in combat, a number means the server window has that many seconds left, and nothing means no role is staged yet. |
 | A warrior charges although it is not the tank | Check its role is `dps`/`support`/`healer` (not `auto`), that `sql/companion-roles.sql` was imported, and `SuppressGapClosers=1`, then `.companionsync inspect <name>`: a muted Charge is listed. `tank` and `auto` keep the charge by design. |
 | Companions stand too far away, or too close | `.companionsync inspect <name>` prints the formation the server believes, the leash it implies and the realm's pitch-in radius. `Formation=off` leaves distance entirely to Playerbots, and a role's `auto` shape follows the role, not the last preset. |
 | Supplies unavailable or trade cancels | Confirm server patch support, companion control, range, combat state, and free bag space. For Craft, also check materials and any required station. Refresh the picker before retrying. |
@@ -171,7 +174,7 @@ Player commands run in game, not from the server console. Use the addon for the 
 | Task | Commands |
 | --- | --- |
 | Sync and inspect | `.companionsync`, `.companionsync status`, `.companionsync quests`, `.companionsync list`, `.companionsync inspect [name]` |
-| Direct behaviour | `.companionsync role <name> auto\|tank\|healer\|dps\|support`, `.companionsync engage <name> auto\|mine\|joined\|never`, `.companionsync quiet <name> on\|off`, `.companionsync formation [name] auto\|close\|tight\|loose\|spread\|lead\|off` |
+| Direct behaviour | `.companionsync role <name> auto\|tank\|healer\|dps\|support` (the panel stages a role and an Apply button sends it; changes are refused out of combat and once per `RoleChangeCooldown`), `.companionsync engage <name> auto\|mine\|joined\|never`, `.companionsync quiet <name> on\|off`, `.companionsync formation [name] auto\|close\|tight\|loose\|spread\|lead\|off` |
 | Manage companions | `.companionsync pool`, `.companionsync create <race> <class> <name>`, `.companionsync summon <name>`, `.companionsync dismiss <name>`, `.companionsync release <name>` |
 | Change tracking without transferring ownership | `.companionsync unbind <name>`, `.companionsync bind <bot>` |
 | Progression and recovery | `.companionsync level`, `.companionsync learn [name]`, `.companionsync professions [name]`, `.companionsync revive <name>`, `.companionsync catchup` |

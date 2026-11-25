@@ -608,7 +608,7 @@ listener:SetScript("OnEvent", function(_, event, message)
     end
     local roles = text:match("^Roles (.*)$")
     if roles then
-        G.Roles, G.RoleNotes, G.Engage, G.Quiet = {}, {}, {}, {}
+        G.Roles, G.RoleNotes, G.Engage, G.Quiet, G.RoleLockAt = {}, {}, {}, {}, {}
         for pair in roles:gmatch("[^|]+") do
             local name, rest = pair:match("^(.-)=(.*)$")
             if name then
@@ -621,6 +621,9 @@ listener:SetScript("OnEvent", function(_, event, message)
                 -- ":na" = this class cannot honour part of the role; ":q" = quiet (threat down)
                 if flags:find(":na") then G.RoleNotes[name] = true end
                 if flags:find(":q") then G.Quiet[name] = true end
+                -- ":l<seconds>" = the server's window before this companion may change role again
+                local lock = tonumber(flags:match(":l(%d+)"))
+                if lock and lock > 0 then G.RoleLockAt[name] = GetTime() + lock end
             end
         end
         ProtocolActivity()

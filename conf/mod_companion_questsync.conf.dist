@@ -285,6 +285,14 @@ CompanionQuestSync.Formation = auto
 # `.companionsync inspect` lists what is muted. Set to 0 to leave it alone.
 # Default: 1
 CompanionQuestSync.SuppressGapClosers = 1
+
+# A role is not a checkbox: it drives strategies, and it will drive a respec and a gear swap.
+# So a companion may be given a new role once per this many seconds, and only out of combat -
+# either the companion or the player fighting refuses the change. The addon's Apply button
+# counts the window down with the number the server reports. 0 disables the rate limit (the
+# out-of-combat rule stays). Needs sql/companion-role-lock.sql.
+# Default: 60
+CompanionQuestSync.RoleChangeCooldown = 60
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.

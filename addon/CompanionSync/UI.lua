@@ -407,21 +407,83 @@ local function CreateCard()
     end, "Teach or update this companion's gathering and crafting professions.")
     card.professionsButton:SetPoint("LEFT", card.trainButton, "RIGHT", 6, 0)
 
-    -- The role is recorded intent, nothing more yet: it decides which strategies the module
-    -- will hand this companion later, and "auto" means it keeps its hands off entirely.
-    card.roleButton = Button(card, "Role: auto", 118, function()
+    -- The role is a decision, not a keystroke: choosing one here only stages it, and Apply
+    -- sends it. That matters because a role drives strategies, and it will drive a respec and a
+    -- gear swap - so one deliberate change, out of combat, per server-side window. Choosing is
+    -- never blocked; only applying is, and the button says why.
+    local UpdateRoleRow            -- forward: the buttons below call it before it is defined
+    card.roleButton = Button(card, "Role: auto", 110, function()
         if not card.companion then return end
         local ORDER = { "auto", "tank", "healer", "dps", "support" }
         local current = (G.Roles and G.Roles[card.companion.name]) or "auto"
+        local shown = card.rolePending or current
         local at = 1
-        for i, role in ipairs(ORDER) do if role == current then at = i end end
+        for i, role in ipairs(ORDER) do if role == shown then at = i end end
         local nextRole = ORDER[(at % #ORDER) + 1]
-        G.Roles = G.Roles or {}
-        G.Roles[card.companion.name] = nextRole
-        card.roleButton:SetText("Role: " .. nextRole)
-        G.Run(".companionsync role " .. card.companion.name .. " " .. nextRole)
-    end, "What this companion is for. Auto leaves it entirely to its own AI.", false)
+        card.rolePending = (nextRole == current) and nil or nextRole
+        UpdateRoleRow(card)
+    end, "What this companion is for. Auto leaves it entirely to its own AI. Pick, then Apply.", false)
     card.roleButton:SetPoint("TOPLEFT", 16, -132)
+
+    card.roleApply = Button(card, "Apply", 58, function()
+        if not (card.companion and card.rolePending) then return end
+        if UnitAffectingCombat("player") then
+            G.Warn("A role settles out of combat.")
+            return
+        end
+        G.Run(".companionsync role " .. card.companion.name .. " " .. card.rolePending)
+        -- hold the control until the server answers, so a double click cannot queue two changes
+        G.RoleLockAt = G.RoleLockAt or {}
+        G.RoleLockAt[card.companion.name] = GetTime() + 5
+        card.rolePending = nil
+        UpdateRoleRow(card)
+    end, "Send the staged role to the server. Out of combat only, once per server window.", false)
+    card.roleApply:SetPoint("TOPLEFT", 132, -132)
+
+    UpdateRoleRow = function(target)
+        local companion = target.companion
+        local name = companion and companion.name
+        local current = (name and G.Roles and G.Roles[name]) or "auto"
+        local pending = target.rolePending
+        local note = name and G.RoleNotes and G.RoleNotes[name]
+
+        target.roleButton:SetText("Role: " .. (pending and (current .. " > " .. pending) or current) .. (note and " !" or ""))
+        local text = target.roleButton:GetFontString()
+        if note then text:SetTextColor(1.0, 0.45, 0.35)
+        elseif pending then text:SetTextColor(1.0, 0.82, 0.30)
+        elseif current == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
+        else text:SetTextColor(1.0, 0.82, 0.30) end
+
+        local untilAt = name and G.RoleLockAt and G.RoleLockAt[name]
+        local left = untilAt and math.ceil(untilAt - GetTime()) or 0
+        if left < 0 then left = 0 end
+
+        if not pending then
+            target.roleApply:SetText("Apply")
+            target.roleApply:Disable()
+            target.roleApply:SetAlpha(0.4)
+        elseif UnitAffectingCombat("player") then
+            target.roleApply:SetText("In fight")
+            target.roleApply:Disable()
+            target.roleApply:SetAlpha(0.4)
+        elseif left > 0 then
+            target.roleApply:SetText(left .. "s")
+            target.roleApply:Disable()
+            target.roleApply:SetAlpha(0.4)
+        else
+            target.roleApply:SetText("Apply")
+            target.roleApply:Enable()
+            target.roleApply:SetAlpha(1)
+        end
+    end
+
+    -- the window is measured in seconds, so the label has to tick down by itself
+    card.roleApply:SetScript("OnUpdate", function(self, elapsed)
+        self.tick = (self.tick or 0) + elapsed
+        if self.tick < 0.5 then return end
+        self.tick = 0
+        UpdateRoleRow(card)
+    end)
 
     -- Engagement is a different question from role: the role says what it may do in a fight,
     -- this says whether it gets into one. "mine" hands target selection to the player.
@@ -437,10 +499,10 @@ local function CreateCard()
         card.engageButton:SetText("Engage: " .. nextPolicy)
         G.Run(".companionsync engage " .. card.companion.name .. " " .. nextPolicy)
     end, "Whether this companion gets into fights at all. Mine = only what you are fighting.", false)
-    card.engageButton:SetPoint("TOPLEFT", 140, -132)
+    card.engageButton:SetPoint("TOPLEFT", 196, -132)
 
     -- Quiet is the threat lever: "it will not taunt" is not "it will not pull aggro".
-    card.quietButton = Button(card, "Quiet: off", 120, function()
+    card.quietButton = Button(card, "Quiet: off", 112, function()
         if not card.companion then return end
         local on = not (G.Quiet and G.Quiet[card.companion.name])
         G.Quiet = G.Quiet or {}
@@ -448,13 +510,13 @@ local function CreateCard()
         card.quietButton:SetText("Quiet: " .. (on and "on" or "off"))
         G.Run(".companionsync quiet " .. card.companion.name .. (on and " on" or " off"))
     end, "Hold threat down at the cost of damage. For dps and support roles.", false)
-    card.quietButton:SetPoint("TOPLEFT", 300, -132)
+    card.quietButton:SetPoint("TOPLEFT", 352, -132)
 
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
         if CanSupply(companion) then G.CollectDelivery(companion.name) end
     end, "Stand nearby and out of combat to collect what this companion has ready. You still accept the trade.")
-    card.collectButton:SetPoint("TOPLEFT", 440, -100)
+    card.collectButton:SetPoint("TOPLEFT", 476, -100)
 
     card.supplyPicker = Button(card, "Choose supply  ▾", 300, function()
         local supply = G.supply
@@ -938,14 +1000,12 @@ function G.Refresh()
                 else text:SetTextColor(0.72, 0.82, 1.0) end
             end
 
-            if card.roleButton then
-                local role = (G.Roles and G.Roles[companion.name]) or "auto"
-                local note = G.RoleNotes and G.RoleNotes[companion.name]
-                card.roleButton:SetText("Role: " .. role .. (note and " !" or ""))
-                local text = card.roleButton:GetFontString()
-                if note then text:SetTextColor(1.0, 0.45, 0.35)
-                elseif role == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
-                else text:SetTextColor(1.0, 0.82, 0.30) end
+            if card.roleButton and UpdateRoleRow then
+                -- a pending choice that the server has already stored is no longer pending
+                if card.rolePending and card.rolePending == ((G.Roles and G.Roles[companion.name]) or "auto") then
+                    card.rolePending = nil
+                end
+                UpdateRoleRow(card)
             end
 
             card.primary:SetText(online and "Dismiss" or "Summon")

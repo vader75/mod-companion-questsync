@@ -177,6 +177,29 @@ is both a role word and the name of a protection warrior's (or paladin's) entire
 strategy, so `-tank` on a protection companion would leave it with no combat actions at all.
 The module refuses that removal and reports `kept tank` in the role card instead.
 
+## A role change is deliberate, out of combat, and rate-limited
+
+The panel no longer sends a role the moment you click it. Clicking stages it (`Role: dps > tank`),
+and an **Apply** button beside it sends it. That is the whole reason the button exists: a role is
+not a checkbox. It drives strategies today, and it will drive a respec and a gear swap, and five
+clicks in ten seconds is how a companion ends up respeccing in a doorway with a shield it cannot
+use.
+
+The server is the authority, and it refuses the change on two counts:
+
+- **Out of combat** - either the companion or the player fighting. A role that changes mid-swing
+  has to unwind strategies, talents and gear while the bot is being hit; nothing good comes of it.
+  The panel greys Apply with `In fight` and says the same thing if a macro slips past it.
+- **One change per `RoleChangeCooldown`** (60 s by default). Asking for the role it already has is
+  a no-op and does not spend the window, so a mistaken click costs nothing. The remaining seconds
+  travel to the addon in the `Roles` line (`:l<seconds>`), which is why Apply can count down
+  instead of looking broken.
+
+Two smaller things worth knowing. A realm that imported `sql/companion-roles.sql` but not
+`sql/companion-role-lock.sql` still changes roles, it just cannot rate-limit them - the module logs
+one warning at startup rather than failing the command. And `0` in the config turns the window off
+without turning off the combat rule, which is the one that protects the companion.
+
 ## Setting it up
 
 ```sql

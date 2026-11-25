@@ -142,6 +142,7 @@ namespace
         bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool suppressGapClosers = true;     // take Charge away from a companion that is not tanking
+        uint32 roleChangeCooldown = 60;     // seconds between role changes for one companion (0 = off)
         std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -710,6 +711,7 @@ namespace
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
         g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
         g_cfg.suppressGapClosers = sConfigMgr->GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true);
+        g_cfg.roleChangeCooldown = sConfigMgr->GetOption<uint32>("CompanionQuestSync.RoleChangeCooldown", 60);
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -1061,6 +1063,30 @@ namespace
 
     std::atomic<int> g_roleColumn{0};   // 0 unknown, 1 present, -1 missing
 
+    /// `role_changed_at` arrived after `role`, so it gets its own probe: a realm that imported
+    /// the first migration but not the second still records roles, it just cannot rate-limit
+    /// them, and that must be a warning rather than a broken role command.
+    std::atomic<int> g_roleLockColumn{ 0 };
+
+    bool RoleLockColumnPresent()
+    {
+        int state = g_roleLockColumn.load();
+        if (state)
+            return state > 0;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'cq_companion_custody' AND column_name = 'role_changed_at'");
+        state = (row && row->Fetch()[0].Get<uint64>() != 0) ? 1 : -1;
+        g_roleLockColumn = state;
+
+        if (state < 0)
+            LOG_WARN("server.loading", "[CompanionQuestSync] cq_companion_custody has no role_changed_at "
+                                       "column; role changes are not rate limited until "
+                                       "sql/companion-role-lock.sql is imported");
+        return state > 0;
+    }
+
     bool RoleColumnPresent()
     {
         int state = g_roleColumn.load();
@@ -1112,15 +1138,72 @@ namespace
     }
 
     /// Store a role, then read it back: a write that did not land must not look like one that did.
+    /// Seconds before this companion may be given another role, 0 when it may change now.
+    ///
+    /// A role is not a checkbox: it drives strategies, and (once the loadout lands) a respec and
+    /// a gear swap. Flipping it repeatedly is how a companion ends up respeccing in a doorway,
+    /// so one change per window, and the window is reported to the addon so its Apply button can
+    /// count down instead of letting the player bang on a dead control.
+    uint32 RoleLockRemaining(uint32 botGuid)
+    {
+        if (!g_cfg.roleChangeCooldown || !RoleLockColumnPresent())
+            return 0;
+
+        QueryResult row = CharacterDatabase.Query(
+            "SELECT role_changed_at FROM cq_companion_custody WHERE bot_guid = {} "
+            "AND module = 'cq' AND state = 'owned' LIMIT 1", botGuid);
+        if (!row)
+            return 0;
+
+        Field* field = row->Fetch();
+        if (field[0].IsNull())
+            return 0;
+
+        uint32 const changedAt = field[0].Get<uint32>();
+        if (!changedAt)
+            return 0;
+
+        uint32 const now = static_cast<uint32>(time(nullptr));
+        if (now <= changedAt)
+            return 0;
+
+        uint32 const spent = now - changedAt;
+        return spent >= g_cfg.roleChangeCooldown ? 0 : g_cfg.roleChangeCooldown - spent;
+    }
+
+    /// Why this role change is refused, or empty when it may go ahead.
+    ///
+    /// Out of combat is the hard rule: the companion must be standing still and not mid-swing
+    /// for the change to settle, and the owner being in a fight is the same moment.
+    std::string RoleChangeRefusal(Player* owner, Player* bot, uint32 botGuid)
+    {
+        if (bot && bot->IsInCombat())
+            return "it is fighting - a role settles out of combat";
+
+        if (owner && owner->IsInCombat())
+            return "you are fighting - a role settles out of combat";
+
+        if (uint32 const remaining = RoleLockRemaining(botGuid); remaining)
+            return "it changed roles a moment ago; " + std::to_string(remaining) + "s to go";
+
+        return std::string();
+    }
+
     bool SetCompanionRole(uint32 ownerGuid, uint32 botGuid, std::string const& role)
     {
         if (!RoleColumnPresent() || !HasCurrentCustody(ownerGuid, botGuid, false))
             return false;
 
         std::string const wanted = RoleOrAuto(role);
-        CharacterDatabase.DirectExecute(
-            "UPDATE cq_companion_custody SET role = '{}' WHERE bot_guid = {} AND owner_guid = {} "
-            "AND module = 'cq' AND state = 'owned'", wanted, botGuid, ownerGuid);
+        if (RoleLockColumnPresent())
+            CharacterDatabase.DirectExecute(
+                "UPDATE cq_companion_custody SET role = '{}', role_changed_at = UNIX_TIMESTAMP() "
+                "WHERE bot_guid = {} AND owner_guid = {} AND module = 'cq' AND state = 'owned'",
+                wanted, botGuid, ownerGuid);
+        else
+            CharacterDatabase.DirectExecute(
+                "UPDATE cq_companion_custody SET role = '{}' WHERE bot_guid = {} AND owner_guid = {} "
+                "AND module = 'cq' AND state = 'owned'", wanted, botGuid, ownerGuid);
         return CompanionRole(botGuid) == wanted;
     }
 
@@ -1789,6 +1872,8 @@ namespace
             auto const note = g_roleNotes.find(botGuid);
             if (note != g_roleNotes.end() && !note->second.empty())
                 line += ":na";       // this class cannot honour part of the role
+            if (uint32 const remaining = RoleLockRemaining(botGuid); remaining)
+                line += ":l" + std::to_string(remaining);   // the addon counts this down
         }
         return line;
     }
@@ -9601,6 +9686,22 @@ public:
         {
             handler->PSendSysMessage("|cffff8000role|r: roles are not set up yet on this realm "
                                      "(import sql/companion-roles.sql).");
+            return true;
+        }
+
+        // a role that is already set asks nothing of the companion: say so, and do not spend
+        // the window on it
+        if (CompanionRole(botGuid) == RoleOrAuto(role))
+        {
+            handler->PSendSysMessage("|cff20ff20{}|r is already |cffffffff{}|r - nothing to change.",
+                                     a[0], role);
+            return true;
+        }
+
+        Player* botBefore = FindCompanionPlayer(botGuid);
+        if (std::string const refusal = RoleChangeRefusal(player, botBefore, botGuid); !refusal.empty())
+        {
+            handler->PSendSysMessage("|cffff8000role|r: {}.", refusal);
             return true;
         }
 

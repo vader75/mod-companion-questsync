@@ -14,10 +14,21 @@ SQL = (ROOT / "sql" / "companion-roles.sql").read_text(encoding="utf-8")
 DOC = (ROOT / "docs" / "companion-roles.md").read_text(encoding="utf-8")
 UI = (ROOT / "addon" / "CompanionSync" / "UI.lua").read_text(encoding="utf-8")
 CORE = (ROOT / "addon" / "CompanionSync" / "Core.lua").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def slice_from(anchor, length=2400):
     return SOURCE[SOURCE.index(anchor):SOURCE.index(anchor) + length]
+
+
+def handler_body(anchor="    static bool HandleRoleCommand"):
+    """One handler, exactly: the next top-level function ends it.
+
+    Length-based slices break the moment a refusal is added above an assertion - which is what
+    a role guard is - and the failure looks like a missing message rather than a moved one.
+    """
+    start = SOURCE.index(anchor)
+    return SOURCE[start:SOURCE.index(chr(10) + "    static ", start + 10)]
 
 
 class StorageContract(unittest.TestCase):
@@ -92,7 +103,7 @@ class StrategyContract(unittest.TestCase):
         self.assertIn("IsControlledCompanion(bot, owner)", body)
 
     def test_a_shortfall_is_named_not_swallowed(self):
-        body = slice_from("    static bool HandleRoleCommand")
+        body = handler_body()
         self.assertIn("this class has no {} strategy", body)
         self.assertIn('line += ":na";', SOURCE)
 
@@ -204,12 +215,14 @@ class AddonContract(unittest.TestCase):
         self.assertIn('text:match("^Roles (.*)$")', CORE)
         self.assertIn('pair:match("^(.-)=(.*)$")', CORE)
 
-    def test_each_card_can_set_its_own_role(self):
+    def test_each_card_stages_a_role_and_applies_it(self):
         self.assertIn("card.roleButton", UI)
-        self.assertIn('G.Run(".companionsync role " .. card.companion.name .. " " .. nextRole)', UI)
+        self.assertIn("card.roleApply", UI)
+        self.assertIn("card.rolePending = (nextRole == current) and nil or nextRole", UI)
 
     def test_the_button_shows_the_stored_role_not_the_last_click(self):
-        self.assertIn('local role = (G.Roles and G.Roles[companion.name]) or "auto"', UI)
+        # the stored role drives the label; a staged one rides alongside it as "dps > tank"
+        self.assertIn('local current = (name and G.Roles and G.Roles[name]) or "auto"', UI)
 
     def test_a_shortfall_is_marked_on_the_card(self):
         self.assertIn('G.RoleNotes[name] = true', CORE)
@@ -287,6 +300,85 @@ class EngagementContract(unittest.TestCase):
 
     def test_addon_parses_role_slash_policy(self):
         self.assertIn('local role, policy, flag = rest:match("^(%a+)/?(%a*)(.*)$")', CORE)
+
+
+class RoleChangeWindow(unittest.TestCase):
+    """A role is a decision, taken out of combat, once per window.
+
+    The window exists because a role drives strategies, and it will drive a respec and a gear
+    swap: spamming it is how a companion ends up respeccing in a doorway, mid-pull. The addon
+    stages the choice and applies it, and the server is the authority on both the fight and the
+    window - a disabled button is courtesy, not the rule.
+    """
+
+    def test_the_window_is_configurable_and_documented(self):
+        self.assertIn('g_cfg.roleChangeCooldown = sConfigMgr->GetOption<uint32>'
+                      '("CompanionQuestSync.RoleChangeCooldown", 60);', SOURCE)
+        dist = (ROOT / "conf" / "mod_companion_questsync.conf.dist").read_text(encoding="utf-8")
+        self.assertIn("CompanionQuestSync.RoleChangeCooldown = 60", dist)
+        self.assertIn("`RoleChangeCooldown`", README)
+        self.assertIn("role change", DOC.lower())
+
+    def test_the_window_is_stamped_when_the_role_moves(self):
+        body = slice_from("    bool SetCompanionRole(")
+        self.assertIn("role_changed_at = UNIX_TIMESTAMP()", body)
+
+    def test_a_missing_column_is_a_warning_not_a_broken_command(self):
+        self.assertIn("RoleLockColumnPresent", SOURCE)
+        body = slice_from("    bool RoleLockColumnPresent()")
+        self.assertIn("has no role_changed_at", body)
+        self.assertIn("not rate limited", body)
+        migration = (ROOT / "sql" / "companion-role-lock.sql").read_text(encoding="utf-8")
+        self.assertIn("ADD COLUMN role_changed_at INT UNSIGNED NOT NULL DEFAULT 0", migration)
+
+    def test_the_window_is_read_back_from_the_row(self):
+        body = slice_from("    uint32 RoleLockRemaining(")
+        self.assertIn("SELECT role_changed_at FROM cq_companion_custody", body)
+        self.assertIn("g_cfg.roleChangeCooldown - spent", body)
+        # no cooldown configured means no guard, and a missing column means the same
+        self.assertIn("if (!g_cfg.roleChangeCooldown || !RoleLockColumnPresent())", body)
+
+    def test_out_of_combat_is_the_hard_rule(self):
+        body = slice_from("    std::string RoleChangeRefusal(")
+        self.assertIn("bot->IsInCombat()", body)
+        self.assertIn("owner->IsInCombat()", body)
+        self.assertIn("out of combat", body)
+        # and the refusal is what the command reports
+        handler = handler_body("static bool HandleRoleCommand")
+        self.assertIn("RoleChangeRefusal(player, botBefore, botGuid)", handler)
+
+    def test_asking_for_the_role_it_already_has_costs_nothing(self):
+        handler = handler_body("static bool HandleRoleCommand")
+        self.assertIn("CompanionRole(botGuid) == RoleOrAuto(role)", handler)
+        self.assertIn("already", handler)
+        # the no-op returns before the write, so it cannot spend the window
+        self.assertLess(handler.index("already"), handler.index("SetCompanionRole(ownerGuid"))
+
+    def test_the_addon_is_told_the_remaining_window(self):
+        roles = slice_from("            if (uint32 const remaining = RoleLockRemaining(botGuid); remaining)", 200)
+        self.assertIn('line += ":l"', roles)
+        self.assertIn('flags:match(":l(%d+)")', CORE)
+        self.assertIn("G.RoleLockAt = {}, {}, {}, {}, {}", CORE)
+
+    def test_choosing_a_role_only_stages_it(self):
+        ui = UI
+        start = ui.index("card.roleButton = Button(")
+        end = ui.index("card.roleApply = Button(")
+        chooser = ui[start:end]
+        self.assertIn("card.rolePending =", chooser)
+        self.assertNotIn('G.Run(".companionsync role', chooser)
+
+        applyStart = end
+        applyEnd = ui.index('card.roleApply:SetPoint(')
+        applier = ui[applyStart:applyEnd]
+        self.assertIn('G.Run(".companionsync role " .. card.companion.name .. " " .. card.rolePending)', applier)
+        self.assertIn('UnitAffectingCombat("player")', applier)
+
+    def test_the_apply_button_counts_the_window_down(self):
+        self.assertIn('target.roleApply:SetText(left .. "s")', UI)
+        self.assertIn("target.roleApply:Disable()", UI)
+        self.assertIn('card.roleApply:SetScript("OnUpdate"', UI)
+
 
 
 if __name__ == "__main__":

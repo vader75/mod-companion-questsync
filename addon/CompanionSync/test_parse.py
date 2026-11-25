@@ -111,7 +111,22 @@ def main() -> int:
         failures += 1
         print(f"FAIL ordering was {ordered}")
 
-    total = len(CASES) + 5
+    # Roles flags: "name=role/policy[:na][:q][:l<seconds>]" - ":l" is the server's role-change
+    # window, and the addon counts it down instead of looking broken
+    roles = "Vorrin=dps:l42|Branros=support/joined:q:na|Thalthas=dps/never"
+    parsed = {}
+    for pair in [p for p in roles.split("|") if p]:
+        name, rest = pair.split("=", 1)
+        role, _, flags = re.match(r"^(\w+)/?(\w*)(.*)$", rest).groups()
+        parsed[name] = (role, flags)
+    if parsed.get("Vorrin") != ("dps", ":l42") or parsed.get("Branros") != ("support", ":q:na"):
+        failures += 1
+        print(f"FAIL roles flags: {parsed}")
+    if not re.search(r":l(\d+)", parsed.get("Vorrin", ("", ""))[1]):
+        failures += 1
+        print("FAIL role window not readable")
+
+    total = len(CASES) + 6
     print(f"{total - failures}/{total} payload cases passed")
     return 1 if failures else 0
 
