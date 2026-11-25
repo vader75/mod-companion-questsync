@@ -71,6 +71,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #endif
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
+#include "AiFactory.h"       // which talent tree a companion is actually in
 #include "Pet.h"             // pet autocasts: Growl and Torment are what taunt for us
 #include "SpellMgr.h"        // naming a pet ability we turn off
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
@@ -143,6 +144,8 @@ namespace
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool suppressGapClosers = true;     // take Charge away from a companion that is not tanking
         uint32 roleChangeCooldown = 60;     // seconds between role changes for one companion (0 = off)
+        uint32 specFollowRole = 0;          // 0 off, 1 log the decision, 2 retrain to it
+        uint32 specMinLevel = 40;           // below this the trees are too thin to mean anything
         std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
@@ -712,6 +715,8 @@ namespace
         g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
         g_cfg.suppressGapClosers = sConfigMgr->GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true);
         g_cfg.roleChangeCooldown = sConfigMgr->GetOption<uint32>("CompanionQuestSync.RoleChangeCooldown", 60);
+        g_cfg.specFollowRole = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecFollowRole", 0);
+        g_cfg.specMinLevel = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecMinLevel", 40);
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
@@ -1315,6 +1320,7 @@ namespace
     void RevertRoleStrategies(Player* bot);
     std::string CompanionEngage(uint32 botGuid);
     void ReconcileRoleSpells(Player* bot, std::string const& role);
+    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role);
 
     /// Apply a companion's role to its AI. Returns the edits that did not take, so the card
     /// can say "no tank strategy for this class" rather than showing a control that lies.
@@ -1584,6 +1590,149 @@ namespace
                          bot->GetName(), closer.name, role);
             }
         }
+    }
+
+    /// The three trees of each class, in tab order. Kept as words because every line this
+    /// produces is read by a person in `inspect` or in Server.log, and "tab 2" tells them nothing.
+    constexpr char const* kSpecTreeNames[11][3] =
+    {
+        { "?",               "?",             "?" },                 // 0 unused
+        { "arms",            "fury",          "protection" },        // warrior
+        { "holy",            "protection",    "retribution" },       // paladin
+        { "beast mastery",   "marksmanship",  "survival" },          // hunter
+        { "assassination",   "combat",        "subtlety" },          // rogue
+        { "discipline",      "holy",          "shadow" },            // priest
+        { "blood",           "frost",         "unholy" },            // death knight
+        { "elemental",       "enhancement",   "restoration" },       // shaman
+        { "arcane",          "fire",          "frost" },             // mage
+        { "affliction",      "demonology",    "destruction" },       // warlock
+        { "balance",         "feral",         "restoration" },       // druid
+    };
+
+    /// Which tree a role asks of a class, or -1 when the class cannot hold that role at all.
+    ///
+    /// `support` rides the damage tree on purpose: support in this module means "fights, never
+    /// off-heals", so a support tree would be a healer tree the module then refuses to let heal.
+    /// A bear tank and a cat both live in feral - the tree survives, the form does not - so a
+    /// druid honours `tank` and `dps` the same way at the talent level.
+    int RoleSpecTab(uint8 cls, std::string const& role)
+    {
+        if (cls < 1 || cls > 10 || role == "auto")
+            return -1;
+
+        bool const tank = role == "tank";
+        bool const heal = role == "healer";
+
+        switch (cls)
+        {
+            case CLASS_WARRIOR:      return tank ? 2 : (heal ? -1 : 1);
+            case CLASS_PALADIN:      return tank ? 1 : (heal ? 0 : 2);
+            case CLASS_HUNTER:       return (tank || heal) ? -1 : 1;
+            case CLASS_ROGUE:        return (tank || heal) ? -1 : 1;
+            case CLASS_PRIEST:       return heal ? 1 : (tank ? -1 : 2);
+            case CLASS_DEATH_KNIGHT: return tank ? 0 : (heal ? -1 : 1);
+            case CLASS_SHAMAN:       return heal ? 2 : 0;
+            case CLASS_MAGE:         return (tank || heal) ? -1 : 1;
+            case CLASS_WARLOCK:      return (tank || heal) ? -1 : 0;
+            case CLASS_DRUID:        return heal ? 2 : 1;
+            default:                 return -1;
+        }
+    }
+
+    /// The tree the companion is actually in: the one holding the most points, or -1 with none.
+    int CurrentSpecTab(Player* bot)
+    {
+        std::map<uint8, uint32> const tabs = AiFactory::GetPlayerSpecTabs(bot);
+        int best = -1;
+        uint32 bestPoints = 0;
+        for (uint8 tab = 0; tab < 3; ++tab)
+        {
+            auto const it = tabs.find(tab);
+            if (it != tabs.end() && it->second > bestPoints)
+            {
+                bestPoints = it->second;
+                best = tab;
+            }
+        }
+        return bestPoints ? best : -1;
+    }
+
+    std::unordered_map<uint32, std::string> g_specNotes;   // bot guid -> the last decision logged
+
+    /// Make the talents follow the role, on the same terms as everything else: deliberate,
+    /// out of combat, and honest about what it is doing.
+    ///
+    /// Trees are re-spent with playerbots' own template (`InitTalentsTree` with a forced tab) so
+    /// the point layout is one players recognise, at the companion's level rather than level 80,
+    /// and the AI is re-initialised afterwards because strategies are chosen from the trees.
+    void ReconcileCompanionSpec(Player* owner, Player* bot, std::string const& role)
+    {
+        if (!bot || !g_cfg.specFollowRole || role == "auto")
+            return;
+
+        int const want = RoleSpecTab(bot->getClass(), role);
+        if (want < 0)
+            return;
+
+        uint32 const botGuid = bot->GetGUID().GetCounter();
+        std::string const& wantName = kSpecTreeNames[bot->getClass()][want];
+
+        int const have = CurrentSpecTab(bot);
+        if (have == want)
+        {
+            g_specNotes.erase(botGuid);
+            return;
+        }
+
+        std::string const haveName = have >= 0 ? kSpecTreeNames[bot->getClass()][have] : std::string("no points");
+
+        if (bot->GetLevel() < g_cfg.specMinLevel)
+        {
+            // one line per companion per session: the decision is made, the level is not there
+            std::string const note = wantName + "@low";
+            if (g_specNotes[botGuid] != note)
+            {
+                g_specNotes[botGuid] = note;
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} is level {}: {} would suit the {} role, "
+                                           "but trees start to mean something at {}",
+                         bot->GetName(), bot->GetLevel(), wantName, role, g_cfg.specMinLevel);
+            }
+            return;
+        }
+
+        if (bot->IsInCombat())
+            return;     // it settles out of combat, like a role change
+
+        if (g_cfg.specFollowRole < 2)
+        {
+            if (g_specNotes[botGuid] != wantName)
+            {
+                g_specNotes[botGuid] = wantName;
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} would retrain {} -> {} for the {} role "
+                                           "(SpecFollowRole=1: logging only)",
+                         bot->GetName(), haveName, wantName, role);
+            }
+            return;
+        }
+
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        factory.InitTalentsTree(false, true, true, want);
+
+        // strategies are picked from the trees, so the AI has to be rebuilt from the new ones
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->Reset();
+
+        ApplyRoleStrategies(bot);
+        ReconcileRoleSpells(bot, role);
+
+        g_specNotes[botGuid] = wantName;
+        LOG_INFO("server.loading", "[CompanionQuestSync] {} retrained {} -> {} for the {} role",
+                 bot->GetName(), haveName, wantName, role);
+
+        if (owner && owner->GetSession())
+            ChatHandler(owner->GetSession()).PSendSysMessage(
+                "|cff20ff20{}|r has retrained as |cffffffff{}|r for its |cffffffff{}|r role.",
+                bot->GetName(), wantName, role);
     }
 
     // --------------------------------------------------------------- engagement
@@ -1906,6 +2055,7 @@ namespace
             at = now;
             ReconcilePetTaunt(bot);
             ReconcileRoleSpells(bot, CompanionRole(bot->GetGUID().GetCounter()));
+            ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));
             std::string const missed = ApplyRoleStrategies(bot);
             if (missed.empty())
                 g_roleNotes.erase(botGuid);
@@ -9713,6 +9863,10 @@ public:
 
         handler->PSendSysMessage("|cff20ff20{}|r is now |cffffffff{}|r.", a[0], role);
 
+        // a new role asks for new talents as well; the same three rules apply (out of combat,
+        // once the window has passed, and only when the operator asked for it)
+        ReconcileCompanionSpec(player, botBefore, role);
+
         Player* bot = FindCompanionPlayer(botGuid);
         if (!bot || !bot->IsInWorld())
         {
@@ -9900,6 +10054,21 @@ public:
                 handler->PSendSysMessage("  active: {}", StrategySnapshot(ai));
             else
                 handler->PSendSysMessage("  active: no AI (not summoned, or not a bot)");
+
+            if (g_cfg.specFollowRole && CompanionRole(botGuid) != "auto")
+            {
+                int const want = RoleSpecTab(bot->getClass(), CompanionRole(botGuid));
+                int const have = CurrentSpecTab(bot);
+                if (want >= 0)
+                {
+                    std::string const haveName = have >= 0 ? kSpecTreeNames[bot->getClass()][have]
+                                                           : std::string("no points yet");
+                    char const* mode = g_cfg.specFollowRole >= 2 ? "" : " (dry run)";
+                    handler->PSendSysMessage("  spec: {} |cff9d9d9drole {} wants {}{}|r",
+                                             haveName, CompanionRole(botGuid),
+                                             kSpecTreeNames[bot->getClass()][want], mode);
+                }
+            }
 
             handler->PSendSysMessage("  edits: {}", LedgerSnapshot(botGuid));
 

@@ -381,5 +381,84 @@ class RoleChangeWindow(unittest.TestCase):
 
 
 
+def function_body(sig):
+    """One function, from its definition to the first closing brace at method indent.
+
+    `rindex`: every one of these has a forward declaration earlier in the file, and the body is
+    what the test is about.
+    """
+    start = SOURCE.rindex(sig)
+    return SOURCE[start:SOURCE.index(chr(10) + "    }", start)]
+
+
+class SpecFollowsRole(unittest.TestCase):
+    """Talents follow the role, on the role's own terms.
+
+    The retrain is the first thing in this module that changes what a companion *is* rather
+    than what it is told to do, so the tests pin the three gates (not auto, out of combat, at or
+    above SpecMinLevel), the primitive used (a forced tab, so the tree is chosen and not
+    dice-rolled), and the rebuild afterwards - strategies come from the trees.
+    """
+
+    def test_every_class_has_a_tree_per_role(self):
+        for cls in ("CLASS_WARRIOR", "CLASS_PALADIN", "CLASS_HUNTER", "CLASS_ROGUE", "CLASS_PRIEST",
+                    "CLASS_DEATH_KNIGHT", "CLASS_SHAMAN", "CLASS_MAGE", "CLASS_WARLOCK", "CLASS_DRUID"):
+            self.assertIn("case " + cls + ":", SOURCE)
+        self.assertIn("constexpr char const* kSpecTreeNames[11][3]", SOURCE)
+        self.assertIn('{ "arms",            "fury",          "protection" }', SOURCE)
+        self.assertIn('{ "balance",         "feral",         "restoration" }', SOURCE)
+
+    def test_the_mapping_says_what_each_role_asks(self):
+        body = SOURCE[SOURCE.index("    int RoleSpecTab("):SOURCE.index("    int CurrentSpecTab(")]
+        self.assertIn("return tank ? 2 : (heal ? -1 : 1);", body)   # warrior: protection or fury
+        self.assertIn("return tank ? 0 : (heal ? -1 : 1);", body)   # death knight: blood or frost
+        self.assertIn("return heal ? 1 : (tank ? -1 : 2);", body)   # priest: holy or shadow
+        self.assertIn("return heal ? 2 : 1;", body)                 # druid: restoration or feral
+        self.assertIn('role == "auto"', body)
+
+    def test_support_rides_the_damage_tree(self):
+        body = SOURCE[SOURCE.index("    int RoleSpecTab("):SOURCE.index("    int CurrentSpecTab(")]
+        # nothing in the mapping reacts to "support": it falls into the damage branch
+        self.assertNotIn('support', body)
+
+    def test_the_three_gates_are_the_role_gates(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        self.assertIn("!g_cfg.specFollowRole || role == \"auto\"", body)
+        self.assertIn("bot->GetLevel() < g_cfg.specMinLevel", body)
+        self.assertIn("bot->IsInCombat()", body)
+        self.assertIn("g_cfg.specFollowRole < 2", body)      # mode 1 logs and stops
+
+    def test_it_retrains_with_a_forced_tab_and_rebuilds_the_ai(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        self.assertIn("factory.InitTalentsTree(false, true, true, want);", body)
+        self.assertIn("ai->Reset();", body)
+        self.assertIn("ApplyRoleStrategies(bot);", body)
+        self.assertIn("ReconcileRoleSpells(bot, role);", body)
+
+    def test_a_low_level_companion_is_told_not_changed(self):
+        body = function_body("    void ReconcileCompanionSpec(Player* owner")
+        low = body[body.index("bot->GetLevel() < g_cfg.specMinLevel"):body.index("bot->IsInCombat()")]
+        self.assertIn("LOG_INFO", low)
+        self.assertNotIn("InitTalentsTree", low)
+
+    def test_both_entry_points_use_it(self):
+        # the slow pass (which covers login) and the role command itself
+        self.assertIn("ReconcileCompanionSpec(owner, bot, CompanionRole(bot->GetGUID().GetCounter()));", SOURCE)
+        self.assertIn("ReconcileCompanionSpec(player, botBefore, role);", SOURCE)
+
+    def test_inspect_reports_the_tree_and_the_want(self):
+        self.assertIn('handler->PSendSysMessage("  spec: {} |cff9d9d9drole {} wants {}{}|r"', SOURCE)
+        self.assertIn("(dry run)", SOURCE)
+
+    def test_the_keys_are_documented(self):
+        dist = (ROOT / "conf" / "mod_companion_questsync.conf.dist").read_text(encoding="utf-8")
+        self.assertIn("CompanionQuestSync.SpecFollowRole = 0", dist)
+        self.assertIn("CompanionQuestSync.SpecMinLevel = 40", dist)
+        self.assertIn("`SpecFollowRole`", README)
+        self.assertIn("`SpecMinLevel`", README)
+        self.assertIn("Talents follow the role", DOC)
+
+
+
 if __name__ == "__main__":
     unittest.main()

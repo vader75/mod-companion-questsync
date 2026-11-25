@@ -293,6 +293,19 @@ CompanionQuestSync.SuppressGapClosers = 1
 # out-of-combat rule stays). Needs sql/companion-role-lock.sql.
 # Default: 60
 CompanionQuestSync.RoleChangeCooldown = 60
+
+# Whether the companion's talents follow its role.
+# 0 = leave talents alone, 1 = work out the tree the role wants and log it, 2 = retrain to it.
+# A retrain re-spends the trees with playerbots' own template at the companion's level, then
+# rebuilds its AI (strategies are chosen from the trees), so it is refused in combat exactly
+# like a role change. `support` uses the damage tree on purpose: support never off-heals here.
+# Default: 0
+CompanionQuestSync.SpecFollowRole = 0
+
+# A tree below this level is too thin to be a spec (a level 15 warrior has six points).
+# Below it the module still records the decision it would make, in Server.log, once per session.
+# Default: 40
+CompanionQuestSync.SpecMinLevel = 40
 # The land asks a minimum of its gatherers: on entering a zone, a companion whose
 # gathering skill sits below the zone asks (~5 points per zone level) is caught up to
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.

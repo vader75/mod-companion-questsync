@@ -200,6 +200,35 @@ Two smaller things worth knowing. A realm that imported `sql/companion-roles.sql
 one warning at startup rather than failing the command. And `0` in the config turns the window off
 without turning off the combat rule, which is the one that protects the companion.
 
+### Talents follow the role, as far as the level allows
+
+A role is only half a decision while the talents still say something else: a protection companion
+with fury talents is a companion with a shield and no mitigation. So the module can retrain a
+companion to the tree its role asks for, per class:
+
+| Role | What it asks for |
+|---|---|
+| `tank` | warrior protection, paladin protection, druid feral (bear), death knight blood |
+| `healer` | priest holy, paladin holy, druid restoration, shaman restoration |
+| `dps` / `support` | the class's damage tree - fury, retribution, feral (cat), shadow, elemental, marksmanship, fire, affliction, combat |
+
+`support` deliberately rides the damage tree: in this module support means "fights, never
+off-heals", so a healer tree would be a tree the module then forbids the companion to use. A druid
+tank and a druid cat share feral - the tree survives a role flip, the form does not, which is what
+the druid form rules are for.
+
+Three things gate it, and they are the same three as a role change: the role must not be `auto`
+(the module leaves those alone), the companion must be out of combat, and it must be at or above
+`SpecMinLevel` (40). Below that level the trees are six points wide and a "spec" is theatre, so the
+module records the decision it *would* take in `Server.log` once per session and changes nothing.
+
+The retrain uses playerbots' own template with a forced tab (`InitTalentsTree`), so the layout is
+one players recognise, at the companion's level rather than level 80. Afterwards the AI is rebuilt,
+because playerbots chooses its strategies from the trees - a retrain that skipped that step would
+leave a protection warrior playing with fury's strategies, which is exactly the bug the role
+strategy edits exist to prevent. `SpecFollowRole = 1` does the whole calculation and stops short of
+the write, so the decision can be watched in the log before it is trusted.
+
 ## Setting it up
 
 ```sql
