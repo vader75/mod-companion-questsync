@@ -234,6 +234,11 @@ is dressed for the wrong fight. The two "the kit still fits the level" gates in 
 bypassed for that one pass (bags, combat and an open trade window are still respected), which is
 why `LevelGear` has to be on for a retrain to re-kit anything.
 
+The pieces such a pass takes off are sold at the next vendor rather than left in the bags.
+playerbots destroys whatever it replaces in a slot, but an offhand put down for a two-hander comes
+back into the bags, and a companion flipping between tank and damage gear would otherwise shed one
+shield per flip. With `SellJunk` off they simply stay; nothing is ever destroyed to make room.
+
 The retrain uses playerbots' own template with a forced tab (`InitTalentsTree`), so the layout is
 one players recognise, at the companion's level rather than level 80. Afterwards the AI is rebuilt,
 because playerbots chooses its strategies from the trees - a retrain that skipped that step would

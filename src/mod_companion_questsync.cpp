@@ -547,6 +547,23 @@ namespace
     std::unordered_map<uint32, uint32> g_sellAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_trimAt;            // bot guid -> unix time
     std::unordered_map<uint32, uint32> g_gearLevel;         // bot guid -> level the kit was built for
+
+    /// Pieces a re-gear pulled out of a slot and left in the bags, bot guid -> item guid.
+    ///
+    /// playerbots destroys the item it replaces *in* a slot, so a plain upgrade leaves the bags
+    /// alone. An offhand is the exception: equipping a two-hander runs AutoUnequipOffhandIfNeed,
+    /// which puts the shield back into the bags - so a warrior flipping tank -> dps sheds a shield
+    /// per flip and fills its bags with them. These are sold at the next vendor (never destroyed,
+    /// never mailed), and only pieces this module's own pass displaced are ever marked.
+    std::unordered_map<uint32, std::set<uint64>> g_staleGear;
+
+    bool IsStaleGear(uint32 botGuid, Item* item)
+    {
+        if (!item)
+            return false;
+        auto const it = g_staleGear.find(botGuid);
+        return it != g_staleGear.end() && it->second.count(item->GetGUID().GetRawValue()) != 0;
+    }
     std::unordered_map<uint32, uint32> g_taughtLevel;       // bot guid -> level its spells/professions were synced for
     std::unordered_map<uint32, uint32> g_equipAt;           // bot guid -> unix time
     std::map<uint32, std::deque<QueuedWhisper>> g_whisperQueue;  // owner guid -> waiting texts
@@ -917,6 +934,7 @@ namespace
         g_roleApplyAt.erase(botGuid);
         g_taughtLevel.erase(botGuid);
         g_gearLevel.erase(botGuid);
+        g_staleGear.erase(botGuid);
         g_trimAt.erase(botGuid);
         g_lastAutoProduce.erase(botGuid);
         g_deadNoticeAt.erase(botGuid);
@@ -6138,20 +6156,31 @@ namespace
             return 0;
         last = now;
 
+        uint32 const botGuid = bot->GetGUID().GetCounter();
         uint32 sold = 0;
+        uint32 displacedSold = 0;
         VisitCarriedItems(bot, [&](Item* item)
         {
             ItemTemplate const* proto = item->GetTemplate();
-            if (!proto || proto->Quality != ITEM_QUALITY_POOR || !proto->SellPrice ||
-                item->IsInTrade() || item->IsRefundable() || !CanReleaseItem(bot, owner, item))
+            // A piece this module's own re-gear put down is sold whatever its quality: it is gear
+            // the companion has already replaced, and it is here because an offhand came back off
+            // the arm rather than being destroyed. Ordinary junk keeps its stricter tests.
+            bool const displaced = IsStaleGear(botGuid, item);
+            if (!proto || !proto->SellPrice || item->IsInTrade() || item->IsRefundable() ||
+                !CanReleaseItem(bot, owner, item))
                 return;
+            if (!displaced)
+            {
+                if (proto->Quality != ITEM_QUALITY_POOR)
+                    return;
 #ifdef MOD_PLAYERBOTS
-            PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
-            if (!ai || ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", proto->ItemId)->Get() != ITEM_USAGE_VENDOR)
-                return;
+                PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+                if (!ai || ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", proto->ItemId)->Get() != ITEM_USAGE_VENDOR)
+                    return;
 #else
-            return;
+                return;
 #endif
+            }
             auto const guid = item->GetGUID();
             uint16 const pos = item->GetPos();
             WorldPackets::Item::SellItem request{ WorldPacket(CMSG_SELL_ITEM) };
@@ -6160,10 +6189,19 @@ namespace
             bot->GetSession()->HandleSellItemOpcode(request);
             Item* remaining = bot->GetItemByPos(pos);
             if (!remaining || remaining->GetGUID() != guid)
+            {
                 ++sold;
+                if (displaced)
+                {
+                    ++displacedSold;
+                    g_staleGear[botGuid].erase(guid.GetRawValue());
+                }
+            }
         });
         if (sold && g_cfg.debug >= 1)
-            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} confirmed junk stack(s) to {}", bot->GetName(), sold, vendor->GetName());
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} sold {} confirmed junk stack(s) to {}{}",
+                     bot->GetName(), sold, vendor->GetName(),
+                     displacedSold ? fmt::format(" ({} displaced by a re-gear)", displacedSold) : "");
         if (sold)
             g_session[owner->GetGUID().GetCounter()].sold += sold;
         return sold;
@@ -6473,20 +6511,55 @@ namespace
             return 0;
 
         uint32 const before = DescribeGearItemLevel(bot);
+
+        // what it was wearing, so the pass can tell what it put down
+        std::set<uint64> wornBefore;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                wornBefore.insert(item->GetGUID().GetRawValue());
+
 #ifdef MOD_PLAYERBOTS
         PlayerbotFactory factory(bot, level);
         factory.InitEquipment(/*incremental=*/true);
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
             ai->HandleCommand(CHAT_MSG_WHISPER, "equip upgrade", owner);
 #endif
+
+        // anything that was worn and is now carried was displaced by this pass: the vendor's, not
+        // the bags'. playerbots destroys the piece it replaces in a slot, so in the ordinary case
+        // there is nothing here at all - an offhand swapped for a two-hander is what shows up.
+        uint32 displaced = 0;
+        if (!wornBefore.empty())
+        {
+            VisitCarriedItems(bot, [&](Item* item)
+            {
+                if (!item || item->IsEquipped())
+                    return;                     // still on the body: the pass kept it
+                uint64 const raw = item->GetGUID().GetRawValue();
+                if (wornBefore.count(raw) && g_staleGear[botGuid].insert(raw).second)
+                    ++displaced;
+            });
+        }
         // Latched here, after the attempt but before the verdict: the preconditions
         // above (bags, trade, combat) still retry on the next pass, while a generator
         // that produced nothing does not run again for another five levels.
         g_gearLevel[botGuid] = level;
 
         uint32 const after = DescribeGearItemLevel(bot);
-        if (after == before)
+        if (after == before && !displaced)
+        {
+            // Not an error, and not invisible either: a spec re-gear that found the kit already
+            // fitting is the answer to "did it work?" - the alternative is silence, which reads
+            // the same as a pass that never ran.
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {}{}: no slot needed changing "
+                                       "(item level {})",
+                     bot->GetName(), uint32(level), specChanged ? " after a spec change" : "", after);
             return 0;
+        }
+
+        if (displaced)
+            LOG_INFO("server.loading", "[CompanionQuestSync] {} set aside {} displaced piece(s) for the vendor",
+                     bot->GetName(), displaced);
 
         LOG_INFO("server.loading", "[CompanionQuestSync] {} re-geared for level {}{} (item level {} -> {})",
                  bot->GetName(), uint32(level), specChanged ? " after a spec change" : "", before, after);

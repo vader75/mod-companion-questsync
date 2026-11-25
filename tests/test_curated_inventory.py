@@ -199,3 +199,48 @@ class ManagedInventory(unittest.TestCase):
         trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
         self.assertIn('itr->second.sold += sold + gearSold;', trim)
         self.assertIn('itr->second.mailed += posted;', trim)
+
+
+def gear_body(signature: str) -> str:
+    """The body of a uint32-returning helper, without relying on doc-comment placement."""
+    rest = SOURCE.split(signature, 1)[1]
+    end = rest.find(chr(10) + '    uint32 ')
+    return rest[:end] if end != -1 else rest
+
+
+class DisplacedGearGoesToTheVendor(unittest.TestCase):
+    """A re-gear must not fill the bags with the pieces it took off.
+
+    playerbots destroys the item it replaces in a slot, so an ordinary upgrade leaves the bags
+    alone - but an offhand put down for a two-hander comes back off the arm into the bags, and a
+    companion flipping tank/dps sheds one per flip. Those pieces are sold at the next vendor,
+    never destroyed, and only pieces this module's own pass displaced are ever marked.
+    """
+
+    def test_the_pass_remembers_what_it_was_wearing(self):
+        body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
+        self.assertIn('std::set<uint64> wornBefore;', body)
+        self.assertIn('wornBefore.insert(item->GetGUID().GetRawValue());', body)
+        # the snapshot is taken before the factory runs, or it proves nothing
+        self.assertLess(body.index('wornBefore.insert'), body.index('factory.InitEquipment'))
+
+    def test_what_came_off_is_marked_not_deleted(self):
+        body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
+        self.assertIn('g_staleGear[botGuid].insert(raw).second', body)
+        self.assertIn('item->IsEquipped()', body)
+        self.assertNotIn('bot->DestroyItem', body)          # the vendor's job, not the bin's
+
+    def test_the_vendor_takes_them_whatever_their_quality(self):
+        body = gear_body('uint32 SellManagedJunk(Player* owner, Player* bot)')
+        self.assertIn('bool const displaced = IsStaleGear(botGuid, item);', body)
+        # quality and item-usage tests only guard the ordinary junk path
+        guard = body[body.index('if (!displaced)'):]
+        self.assertIn('ITEM_USAGE_VENDOR', guard)
+        self.assertIn('g_staleGear[botGuid].erase(guid.GetRawValue());', body)
+
+    def test_the_mark_does_not_outlive_the_body(self):
+        self.assertIn('g_staleGear.erase(botGuid);', SOURCE)
+
+    def test_a_pass_that_changed_nothing_says_so(self):
+        body = gear_body('uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)')
+        self.assertIn('no slot needed changing', body)
