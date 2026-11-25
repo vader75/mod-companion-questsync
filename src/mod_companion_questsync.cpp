@@ -516,6 +516,13 @@ namespace
     /// dropped now: the world has not changed between them, so the news has not either.
     std::unordered_map<uint32, std::pair<std::string, uint32>> g_lastSpoken;
 
+    /// When each companion's role last actually changed. Two things send roles - the operator's
+    /// command and the addon re-sending what it remembers - and a panel showing one role while the
+    /// other side insists on the old one made them trade places every few seconds: "is now tank!",
+    /// "is now dps!", a retrain and two whispers each time. A repeat of the role already stored is
+    /// a no-op, and a fresh flip inside ten seconds is refused rather than obeyed.
+    std::unordered_map<uint32, uint32> g_roleChangedAt;
+
     /// When a kit item was last created for a body *and slot*, so one unfillable slot does not
     /// throttle the others. Purged with the companion: guids are pooled.
     std::map<uint64, uint32> g_gearCreatedAt;  // bot guid -> unix time, for fairness
@@ -10692,11 +10699,7 @@ public:
         // a role that is already set asks nothing of the companion: say so, and do not spend
         // the window on it
         if (CompanionRole(botGuid) == RoleOrAuto(role))
-        {
-            handler->PSendSysMessage("|cff20ff20{}|r is already |cffffffff{}|r - nothing to change.",
-                                     a[0], role);
-            return true;
-        }
+            return true;                       // already this: nothing to change, nothing to say
 
         Player* botBefore = FindCompanionPlayer(botGuid);
         if (std::string const refusal = RoleChangeRefusal(player, botBefore, botGuid); !refusal.empty())
@@ -10705,11 +10708,23 @@ public:
             return true;
         }
 
+        // two things send roles - the operator and the addon re-sending what it remembers - and
+        // obeying both when they disagree made them trade places every few seconds, each flip
+        // costing a retrain and a whisper
+        if (uint32 const last = g_roleChangedAt[botGuid]; last && time(nullptr) - last < 10)
+        {
+            LOG_INFO("server.loading", "[CompanionQuestSync] ignored a second role change for {} inside 10s ({})",
+                     a[0], role);
+            return true;
+        }
+
         if (!SetCompanionRole(ownerGuid, botGuid, role))
         {
             handler->PSendSysMessage("|cffff8000role|r: could not store {} as {}.", a[0], role);
             return true;
         }
+
+        g_roleChangedAt[botGuid] = uint32(time(nullptr));
 
         handler->PSendSysMessage("|cff20ff20{}|r is now |cffffffff{}|r.", a[0], role);
 
