@@ -601,6 +601,16 @@ class TalentsArriveWithoutATemplate(unittest.TestCase):
         self.assertNotIn('< 40', body)
         self.assertNotIn('specMinLevel', body)
 
+    def test_the_same_watch_puts_a_wiped_tree_back(self):
+        watch = SOURCE.split('void WatchKitShape(Player* owner, Player* bot)', 1)[1][:2600]
+        self.assertIn('int const want = RoleSpecTab(bot->getClass(), role);', watch)
+        self.assertIn('bot->GetFreeTalentPoints()', watch)
+        self.assertIn('SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) == 0', watch)
+        self.assertIn('SpendPointsIntoTree(bot, uint8(want))', watch)
+        self.assertIn("the role's tree had been emptied", watch)
+        # and it heals the tree after the hands, so one throttled pass does both
+        self.assertLess(watch.index('MarkSupersededGear(owner, bot);'), watch.index('SpendPointsIntoTree'))
+
     def test_the_retrain_uses_it_when_the_template_left_the_tree_empty(self):
         self.assertIn('if (SpecPoints(bot, bot->GetActiveSpec(), want) == 0)', SOURCE)
         self.assertIn('no build template for level', SOURCE)

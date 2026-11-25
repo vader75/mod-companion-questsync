@@ -7009,6 +7009,20 @@ namespace
 
         // a drop that beat a worn piece left the old one in the bags; it goes the same way
         MarkSupersededGear(owner, bot);
+
+        // The same watch keeps the talents where the role put them. playerbots re-templates on every
+        // level-up through its own InitTalentsTree(true, ...), and a reset there can wipe what the
+        // retrain spent - leaving a body with points in hand and an empty tree. That state is
+        // repaired here rather than waited out, and only ever by spending points that are free.
+        int const want = RoleSpecTab(bot->getClass(), role);
+        if (want >= 0 && bot->GetFreeTalentPoints() && SpecPoints(bot, bot->GetActiveSpec(), uint8(want)) == 0)
+        {
+            if (uint32 const spent = SpendPointsIntoTree(bot, uint8(want)); spent)
+                LOG_INFO("server.loading",
+                         "[CompanionQuestSync] {} put {} talent point(s) back into {} at level {}: "
+                         "the role's tree had been emptied",
+                         bot->GetName(), spent, kSpecTreeNames[bot->getClass()][want], uint32(bot->GetLevel()));
+        }
     }
 
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged)

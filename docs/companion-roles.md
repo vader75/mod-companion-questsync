@@ -254,6 +254,11 @@ rank at a time, with the core vetting every pick through `LearnTalent`, so prere
 and rank caps are its call and not ours. The log says how many points went in and why
 (`no build template for level 15`).
 
+playerbots re-templates on every level-up, and that reset can wipe what a retrain spent, leaving the
+companion with points in hand and an empty tree. The slow-pass watch that keeps the hands in shape
+therefore keeps the tree too: an empty role tree with free points is refilled from the same routine,
+and only ever by spending points that are actually free.
+
 When a retrain does not take, it is not repeated every pass. The module reads the trees back after
 each attempt, retries on a widening interval (30 seconds, two minutes, ten), and after three
 attempts stops and says so once - `is still fury after 3 attempts at protection: leaving its talents
