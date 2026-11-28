@@ -244,12 +244,20 @@ CompanionQuestSync.RequireGrouped = 0
 # Claims an independently reviewed, clean custody body. No reset runs on claim.
 # Set to 0 to disable player-side creation.
 CompanionQuestSync.AllowCreate = 1
+#
+#    SkipInCombat / SkipTimedQuests
+#        Refuse quests a companion cannot sensibly progress while fighting, and
+#        quests with a timer. The refusal is reported per NotifySkippedQuests.
 CompanionQuestSync.SkipInCombat = 1
 CompanionQuestSync.SkipTimedQuests = 1
 CompanionQuestSync.BindingTable = "cq_bindings"
 CompanionQuestSync.PoolTable = "cq_pool"
 CompanionQuestSync.ExtraArmourSlots = 1
 CompanionQuestSync.PoolAccountType = 2
+#
+#    NotifySkippedQuests
+#        How a refused quest reaches the player: 0 silently, 1 only the
+#        structural class/race refusals, 2 every refusal with the reason.
 CompanionQuestSync.NotifySkippedQuests = 2
 CompanionQuestSync.TidyInventory = 1
 #    CompanionQuestSync.MailHome
@@ -370,5 +378,10 @@ CompanionQuestSync.ExtraBags = 4
 CompanionQuestSync.AnnounceAtStartup = 1
 CompanionQuestSync.AnnounceOnLogin = 1
 CompanionQuestSync.HeartbeatSeconds = 300
+#
+#    Debug
+#        Extra [CompanionQuestSync] detail in Server.log. 1 logs spoken
+#        whispers, teleport-follow holds and refusals; 2 adds rate-limit
+#        queue lines; 3 adds notice internals. Leave off in normal play.
 CompanionQuestSync.Debug = 0
 
