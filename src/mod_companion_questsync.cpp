@@ -35,6 +35,7 @@
 #include "Bag.h"
 #include "Chat.h"
 #include "Config.h"
+#include "Creature.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include <cmath>
@@ -72,6 +73,9 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "ItemUsageValue.h"  // playerbots' verdict on what an item is worth
 #include "PlayerbotAI.h"     // sell vendor trash through the bot's own AI
 #include "AiFactory.h"       // which talent tree a companion is actually in
+#include "AttackAction.h"
+#include "Engine.h"
+#include "ReachTargetActions.h"
 #include "Pet.h"             // pet autocasts: Growl and Torment are what taunt for us
 #include "SpellMgr.h"        // naming a pet ability we turn off
 #include "Playerbots.h"    // GET_PLAYERBOT_AI
@@ -97,10 +101,12 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include <charconv>
 #include <deque>
 #include <future>
+#include <memory>
 #include <tuple>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <optional>
 
@@ -144,6 +150,9 @@ namespace
         bool levelGear         = true;      // re-gear a kit that lags the companion's level
         bool mapPins           = true;      // push the companion's quest areas onto the owner's map
         bool suppressGapClosers = true;     // take Charge away from a companion that is not tanking
+        bool guardFlankAggro    = false;
+        bool tankFirst         = false;
+        float tankFirstDistance = 10.0f;
         uint32 roleChangeCooldown = 60;     // seconds between role changes for one companion (0 = off)
         uint32 specFollowRole = 2;          // 0 off, 1 log the decision, 2 restore or build talents
         uint32 specMinLevel = 10;           // the first level with native talent points
@@ -784,6 +793,9 @@ namespace
         g_cfg.mapPins            = sConfigMgr->GetOption<bool>("CompanionQuestSync.MapPins", true);
         g_cfg.formation          = sConfigMgr->GetOption<std::string>("CompanionQuestSync.Formation", "auto");
         g_cfg.suppressGapClosers = sConfigMgr->GetOption<bool>("CompanionQuestSync.SuppressGapClosers", true);
+        g_cfg.guardFlankAggro = sConfigMgr->GetOption<bool>("CompanionQuestSync.GuardFlankAggro", false);
+        g_cfg.tankFirst = sConfigMgr->GetOption<bool>("CompanionQuestSync.TankFirst", false);
+        g_cfg.tankFirstDistance = std::clamp(sConfigMgr->GetOption<float>("CompanionQuestSync.TankFirstDistance", 10.0f), 5.0f, 20.0f);
         g_cfg.roleChangeCooldown = sConfigMgr->GetOption<uint32>("CompanionQuestSync.RoleChangeCooldown", 60);
         g_cfg.specFollowRole = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecFollowRole", 2);
         g_cfg.specMinLevel = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecMinLevel", 10);
@@ -1405,6 +1417,8 @@ namespace
     std::string RevertRoleStrategies(Player* bot);
     std::string CompanionEngage(uint32 botGuid);
     void ReconcileRoleSpells(Player* bot, std::string const& role);
+    bool HasActiveGapCloserOverride(Player* bot);
+    void SendCombatTactics(Player* owner, uint32 ownerGuid);
     bool ProcessPendingRoleSwitch(Player* owner, Player* bot, uint32 botGuid);
     // defined with the gear code below
     uint32 RefreshLevelGear(Player* owner, Player* bot, bool specChanged = false);
@@ -1661,7 +1675,7 @@ namespace
     /// back).
     void ReconcileRoleSpells(Player* bot, std::string const& role)
     {
-        if (!bot || !g_cfg.suppressGapClosers)
+        if (!bot || bot->getClass() != CLASS_WARRIOR)
             return;
 
         uint32 const botGuid = bot->GetGUID().GetCounter();
@@ -1669,6 +1683,7 @@ namespace
 
         // tank and auto keep everything: auto means the module is not steering this companion
         bool const shouldMute = (role != "tank" && role != "auto");
+        bool const applyDefault = g_cfg.suppressGapClosers && !HasActiveGapCloserOverride(bot);
         uint32 const now = getMSTime();
 
         for (GapCloser const& closer : kGapClosers)
@@ -1678,7 +1693,7 @@ namespace
 
             bool const held = std::find(withheld.begin(), withheld.end(), closer.spell) != withheld.end();
 
-            if (shouldMute)
+            if (shouldMute && applyDefault)
             {
                 // re-applied on every pass on purpose: it is cheap, and it survives a cooldown
                 // clear (a death, a respec, a client-side reset) without an event hook
@@ -2276,6 +2291,7 @@ namespace
             SendProtocolLine(target, "Roles " + roles);
         if (std::string const specs = SpecLine(ownerGuid); !specs.empty())
             SendProtocolLine(target, "Specs " + specs);
+        SendCombatTactics(target, ownerGuid);
     }
 
     /// Re-assert every owned companion's role, throttled.
@@ -9862,6 +9878,8 @@ namespace
         }
     }
 
+#include "CombatTactics.inc"
+
 class CompanionQuestSyncWorldScript : public WorldScript
 {
 public:
@@ -9874,6 +9892,7 @@ public:
 
     void OnAfterConfigLoad(bool reload) override
     {
+        g_tacticsColumn = 0;
 #ifdef MOD_PLAYERBOTS_INITIALIZATION_POLICY_V1
         if (g_nativeInitializationVetoRegistered)
             ProbeNativeCustodySchema();
@@ -9894,6 +9913,12 @@ public:
     void OnUpdate(uint32 diff) override
     {
         ApplyDeliveryReceipts(); // a core-accepted transaction may finish after disable
+        _tacticsAccumulator += diff;
+        if (_tacticsAccumulator >= 2000)
+        {
+            _tacticsAccumulator = 0;
+            UpdateCombatTactics();
+        }
         if (!g_cfg.enable || !g_tableReady)
             return;
 
@@ -10163,6 +10188,7 @@ private:
 
     uint32 _accumulator = 0;
     uint32 _gatherAccumulator = 0;
+    uint32 _tacticsAccumulator = 0;
 
     /// How often the gather step runs. Short enough that the companion is seen taking the
     /// object, long enough that a grid search for one spawn costs nothing.
@@ -10912,6 +10938,40 @@ public:
         return true;
     }
 
+    static bool HandleTacticsCommand(ChatHandler* handler, char const* args)
+    {
+        CommandReplyScope replies(handler);
+        Player* owner = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!owner)
+            return false;
+        auto const parts = SplitArgs(args, 3);
+        uint32 const ownerGuid = owner->GetGUID().GetCounter();
+        if (parts.empty())
+        {
+            SendCombatTactics(owner, ownerGuid);
+            return true;
+        }
+        uint8 const place = parts.size() == 3 && parts[1] == "tank" ? 1 :
+                            parts.size() == 3 && parts[1] == "gap" ? 3 :
+                            parts.size() == 3 && parts[1] == "flank" ? 9 : 0;
+        if (!place || (parts[2] != "default" && parts[2] != "off" &&
+                      parts[2] != (place == 3 ? "safe" : "on")))
+        {
+            handler->PSendSysMessage("Use tactics <companion> tank|gap|flank default|off|on (use safe for gap).");
+            return true;
+        }
+        uint32 const guid = ResolveOwnedCompanion(ownerGuid, parts[0]);
+        auto const choice = parts[2] == "default" ? TacticChoice::Default :
+                            parts[2] == "off" ? TacticChoice::Off : TacticChoice::On;
+        if (!g_cfg.enable || !guid || !SetCombatTactic(ownerGuid, guid, place, choice))
+        {
+            handler->PSendSysMessage("Combat tactic not saved. Check the companion and the combat tactics migration.");
+            return true;
+        }
+        SendCombatTactics(owner, ownerGuid);
+        return true;
+    }
+
     /// .companionsync formation [off|tight|loose|spread]
     ///
     /// Per owner per session: the preset is spacing behind *you*, so it is not a property
@@ -11023,6 +11083,7 @@ public:
             { "formation", HandleFormationCommand, SEC_PLAYER, Console::No },
             { "role",      HandleRoleCommand,      SEC_PLAYER, Console::No },
             { "engage",    HandleEngageCommand,    SEC_PLAYER, Console::No },
+            { "tactics",   HandleTacticsCommand,   SEC_PLAYER, Console::No },
             { "quiet",     HandleQuietCommand,     SEC_PLAYER, Console::No },
             { "inspect",   HandleInspectCommand,   SEC_PLAYER, Console::No },
             { "pins",    HandlePinsCommand,   SEC_PLAYER, Console::No },

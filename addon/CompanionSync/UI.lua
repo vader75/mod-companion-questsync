@@ -13,7 +13,7 @@ local panelTone, buttonIdle, buttonHover
 
 local WIDTH = 680
 local PAD = 16
-local CARD_HEIGHT = 246
+local CARD_HEIGHT = 278
 local ROSTER_HEIGHT = 32
 local HEADER_HEIGHT = 78         -- Add companion plus one control row, clear of the divider
 local FOOTER_HEIGHT = 90          -- buttons, roster hint, notices and delivery result
@@ -122,6 +122,15 @@ end
 local function SupplyLabel(row)
     return row.name .. (row.kind == "bag" and ("  ·  %.0f ready"):format(row.quantity)
         or row.kind == "craft" and "  ·  Can craft" or "  ·  Not ready")
+end
+
+local function CycleCombatTactic(card, key)
+    local name = card.companion and card.companion.name
+    local tactics = name and G.CombatTactics and G.CombatTactics[name]
+    if not tactics then return end
+    local nextValue = (tactics[key] + 1) % 3
+    local choice = nextValue == 0 and "default" or (nextValue == 1 and "off" or (key == "gap" and "safe" or "on"))
+    G.Run(".companionsync tactics " .. name .. " " .. key .. " " .. choice)
 end
 
 local function EnableButton(button, enabled)
@@ -541,6 +550,16 @@ local function CreateCard()
     end, "Hold threat down at the cost of damage. For dps and support roles.", false)
     card.quietButton:SetPoint("TOPLEFT", 352, -132)
 
+    card.tankFirstButton = Button(card, "Tank First", 150, function() CycleCombatTactic(card, "tank") end,
+        "Melee companions wait for the tank to bring enemies close before joining. Default uses the realm setting.", false)
+    card.tankFirstButton:SetPoint("TOPLEFT", 16, -162)
+    card.gapClosersButton = Button(card, "Gap Closers", 176, function() CycleCombatTactic(card, "gap") end,
+        "Warrior Charge and Intercept. When safe requires a nearby tank who has engaged the enemy.", false)
+    card.gapClosersButton:SetPoint("TOPLEFT", 172, -162)
+    card.guardFlanksButton = Button(card, "Guard Flanks", 154, function() CycleCombatTactic(card, "flank") end,
+        "Skip circling behind a target outdoors if a nearby idle enemy might join the fight. Default uses the realm setting.", false)
+    card.guardFlanksButton:SetPoint("TOPLEFT", 354, -162)
+
     card.collectButton = Button(card, "Collect delivery", 112, function()
         local companion = card.companion
         if CanSupply(companion) then G.CollectDelivery(companion.name) end
@@ -558,21 +577,21 @@ local function CreateCard()
             RefreshSupply()
         end
     end, "See this companion's spare items and supported recipes.")
-    card.supplyPicker:SetPoint("TOPLEFT", 16, -162)
+    card.supplyPicker:SetPoint("TOPLEFT", 16, -194)
     card.supplyPicker:GetFontString():SetWidth(284)
     card.supplyPicker:GetFontString():SetHeight(14)
     card.supplyAction = Button(card, "Take / Craft", 118, function()
         if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
         G.RequestSupplyItem(supplyChoice)
     end, "Ask for the selected item. Crafting uses carried materials and makes one batch. You accept the trade.", true)
-    card.supplyAction:SetPoint("TOPLEFT", 322, -162)
+    card.supplyAction:SetPoint("TOPLEFT", 322, -194)
     card.supplyRefresh = Button(card, "Refresh supplies", 126, function()
         if not (G.supply and CanSupply(card.companion) and G.supply.name == card.companion.name) then return end
         supplyOpen, supplyOffset = false, 0
         G.RequestSupplyCatalog()
     end, "Check this companion's current supplies and crafting availability.")
-    card.supplyRefresh:SetPoint("TOPLEFT", 446, -162)
-    card.supplyStatus = Label(card, "", 16, -189, WIDTH - 4 * PAD)
+    card.supplyRefresh:SetPoint("TOPLEFT", 446, -194)
+    card.supplyStatus = Label(card, "", 16, -221, WIDTH - 4 * PAD)
     card.supplyStatus:SetHeight(22)
 
     -- Release and untrack used to hide behind a "..." dropdown. A control the player has to
@@ -1028,6 +1047,18 @@ function G.Refresh()
                 if policy == "auto" then text:SetTextColor(0.62, 0.62, 0.66)
                 else text:SetTextColor(0.72, 0.82, 1.0) end
             end
+
+            local tactics = G.CombatTactics and G.CombatTactics[companion.name]
+            local function showTactic(button, label, key)
+                local setting = tactics and tactics[key]
+                local stateLabel = setting == 0 and "Default" or setting == 1 and "Off" or
+                    setting == 2 and (key == "gap" and "When safe" or "On") or "Unavailable"
+                button:SetText(label .. ": " .. stateLabel)
+                EnableButton(button, setting ~= nil and not stale and not state.releasing)
+            end
+            showTactic(card.tankFirstButton, "Tank First", "tank")
+            showTactic(card.gapClosersButton, "Gap Closers", "gap")
+            showTactic(card.guardFlanksButton, "Guard Flanks", "flank")
 
             if card.roleButton and UpdateRoleRow then
                 -- a pending choice that the server has already stored is no longer pending

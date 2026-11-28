@@ -606,6 +606,19 @@ listener:SetScript("OnEvent", function(_, event, message)
         ProtocolActivity()
         return
     end
+    local tactics = text:match("^Tactics (.*)$")
+    if tactics then
+        G.CombatTactics = {}
+        for pair in tactics:gmatch("[^|]+") do
+            local name, tank, gap, flank = pair:match("^([^=]+)=([012])([012])([012])$")
+            if name then
+                G.CombatTactics[name] = { tank = tonumber(tank), gap = tonumber(gap), flank = tonumber(flank) }
+            end
+        end
+        ProtocolActivity()
+        if G.OnCompanionsChanged then G.OnCompanionsChanged() end
+        return
+    end
     local roles = text:match("^Roles (.*)$")
     if roles then
         G.Roles, G.RoleNotes, G.Engage, G.Quiet, G.RoleLockAt = {}, {}, {}, {}, {}

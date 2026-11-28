@@ -11,7 +11,11 @@ Play with up to four persistent Playerbots companions. QuestSync helps them pick
 3. Accept a quest and play normally. The selected companion's **Quests** section shows their active quest count. Use **Group quests** for a comparison or **Map** for locations. With CompanionPins enabled, hover a green `!` for objective details or a gold `?` for a ready hand-in. These markers are separate from your own quest markers. Bring the companion within interaction range of the actual NPC or object to turn in; a location hint alone does not mean the giver is usable.
 4. Use **Dismiss** to send a companion away without giving it up. **Untrack** pauses tracking but keeps ownership and the occupied roster slot. **Release** requests retirement: it does not wipe the character, free its name, or make it available to other players. An operator must finish retirement offline to free the slot.
 
-Both addons are optional: the module can be used with in-game commands alone. Use the addons from the same checkout as the server module where possible. The checked-in versions are CompanionSync **2.8.0** and CompanionPins **1.2.3**; the [CompanionSync TOC](addon/CompanionSync/CompanionSync.toc) and [CompanionPins TOC](addon/CompanionPins/CompanionPins.toc) are the version sources. DragonUI is optional; see the [CompanionSync guide](addon/CompanionSync/README.md) and [CompanionPins guide](addon/CompanionPins/README.md).
+Both addons are optional: the module can be used with in-game commands alone. Use the addons from the same checkout as the server module where possible. The checked-in versions are CompanionSync **2.9.0** and CompanionPins **1.2.3**; the [CompanionSync TOC](addon/CompanionSync/CompanionSync.toc) and [CompanionPins TOC](addon/CompanionPins/CompanionPins.toc) are the version sources. DragonUI is optional; see the [CompanionSync guide](addon/CompanionSync/README.md) and [CompanionPins guide](addon/CompanionPins/README.md).
+
+### Set combat tactics
+
+On a companion's card, below **Engage**, use **Tank First** to keep melee DPS from rushing a distant pull, **Gap Closers** to limit warrior Charge and Intercept, and **Guard Flanks** to skip optional rear flanking near idle enemies outdoors. **Default** inherits realm policy. For a DPS warrior that runs ahead of the tank, start with **Tank First: On** and **Gap Closers: When safe**. These are action checks, not pathfinding around idle packs. See the [corner-pull test](docs/companion-test-plan.md#t10--combat-tactics).
 
 ### Ask for supplies
 
@@ -97,17 +101,18 @@ Keeper stock stays with the companion. The server can offer curated trades autom
 ### Prepare the database and start
 
 1. Stop worldserver cleanly, wait for character database writes to drain, and take a restorable backup. For an existing realm, follow the [upgrade checklist](#upgrade-or-roll-back) before changing anything.
-2. From the QuestSync repository root, import both SQL files. Replace `acore_characters` and `your_db_user` with your realm's actual database and user. Do not import into the world, auth, or Playerbots database.
+2. From the QuestSync repository root, import the SQL files below. Replace `acore_characters` and `your_db_user` with your realm's actual database and user. Do not import into the world, auth, or Playerbots database.
 
    ```sh
-   for f in companion-questsync companion-custody companion-roles companion-engage companion-quiet \n         companion-role-lock; do
+   for f in companion-questsync companion-custody companion-roles companion-engage companion-quiet \n         companion-role-lock companion-combat-tactics; do
      mysql -u your_db_user -p acore_characters < "sql/$f.sql" || break
    done
    ```
 
    The custody files are additive: `companion-roles`, `companion-engage` and `companion-quiet`
    add the `role`, `engage` and `quiet` columns the behaviour controls read, and
-   `companion-role-lock` adds `role_changed_at`, the timestamp the rate limit reads. Skip any that are
+   `companion-role-lock` adds `role_changed_at`, the timestamp the rate limit reads.
+   `companion-combat-tactics` adds `combat_tactics` for the three per-companion combat controls. Skip any migrations that are
    already applied — the module probes for each column and says so instead of pretending, and
    `.companionsync role` answers "roles are not set up yet on this realm" when the column is
    missing.
@@ -139,8 +144,10 @@ All module keys below use the `CompanionQuestSync.` prefix. The [config template
 | `HandInMode` / `HandInDelaySeconds` | `1` / `20` | `0` disables module hand-ins; `1` uses native interaction; `2` also gives a travel reminder. `HandInNearDistance` controls the reminder threshold, not native interaction range. |
 | `MapPins` / `PinSync` | `1` / `1` | `MapPins` pushes the markers, `PinSync` governs the protocol; both must be on. Install CompanionPins on the client to see them. |
 | `Formation` | `auto` | Distance: `auto` by role, or `close`/`tight`/`loose`/`spread`/`lead`/`off`. Presets map to Playerbots' own formations (`close`→`near`, `tight`→`queue`, `loose`→`circle`, `spread`→`far`, `lead`→`shield`), so combat movement stays Playerbots'. Out of combat a trade window, gossip menu or standing still gathers everyone at arm's length. |
-| `SuppressGapClosers` | `1` | Mutes Charge for a companion whose role is not `tank` or `auto`, and clears the mute when it tanks again. A warrior's charge is a trigger on its class strategy, not a strategy, so this is the only lever that reaches it. It puts the spell on a long cooldown rather than removing it: removing it leaves the charge action registered, which costs the companion its whole walk into combat. Set to `0` to leave companions alone. |
+| `SuppressGapClosers` | `1` | Realm policy when **Gap Closers** is `Default`: mutes warrior Charge for roles other than `tank` and `auto` without removing it from the spellbook. For grouped companions, `Off` blocks Charge and Intercept; `When safe` permits them only near a tank who has engaged the target. |
 | `AllowCreate` / `PoolAccountType` | `1` / `2` | Player-side claims need reviewed stock on eligible AddClass accounts. Disabling player creation is not a substitute for guarding all allocators. |
+| `GuardFlankAggro` | `0` | Default for **Guard Flanks**. Skip an optional rear-flank action outdoors if a visible idle hostile is within its current aggro range plus 8 yards. It is not a path check. |
+| `TankFirst` / `TankFirstDistance` | `0` / `10.0` | Default for **Tank First**, and leash in yards (5–20). With a tank present, melee DPS waits before starting an attack, rush, or melee approach. The target must be fighting the tank and both the target and companion must be near the tank. |
 | `RoleChangeCooldown` | `60` | Seconds before one companion may be given a different role again (pending changes wait while the companion or the player is fighting or trading). The panel stages a role and an **Apply** button sends it; while the window is open the button counts down with the number the server reports. `0` disables the rate limit, never the out-of-combat rule. Needs `sql/companion-role-lock.sql`. |
 | `AutoProduce` / `AutoTrade` / `MailHome` | `1` / `1` / `1` | Background crafting, guarded town trades, and curated mail are separate switches. `AutoTrade=0` leaves manual offers available on a patched build. |
 | `SpecFollowRole` | `2` | `0` leaves talents alone; `1` logs the intended tree on a role switch. `2` restores or builds and verifies the requested role's talents during the switch, when `SpecMinLevel` is met. `support` uses the damage tree. |
@@ -152,6 +159,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 
 - Start with the [custody migration and retirement guide](docs/companion-custody.md) and [acceptance checklist](docs/companion-audit-acceptance.md). Record your current revisions, binary, config and addon versions. Rehearse the characters restore and startup on an isolated copy before touching production.
 - Stop all world processes and confirm saves have drained before schema or custody changes. Preserve existing bindings and progress, review conflicting historical rows offline, and deploy both guarded allocators together if you use the legacy module. Never turn old release rows into free stock or rerun a destructive compatibility migration.
+- For the CompanionSync 2.9.0 combat controls, back up the characters database and apply [`sql/companion-combat-tactics.sql`](sql/companion-combat-tactics.sql) once while worldserver is stopped. Merge the new module config keys without overwriting existing values. Install the matching server build and addon, then `/reload` in WoW. Existing companions start on **Default** for all three choices.
 - Keep the previous compatible binary and a verified backup together. Do not start older, custody-unaware allocators against the migrated database. A pre-upgrade restore discards later progress; plan for that before cutover. Do not use `sql/companion-retirement-maintenance.sql` as a routine install step; it is an optional offline tool with the prerequisites in the custody guide.
 
 ## Troubleshooting
@@ -166,7 +174,7 @@ In `playerbots.conf`, set `AiPlayerbot.SyncQuestWithPlayer = 0` so Playerbots do
 | No pins | Open the matching **zone** map, check both server pin settings and the addon, then use `/cpins refresh` with the map open. Check `DataDir` if zone mapping looks wrong. |
 | Talents follow the role but the companion is still in its old tree | Check `SpecFollowRole` is `2` (not `1`, which only logs), that the companion is at or above `SpecMinLevel`, and `.companionsync inspect <name>`: it prints `spec: fury role tank wants protection`. |
 | The Apply button is greyed | It says why: `In fight` means you or the companion is in combat, a number means the server window has that many seconds left, and nothing means no role is staged yet. |
-| A warrior charges although it is not the tank | Check its role is `dps`/`support`/`healer` (not `auto`), that `sql/companion-roles.sql` was imported, and `SuppressGapClosers=1`, then `.companionsync inspect <name>`: a muted Charge is listed. `tank` and `auto` keep the charge by design. |
+| A warrior charges ahead of the tank | In CompanionSync, check **Tank First** and **Gap Closers** on that warrior's card. If they show **Unavailable**, verify the matching server build and `combat_tactics` migration. With **Gap Closers: Default**, `SuppressGapClosers=1` mutes Charge only for explicit roles other than `tank`; `.companionsync inspect <name>` lists a muted Charge. |
 | Companions stand too far away, or too close | `.companionsync inspect <name>` prints the formation the server believes, the leash it implies and the realm's pitch-in radius. `Formation=off` leaves distance entirely to Playerbots, and a role's `auto` shape follows the role, not the last preset. |
 | Supplies unavailable or trade cancels | Confirm server patch support, companion control, range, combat state, and free bag space. For Craft, also check materials and any required station. Refresh the picker before retrying. |
 
@@ -180,6 +188,7 @@ Player commands run in game, not from the server console. Use the addon for the 
 | --- | --- |
 | Sync and inspect | `.companionsync`, `.companionsync status`, `.companionsync quests`, `.companionsync list`, `.companionsync inspect [name]` |
 | Direct behaviour | `.companionsync role <name> auto\|tank\|healer\|dps\|support` (the panel stages a role and an Apply button sends it; the server waits until the companion is online, neither character is in combat or trading, and `RoleChangeCooldown` has elapsed), `.companionsync engage <name> auto\|mine\|joined\|never`, `.companionsync quiet <name> on\|off`, `.companionsync formation [name] auto\|close\|tight\|loose\|spread\|lead\|off` |
+| Combat tactics | `.companionsync tactics <name> tank\|flank default\|off\|on` or `.companionsync tactics <name> gap default\|off\|safe`. These are the per-companion choices shown below **Engage** in CompanionSync. |
 | Manage companions | `.companionsync pool`, `.companionsync create <race> <class> <name>`, `.companionsync summon <name>`, `.companionsync dismiss <name>`, `.companionsync release <name>` |
 | Change tracking without transferring ownership | `.companionsync unbind <name>`, `.companionsync bind <bot>` |
 | Progression and recovery | `.companionsync level`, `.companionsync learn [name]`, `.companionsync professions [name]`, `.companionsync revive <name>`, `.companionsync catchup` |

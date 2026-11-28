@@ -119,7 +119,7 @@ class GapClosers(unittest.TestCase):
         self.assertIn("if (bot->GetSpellCooldownDelay(closer.spell) < kGapCloserMuteMs / 2)", body)
 
     def test_it_comes_back_the_same_way(self):
-        body = slice_from("    /// How long a gap closer is muted for.", 2600)
+        body = SOURCE.split("    void ReconcileRoleSpells(Player* bot, std::string const& role)\n    {", 1)[1].split("\n    }", 1)[0]
         self.assertIn("bot->RemoveSpellCooldown(closer.spell, true);", body)
 
     def test_it_runs_with_the_role_and_on_the_slow_pass(self):
@@ -144,6 +144,28 @@ class GapClosers(unittest.TestCase):
     def test_inspect_says_what_was_withheld(self):
         body = slice_from("    static bool HandleInspectCommand(", 7600)
         self.assertIn("gap closers withheld", body)
+
+
+class FlankAggroGuard(unittest.TestCase):
+    def test_trial_is_off_by_default(self):
+        self.assertIn('GetOption<bool>("CompanionQuestSync.GuardFlankAggro", false)', SOURCE)
+        config = (ROOT / "conf/mod_companion_questsync.conf.dist").read_text(encoding="utf-8")
+        self.assertIn("CompanionQuestSync.GuardFlankAggro = 0", config)
+
+    def test_idle_hostiles_are_screened_using_core_aggro_range(self):
+        body = (ROOT / "src/CombatTactics.inc").read_text(encoding="utf-8").split("struct TacticsSnapshot")[0]
+        for gate in ("IsEngaged()", "REACT_AGGRESSIVE", "IsHostileTo(bot)", "GetAggroRange(bot)",
+                     "CREATURE_Z_ATTACK_RANGE", "IsWithinLOSInMap(bot)"):
+            self.assertIn(gate, body)
+
+    def test_guard_vetoes_flanking_without_removing_the_strategy(self):
+        body = (ROOT / "src/CombatTactics.inc").read_text(encoding="utf-8")
+        for gate in ("FindCompanions(", "IsControlledCompanion(bot, owner)", 'name == "set behind"',
+                     "IsOutdoors()", "FlankRisksPull(bot)"):
+            self.assertIn(gate, body)
+        self.assertNotIn('ChangeStrategy(', body)
+        self.assertNotIn("MoveTo(", body)
+        self.assertIn("UpdateCombatTactics();", SOURCE)
 
 
 class Addon(unittest.TestCase):

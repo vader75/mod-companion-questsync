@@ -24,6 +24,11 @@ same name when the roster refreshes. The window stays compact even with four com
 - **Quests:** active quest count and a shortcut to the shared CompanionPins map.
 - **Professions:** gathering and crafting progress, with **Train** and **Teach skills**
   scoped to the selected companion.
+- **Combat:** **Tank First** waits for the tank to bring an enemy within reach;
+  **Gap Closers** controls warrior Charge and Intercept (`Off` or `When safe`);
+  **Guard Flanks** skips an optional rear flank near an idle hostile outdoors.
+  **Default** inherits the realm policy. Settings update after the server confirms
+  them; **Unavailable** means the server build or preference migration is missing.
 - **Supplies:** use **Collect delivery** for the usual curated handoff, or click
   **Choose supply** for a specific item. **In bags** shows the amount they can
   spare; **Can craft** means they know a supported recipe and have its materials

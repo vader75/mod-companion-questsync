@@ -286,6 +286,17 @@ CompanionQuestSync.Formation = auto
 # Default: 1
 CompanionQuestSync.SuppressGapClosers = 1
 
+# Pause optional rear flanking for bound companions already fighting
+# beside visible, unengaged aggressive mobs outdoors. Does not guard chase or casts.
+# Default: 0
+CompanionQuestSync.GuardFlankAggro = 0
+
+# The tank must have engaged the target, and both the companion and target
+# must be within this leash (clamped to 5–20 yards).
+# The individual Tank First choice in CompanionSync overrides the realm default.
+CompanionQuestSync.TankFirst = 0
+CompanionQuestSync.TankFirstDistance = 10.0
+
 # A role is not a checkbox: it drives strategies, and it will drive a respec and a gear swap.
 # So a companion may be given a new role once per this many seconds, and only out of combat -
 # a pending change waits while either character is fighting or trading. The addon's Apply button

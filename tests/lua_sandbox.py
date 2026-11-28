@@ -78,6 +78,7 @@ GetLocale = function() return "enUS" end
 UnitName = function() return "Pilot" end
 UnitClass = function() return "Paladin", "PALADIN" end
 GetRealmName = function() return "WoW Legends - Local" end
+time = function() return 100 end
 """
 
 CHAT_SINK = r"""
@@ -103,6 +104,8 @@ def main() -> int:
         source = (ADDON / name).read_text(encoding="utf-8")
         try:
             lua.execute(source, addon_name, g)
+            if name == "Core.lua":
+                lua.execute("CORE_SYSTEM_EVENT = _FRAME_SCRIPTS.OnEvent")
             print(f"PASS  {name} loaded")
         except Exception as exc:  # noqa: BLE001 - any Lua error is the point
             print(f"FAIL  {name}")
@@ -122,6 +125,20 @@ def main() -> int:
     print(f"launcher={r['launcher']} slash={r['slash']} toggle={r['toggle']} chat_lines={r['messages']}")
     if r["launcher"] == "created" and r["slash"] == "registered":
         print("PASS  the addon would build its button and answer /csync")
+        # Exercise the real system-message handler from Core.lua. The rendering
+        # callback is replaced here because the sandbox has no real client frames.
+        lua.execute('''
+            G_SHARED.OnCompanionsChanged, G_SHARED.OnReadinessChanged = nil, nil
+            local event = CORE_SYSTEM_EVENT
+            event(nil, "CHAT_MSG_SYSTEM", "CSYNC|Tactics Angren=201|Bryn=012|Invalid=290")
+            local tactics = G_SHARED.CombatTactics
+            assert(tactics.Angren.tank == 2 and tactics.Angren.gap == 0 and tactics.Angren.flank == 1)
+            assert(tactics.Bryn.tank == 0 and tactics.Bryn.gap == 1 and tactics.Bryn.flank == 2)
+            assert(tactics.Invalid == nil)
+            event(nil, "CHAT_MSG_SYSTEM", "CSYNC|Tactics Angren=000")
+            assert(G_SHARED.CombatTactics.Bryn == nil and G_SHARED.CombatTactics.Angren.tank == 0)
+        ''')
+        print("PASS  server-confirmed combat tactics payloads applied")
         return 0
     print("FAIL  the addon loads but does not finish registering")
     return 1

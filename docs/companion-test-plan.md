@@ -169,6 +169,30 @@ either module advertises the retired body as stock. See the
 
 ---
 
+## T10 — Combat tactics
+
+Import `sql/companion-combat-tactics.sql` into the characters database before booting
+the new server build. Install CompanionSync 2.9.0 and open a warrior companion's card.
+
+1. Set **Tank First** to `On`, and **Gap Closers** to `When safe`. Ranged-pull a pack
+   around a corner. The warrior should not open or cross the gap ahead of the tank.
+   Once the warrior and a tank-engaged enemy are both within the leash, the warrior should join.
+   Check that a second, distant mob does not become a new chase. A chase already in progress,
+   scripted movement, and other abilities are outside this decision gate.
+2. Switch **Gap Closers** to `Off`. Verify a warrior can walk into the same fight but
+   does not Charge or Intercept. Repeat with no tank: **Tank First** should leave the
+   usual engage logic alone, while an explicit gap-closer setting still applies.
+   For a DPS warrior and `SuppressGapClosers=1`, leave the party and verify the realm's
+   Charge mute returns; rejoin and verify the explicit setting applies again.
+3. Set **Guard Flanks** to `On`. Compare a fight beside a visible idle pack outdoors
+   with a fight away from idle mobs, then try indoors. Ordinary flanking should work
+   in the two control cases. A pet, AoE hit, or linked pull is not a flank pull.
+4. Reload the addon and dismiss/resummon. Confirm the server reports the same three
+   choices, and a different companion still has its own choices. Set each to `Default`
+   to restore realm policy.
+
+---
+
 ## What each failure means for you
 
 | Symptom | Send me |
