@@ -193,6 +193,15 @@ the new server build. Install CompanionSync 2.9.0 and open a warrior companion's
 
 ---
 
+## T11 — Dungeon exit with a straggler
+
+On a test realm, use two grouped companions and leave a dungeon via its exit portal.
+Start with one companion ready and the other in combat. Confirm the ready companion
+arrives outside, then clear combat on the second companion after 60 seconds but before
+five minutes. Verify it arrives outside and `Server.log` records `requested delayed dungeon exit teleport`.
+Repeat from a Dungeon Finder group using **Teleport Out**. If you re-enter the dungeon
+before the straggler is ready, the old outdoor catch-up must no longer run.
+
 ## What each failure means for you
 
 | Symptom | Send me |

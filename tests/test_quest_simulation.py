@@ -22,6 +22,22 @@ class QuestSimulation(unittest.TestCase):
                       'owner->UpdateGroundPositionZ(x, y, z)'):
             self.assertTrue(guard in follow, f'missing travel guard: {guard}')
 
+    def test_only_companions_still_in_confirmed_exit_instance_get_long_retry(self):
+        before = section('bool OnPlayerBeforeTeleport(', 'void OnPlayerLevelChanged(')
+        arrived = section('void OnPlayerMapChanged(', 'void OnPlayerQuestAbandon(')
+        follow = section('void FollowOwnerThroughTeleport(', 'void AddSkipped(')
+        self.assertIn('player->GetMap()->IsDungeon()', before)
+        self.assertIn('player->GetInstanceId()', before)
+        self.assertIn('follow.verifyDestination && follow.map == player->GetMapId()', arrived)
+        self.assertLess(arrived.index('g_pendingFollow.erase'), arrived.index('player->GetMap()->Instanceable()'))
+        self.assertIn('Timing::DungeonExitRetry', follow)
+        self.assertIn('!travel.verifyDestination', follow)
+        self.assertLess(follow.index('travel.sourceInstance && travel.verifyDestination'),
+                        follow.index('ObjectAccessor::FindPlayer'))
+        self.assertIn('bot->GetMapId() == travel.sourceMap', follow)
+        self.assertIn('bot->GetInstanceId() == travel.sourceInstance', follow)
+        self.assertLess(follow.index('if (extendedOnly'), follow.index('bot->IsInCombat()'))
+
     def test_ender_hints_rerank_spawn_candidates_and_pins_follow_the_bot_log(self):
         enders = section('struct EnderSpot', 'std::string MapCoords(')
         self.assertTrue('gameobject_questender' in enders, 'GO enders are missing')

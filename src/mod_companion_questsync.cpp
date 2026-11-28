@@ -219,6 +219,8 @@ namespace
         constexpr uint32 WalkStep          = 20;  // one giver or gather hop per 20 s
         constexpr uint32 FollowDelay       = 3;   // the destination is still loading
         constexpr float  FollowDistance    = 120.0f;  // yards; closer is not "lost"
+        constexpr uint32 FollowRetry       = 60;
+        constexpr uint32 DungeonExitRetry  = 300;
 
         // whispers
         constexpr uint32 WhisperGap        = 45;  // per-owner default gap
@@ -362,6 +364,8 @@ namespace
         bool verifyDestination = false;
         uint32 map = 0;
         float x = 0.0f, y = 0.0f, z = 0.0f;
+        uint32 sourceMap = 0;
+        uint32 sourceInstance = 0;
     };
     std::map<uint32, PendingFollow> g_pendingFollow;
     std::set<uint32> g_taxiInProgress;
@@ -2630,17 +2634,19 @@ namespace
         {
             uint32 const ownerGuid = itr->first;
 
-            // The one-time window used to vanish while a companion was mid-fight: it was
-            // skipped for combat, the entry was erased anyway, and the wipe at the hearth
-            // left it behind permanently. Sixty seconds of retry covers a wipe or an
-            // escort fight; after that the follow has genuinely missed its moment.
-            if (now - itr->second.queuedAt > 60)
+            PendingFollow const& travel = itr->second;
+            uint32 const age = now - travel.queuedAt;
+            bool const dungeonExit = travel.sourceInstance && !travel.verifyDestination;
+            bool const extendedOnly = age > Timing::FollowRetry;
+            if (age > (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry))
             {
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
 
-            if (now - itr->second.queuedAt < kFollowDelaySeconds)
+            // Far teleports remove the owner from world before the client acknowledges.
+            // Keep the exit intent until OnPlayerMapChanged confirms it (or it expires).
+            if (age < kFollowDelaySeconds || (travel.sourceInstance && travel.verifyDestination))
             {
                 ++itr;
                 continue;
@@ -2662,12 +2668,11 @@ namespace
                 ++itr;
                 continue;
             }
-            if (owner->GetMap()->Instanceable())
+            if (owner->GetMap()->Instanceable() || (dungeonExit && owner->GetMapId() != travel.map))
             {
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
-            PendingFollow const& travel = itr->second;
             if (travel.verifyDestination && (owner->GetMapId() != travel.map ||
                 owner->GetDistance(travel.x, travel.y, travel.z) > 40.0f))
             {
@@ -2680,6 +2685,10 @@ namespace
             for (uint32 const botGuid : bots)
             {
                 Player* bot = FindCompanionPlayer(botGuid);
+                if (extendedOnly && !(bot && bot->IsInWorld() &&
+                    bot->GetMapId() == travel.sourceMap && bot->GetInstanceId() == travel.sourceInstance &&
+                    IsControlledCompanion(bot, owner) && owner->GetGroup() && bot->GetGroup() == owner->GetGroup()))
+                    continue;
                 if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
                     IsOnTaxi(bot) || bot->GetTransport() || bot->GetVehicle() || bot->IsFlying() || bot->IsFalling())
                 {
@@ -2715,6 +2724,9 @@ namespace
                          "[CompanionQuestSync] {} followed {} through a teleport - map {}, {} yd behind",
                          bot->GetName(), owner->GetName(), owner->GetMapId(),
                          elsewhere ? 0 : uint32(away));
+                if (extendedOnly)
+                    LOG_INFO("server.loading", "[CompanionQuestSync] {} requested delayed dungeon exit teleport ({}s)",
+                             bot->GetName(), age);
             }
 
             // Unsafe or offline companions hold the entry until the retry window expires.
@@ -12600,7 +12612,13 @@ public:
         if (!FindCompanions(player->GetGUID().GetCounter(), bots))
             return true;
 
-        g_pendingFollow[player->GetGUID().GetCounter()] = { uint32(time(nullptr)), true, mapid, x, y, z };
+        PendingFollow follow{ uint32(time(nullptr)), true, mapid, x, y, z };
+        if (player->IsInWorld() && player->GetMap()->IsDungeon())
+        {
+            follow.sourceMap = player->GetMapId();
+            follow.sourceInstance = player->GetInstanceId();
+        }
+        g_pendingFollow[player->GetGUID().GetCounter()] = follow;
 
         return true;
     }
@@ -12807,16 +12825,30 @@ public:
         if (player->GetSession()->IsBot())
             return;
 
-        // Map changes: continent switches and ports. The BeforeTeleport hook covers
-        // casts and items; this catches the paths those miss.
+        uint32 const ownerGuid = player->GetGUID().GetCounter();
+        PendingFollow arrival{ uint32(time(nullptr)) };
+        if (auto pending = g_pendingFollow.find(ownerGuid); pending != g_pendingFollow.end())
+        {
+            PendingFollow const& follow = pending->second;
+            if (follow.verifyDestination && follow.map == player->GetMapId())
+            {
+                arrival.map = follow.map;
+                arrival.sourceMap = follow.sourceMap;
+                arrival.sourceInstance = follow.sourceInstance;
+            }
+            g_pendingFollow.erase(pending);
+        }
+
+        // An actual outdoor arrival confirms a dungeon exit. Any other map
+        // transition invalidates the previous follow, including entering an instance.
         if (!player->IsInWorld() || !player->IsAlive() || player->GetMap()->Instanceable() || IsOnTaxi(player))
             return;
 
         std::vector<uint32> bots;
-        if (!FindCompanions(player->GetGUID().GetCounter(), bots))
+        if (!FindCompanions(ownerGuid, bots))
             return;
 
-        g_pendingFollow[player->GetGUID().GetCounter()] = { uint32(time(nullptr)) };
+        g_pendingFollow[ownerGuid] = arrival;
     }
 
     void OnPlayerQuestAbandon(Player* player, uint32 questId) override
