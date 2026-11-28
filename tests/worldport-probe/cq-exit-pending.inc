@@ -6,8 +6,7 @@
         float x = 0.0f, y = 0.0f, z = 0.0f;
         uint32 sourceMap = 0;
         uint32 sourceInstance = 0;
-        std::string holdNote;   // why a companion was last held back from following
-        uint32 noteBotGuid = 0; // the companion holdNote is about
+        std::map<uint32, std::string> holdNotes; // companion -> why it was last held back
         std::set<uint32> whisperedBots; // already asked the owner not to summon these
         std::map<uint32, uint32> airSince; // companion -> first tick its airborne flag was seen
     };

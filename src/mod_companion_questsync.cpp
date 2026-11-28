@@ -367,8 +367,7 @@ namespace
         float x = 0.0f, y = 0.0f, z = 0.0f;
         uint32 sourceMap = 0;
         uint32 sourceInstance = 0;
-        std::string holdNote;   // why a companion was last held back from following
-        uint32 noteBotGuid = 0; // the companion holdNote is about
+        std::map<uint32, std::string> holdNotes; // companion -> why it was last held back
         std::set<uint32> whisperedBots; // already asked the owner not to summon these
         std::map<uint32, uint32> airSince; // companion -> first tick its airborne flag was seen
     };
@@ -2645,10 +2644,13 @@ namespace
             bool const extendedOnly = age > Timing::FollowRetry;
             if (age > (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry))
             {
+                std::string holds;
+                for (auto const& [guid, note] : travel.holdNotes)
+                    holds += (holds.empty() ? "" : ", ") + note;
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} for owner {} expired after {}s ({})",
                          dungeonExit ? "dungeon-exit follow window" : "follow window", ownerGuid, age,
-                         travel.holdNote.empty() ? std::string("no companion hold recorded")
-                                                 : "last note: " + travel.holdNote);
+                         travel.holdNotes.empty() ? std::string("no companion hold recorded")
+                                                  : "last holds: " + holds);
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
@@ -2717,14 +2719,13 @@ namespace
                     bot->GetMapId() == travel.sourceMap && bot->GetInstanceId() == travel.sourceInstance &&
                     IsControlledCompanion(bot, owner) && owner->GetGroup() && bot->GetGroup() == owner->GetGroup()))
                 {
-                    itr->second.holdNote = !bot ? std::string("a companion is not in world")
+                    itr->second.holdNotes[botGuid] = !bot ? std::string("a companion is not in world")
                         : !bot->IsInWorld() ? std::string(bot->GetName()) + ": not in world"
                         : (bot->GetMapId() != travel.sourceMap || bot->GetInstanceId() != travel.sourceInstance)
                             ? std::string(bot->GetName()) + ": left the exit dungeon"
                         : !IsControlledCompanion(bot, owner)
                             ? std::string(bot->GetName()) + ": no longer a controlled companion"
                             : std::string(bot->GetName()) + ": not in the owner's party";
-                    itr->second.noteBotGuid = bot ? botGuid : 0;
                     continue;
                 }
                 // A bot clears its fall flag only when its client sends a landing update,
@@ -2750,14 +2751,18 @@ namespace
                     IsOnTaxi(bot) || bot->GetTransport() || bot->GetVehicle() ||
                     ((bot->IsFlying() || bot->IsFalling()) && !airborneGraceSpent))
                 {
-                    bool const freshHold = itr->second.noteBotGuid != botGuid;
-                    itr->second.holdNote = bot ? std::string(bot->GetName()) + ": " + holdReason(bot)
-                                               : std::string("a companion is not in world");
-                    itr->second.noteBotGuid = bot ? botGuid : 0;
-                    if (g_cfg.debug >= 1 && freshHold)
+                    std::string const note = bot ? std::string(bot->GetName()) + ": " + holdReason(bot)
+                                                 : std::string("a companion is not in world");
+                    std::string& last = itr->second.holdNotes[botGuid];
+                    if (g_cfg.debug >= 1 && last != note)
+                    {
                         LOG_INFO("server.loading", "[CompanionQuestSync] {} is held back ({}s left to follow)",
-                                 itr->second.holdNote,
+                                 note,
                                  (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry) - age);
+                        last = note;
+                    }
+                    else if (last != note)
+                        last = note;
                     if (dungeonExit && extendedOnly && bot && !itr->second.whisperedBots.count(botGuid))
                     {
                         itr->second.whisperedBots.insert(botGuid);   // one ask per companion per exit
@@ -2774,11 +2779,7 @@ namespace
 
                 if (away <= kFollowDistanceYards)
                 {
-                    if (itr->second.noteBotGuid == botGuid)
-                    {
-                        itr->second.noteBotGuid = 0;
-                        itr->second.holdNote.clear();
-                    }
+                    itr->second.holdNotes.erase(botGuid);
                     continue;
                 }
 
@@ -2800,11 +2801,7 @@ namespace
                 else
                     bot->NearTeleportTo(x, y, z, owner->GetOrientation());
 
-                if (itr->second.noteBotGuid == botGuid)
-                {
-                    itr->second.noteBotGuid = 0;
-                    itr->second.holdNote.clear();
-                }
+                itr->second.holdNotes.erase(botGuid);
 
                 LOG_INFO("server.loading",
                          "[CompanionQuestSync] {} followed {} through a teleport - map {}, {} yd behind",
@@ -2822,8 +2819,14 @@ namespace
                     LOG_INFO("server.loading",
                              "[CompanionQuestSync] delayed exit follow for owner {} ended after {}s ({})",
                              ownerGuid, age,
-                             travel.holdNote.empty() ? std::string("companions caught up")
-                                                     : "not followed: " + travel.holdNote);
+                             [&]
+                             {
+                                 std::string holds;
+                                 for (auto const& [guid, note] : travel.holdNotes)
+                                     holds += (holds.empty() ? "" : ", ") + note;
+                                 return travel.holdNotes.empty() ? std::string("companions caught up")
+                                                                 : "not followed: " + holds;
+                             }());
                 itr = g_pendingFollow.erase(itr);
             }
             else

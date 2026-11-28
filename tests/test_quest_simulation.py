@@ -41,16 +41,20 @@ class QuestSimulation(unittest.TestCase):
 
     def test_follow_gives_up_loudly_and_tells_the_owner_why(self):
         follow = section('void FollowOwnerThroughTeleport(', 'void AddSkipped(')
-        self.assertIn('holdNote', follow, 'the last hold is not recorded')
+        self.assertIn('holdNotes', follow, 'the last hold is not recorded')
         self.assertIn('expired after', follow, 'expiry is silent')
         self.assertIn('delayed exit follow for owner', follow, 'extended window ends silently')
         self.assertIn('in combat', follow, 'hold reasons are not named')
+        self.assertIn('last holds: ', follow, 'expiry does not name every held companion')
+        self.assertLess(follow.index('std::string& last = itr->second.holdNotes[botGuid]'),
+                        follow.index('LOG_INFO("server.loading", "[CompanionQuestSync] {} is held back'),
+                        'the hold log must be keyed per companion, not per shared slot')
         self.assertLess(follow.index('dungeonExit && extendedOnly'),
                         follow.index('SayToOwner(bot, owner'),
                         'the straggler whisper is not gated to a confirmed dungeon exit past the normal window')
         self.assertLess(follow.index('whisperedBots.count(botGuid)'), follow.index('SayToOwner(bot, owner'),
                         'the straggler whisper must fire at most once per companion per exit')
-        self.assertIn('itr->second.noteBotGuid = 0', follow,
+        self.assertIn('itr->second.holdNotes.erase(botGuid)', follow,
                       'a companion that followed must not read as left behind')
         self.assertIn('not followed: ', follow)
 
