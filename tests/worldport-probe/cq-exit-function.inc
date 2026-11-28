@@ -21,7 +21,7 @@ void FollowOwnerThroughTeleport()
                 LOG_INFO("server.loading", "[CompanionQuestSync] {} for owner {} expired after {}s ({})",
                          dungeonExit ? "dungeon-exit follow window" : "follow window", ownerGuid, age,
                          travel.holdNote.empty() ? std::string("no companion hold recorded")
-                                                 : "last hold: " + travel.holdNote);
+                                                 : "last note: " + travel.holdNote);
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
@@ -91,11 +91,13 @@ void FollowOwnerThroughTeleport()
                     IsControlledCompanion(bot, owner) && owner->GetGroup() && bot->GetGroup() == owner->GetGroup()))
                 {
                     itr->second.holdNote = !bot ? std::string("a companion is not in world")
-                        : (!bot->IsInWorld() || bot->GetMapId() != travel.sourceMap || bot->GetInstanceId() != travel.sourceInstance)
+                        : !bot->IsInWorld() ? std::string(bot->GetName()) + ": not in world"
+                        : (bot->GetMapId() != travel.sourceMap || bot->GetInstanceId() != travel.sourceInstance)
                             ? std::string(bot->GetName()) + ": left the exit dungeon"
                         : !IsControlledCompanion(bot, owner)
                             ? std::string(bot->GetName()) + ": no longer a controlled companion"
                             : std::string(bot->GetName()) + ": not in the owner's party";
+                    itr->second.noteBotGuid = bot ? botGuid : 0;
                     continue;
                 }
                 if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
@@ -103,14 +105,18 @@ void FollowOwnerThroughTeleport()
                 {
                     itr->second.holdNote = bot ? std::string(bot->GetName()) + ": " + holdReason(bot)
                                                : std::string("a companion is not in world");
+                    itr->second.noteBotGuid = bot ? botGuid : 0;
                     if (g_cfg.debug >= 1)
                         LOG_INFO("server.loading", "[CompanionQuestSync] {} is held back ({}s left to follow)",
                                  itr->second.holdNote,
                                  (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry) - age);
-                    if (dungeonExit && extendedOnly && bot)
+                    if (dungeonExit && extendedOnly && bot && !itr->second.whisperedBots.count(botGuid))
+                    {
+                        itr->second.whisperedBots.insert(botGuid);   // one ask per companion per exit
                         SayToOwner(bot, owner,
                                    "I'm still tied up in here - I'll follow you out on my own, no need to summon me.",
                                    300, 0, false);
+                    }
                     anySkipped = true;   // held for the retry window, not abandoned
                     continue;
                 }
@@ -119,7 +125,14 @@ void FollowOwnerThroughTeleport()
                 float const away = elsewhere ? 999999.0f : bot->GetDistance(owner);
 
                 if (away <= kFollowDistanceYards)
+                {
+                    if (itr->second.noteBotGuid == botGuid)
+                    {
+                        itr->second.noteBotGuid = 0;
+                        itr->second.holdNote.clear();
+                    }
                     continue;
+                }
 
                 float x = owner->GetPositionX() + 2.0f;
                 float y = owner->GetPositionY();
@@ -139,6 +152,12 @@ void FollowOwnerThroughTeleport()
                 else
                     bot->NearTeleportTo(x, y, z, owner->GetOrientation());
 
+                if (itr->second.noteBotGuid == botGuid)
+                {
+                    itr->second.noteBotGuid = 0;
+                    itr->second.holdNote.clear();
+                }
+
                 LOG_INFO("server.loading",
                          "[CompanionQuestSync] {} followed {} through a teleport - map {}, {} yd behind",
                          bot->GetName(), owner->GetName(), owner->GetMapId(),
@@ -156,7 +175,7 @@ void FollowOwnerThroughTeleport()
                              "[CompanionQuestSync] delayed exit follow for owner {} ended after {}s ({})",
                              ownerGuid, age,
                              travel.holdNote.empty() ? std::string("companions caught up")
-                                                     : "gave up: " + travel.holdNote);
+                                                     : "not followed: " + travel.holdNote);
                 itr = g_pendingFollow.erase(itr);
             }
             else

@@ -203,7 +203,7 @@ once, in the companion's voice, that it will follow on its own - no summon neede
 Verify it arrives outside and `Server.log` records `requested delayed dungeon exit teleport`
 plus, when the window closes, `delayed exit follow for owner … ended after …s`; a
 companion that never catches up is named in `follow window for owner … expired after …s
-(last hold: …)`.
+(last note: …)`.
 Repeat from a Dungeon Finder group using **Teleport Out**. If you re-enter the dungeon
 before the straggler is ready, the old outdoor catch-up must no longer run. The same
 scenarios replay without a server in `tests/worldport-probe/run.bat` (all eight must

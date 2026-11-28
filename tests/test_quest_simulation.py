@@ -48,6 +48,11 @@ class QuestSimulation(unittest.TestCase):
         self.assertLess(follow.index('dungeonExit && extendedOnly'),
                         follow.index('SayToOwner(bot, owner'),
                         'the straggler whisper is not gated to a confirmed dungeon exit past the normal window')
+        self.assertLess(follow.index('whisperedBots.count(botGuid)'), follow.index('SayToOwner(bot, owner'),
+                        'the straggler whisper must fire at most once per companion per exit')
+        self.assertIn('itr->second.noteBotGuid = 0', follow,
+                      'a companion that followed must not read as left behind')
+        self.assertIn('not followed: ', follow)
 
     def test_ender_hints_rerank_spawn_candidates_and_pins_follow_the_bot_log(self):
         enders = section('struct EnderSpot', 'std::string MapCoords(')
