@@ -9,6 +9,7 @@ namespace Timing
         constexpr float  FollowDistance    = 120.0f;  // yards; closer is not "lost"
         constexpr uint32 FollowRetry       = 60;
         constexpr uint32 DungeonExitRetry  = 300;
+        constexpr uint32 AirborneGrace     = 5;   // a real fall ends in seconds; longer is a stuck flag
 
         // whispers
         constexpr uint32 WhisperGap        = 45;  // per-owner default gap

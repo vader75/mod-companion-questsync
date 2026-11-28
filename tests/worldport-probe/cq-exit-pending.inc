@@ -9,4 +9,5 @@
         std::string holdNote;   // why a companion was last held back from following
         uint32 noteBotGuid = 0; // the companion holdNote is about
         std::set<uint32> whisperedBots; // already asked the owner not to summon these
+        std::map<uint32, uint32> airSince; // companion -> first tick its airborne flag was seen
     };

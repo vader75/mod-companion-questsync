@@ -54,6 +54,14 @@ class QuestSimulation(unittest.TestCase):
                       'a companion that followed must not read as left behind')
         self.assertIn('not followed: ', follow)
 
+    def test_a_stuck_fall_flag_cannot_hold_a_companion_in_the_dungeon(self):
+        follow = section('void FollowOwnerThroughTeleport(', 'void AddSkipped(')
+        self.assertIn('Timing::AirborneGrace', follow, 'no grace period for a stuck airborne flag')
+        self.assertIn('airSince', follow, 'the airborne hold is not timed per companion')
+        probe_scenarios = (Path(__file__).resolve().parent / 'worldport-probe' / 'probe.cpp').read_text(encoding='utf-8')
+        self.assertIn('"stuck falling flag still follows"', probe_scenarios,
+                      'the probe does not replay a bot whose fall flag never clears')
+
     def test_ender_hints_rerank_spawn_candidates_and_pins_follow_the_bot_log(self):
         enders = section('struct EnderSpot', 'std::string MapCoords(')
         self.assertTrue('gameobject_questender' in enders, 'GO enders are missing')

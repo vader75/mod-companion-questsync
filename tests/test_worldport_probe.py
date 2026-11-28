@@ -34,5 +34,5 @@ class WorldportProbe(unittest.TestCase):
         for scenario in ('normal window', 'same-instance straggler after worldport ACK',
                          'missed 5-minute deadline', 'different instance of same dungeon',
                          'not grouped', 'unconfirmed exit', 'owner re-enters',
-                         'ordinary outdoor travel expires at 60s'):
+                         'ordinary outdoor travel expires at 60s', 'stuck falling flag still follows'):
             self.assertIn(f'"{scenario}"', probe)

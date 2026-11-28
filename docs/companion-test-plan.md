@@ -205,8 +205,10 @@ plus, when the window closes, `delayed exit follow for owner … ended after …
 companion that never catches up is named in `follow window for owner … expired after …s
 (last note: …)`.
 Repeat from a Dungeon Finder group using **Teleport Out**. If you re-enter the dungeon
-before the straggler is ready, the old outdoor catch-up must no longer run. The same
-scenarios replay without a server in `tests/worldport-probe/run.bat` (all eight must
+before the straggler is ready, the old outdoor catch-up must no longer run. A companion
+whose fall flag is stuck (`held back (…): falling` in the debug log) must still follow
+within about five seconds of the flag being seen, and arrive outside. The same
+scenarios replay without a server in `tests/worldport-probe/run.bat` (all nine must
 print PASS); the Python suite fails when the probe's source slices drift.
 
 ## What each failure means for you

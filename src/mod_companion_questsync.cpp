@@ -221,6 +221,7 @@ namespace
         constexpr float  FollowDistance    = 120.0f;  // yards; closer is not "lost"
         constexpr uint32 FollowRetry       = 60;
         constexpr uint32 DungeonExitRetry  = 300;
+        constexpr uint32 AirborneGrace     = 5;   // a real fall ends in seconds; longer is a stuck flag
 
         // whispers
         constexpr uint32 WhisperGap        = 45;  // per-owner default gap
@@ -369,6 +370,7 @@ namespace
         std::string holdNote;   // why a companion was last held back from following
         uint32 noteBotGuid = 0; // the companion holdNote is about
         std::set<uint32> whisperedBots; // already asked the owner not to summon these
+        std::map<uint32, uint32> airSince; // companion -> first tick its airborne flag was seen
     };
     std::map<uint32, PendingFollow> g_pendingFollow;
     std::set<uint32> g_taxiInProgress;
@@ -2725,13 +2727,34 @@ namespace
                     itr->second.noteBotGuid = bot ? botGuid : 0;
                     continue;
                 }
-                if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
-                    IsOnTaxi(bot) || bot->GetTransport() || bot->GetVehicle() || bot->IsFlying() || bot->IsFalling())
+                // A bot clears its fall flag only when its client sends a landing update,
+                // and an idle bot sends none - so a flag picked up as the owner left can
+                // stick for the whole window. A real fall ends within seconds; give every
+                // airborne hold that long, then let the follow proceed despite the flag.
+                auto& airSince = itr->second.airSince;
+                bool const airborneClean = bot && bot->IsInWorld() && bot->IsAlive() && !bot->IsInCombat() &&
+                                           !bot->IsBeingTeleported() && !IsOnTaxi(bot) &&
+                                           !bot->GetTransport() && !bot->GetVehicle();
+                bool const airborne = airborneClean && (bot->IsFlying() || bot->IsFalling());
+                if (!airborne)
+                    airSince.erase(botGuid);
+                bool airborneGraceSpent = false;
+                if (airborne)
                 {
+                    uint32& seen = airSince[botGuid];
+                    if (!seen)
+                        seen = now;
+                    airborneGraceSpent = now - seen >= Timing::AirborneGrace;
+                }
+                if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
+                    IsOnTaxi(bot) || bot->GetTransport() || bot->GetVehicle() ||
+                    ((bot->IsFlying() || bot->IsFalling()) && !airborneGraceSpent))
+                {
+                    bool const freshHold = itr->second.noteBotGuid != botGuid;
                     itr->second.holdNote = bot ? std::string(bot->GetName()) + ": " + holdReason(bot)
                                                : std::string("a companion is not in world");
                     itr->second.noteBotGuid = bot ? botGuid : 0;
-                    if (g_cfg.debug >= 1)
+                    if (g_cfg.debug >= 1 && freshHold)
                         LOG_INFO("server.loading", "[CompanionQuestSync] {} is held back ({}s left to follow)",
                                  itr->second.holdNote,
                                  (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry) - age);

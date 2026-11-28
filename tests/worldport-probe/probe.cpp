@@ -21,7 +21,7 @@ struct Session { bool IsBot() const { return false; } };
 struct Unit {};
 struct Player {
     Map* map;
-    bool combat = false, alive = true, inWorld = true;
+    bool combat = false, alive = true, inWorld = true, falling = false;
     int group = 1;
     Session* GetSession() { static Session session; return &session; }
     char const* GetName() const { return map == &dungeon ? "busy" : "ready"; }
@@ -31,7 +31,7 @@ struct Player {
     bool IsInWorld() const { return inWorld; } bool IsBeingTeleported() const { return false; }
     bool IsAlive() const { return alive; } bool IsInCombat() const { return combat; }
     bool GetTransport() const { return false; } bool GetVehicle() const { return false; }
-    bool IsFlying() const { return false; } bool IsFalling() const { return false; }
+    bool IsFlying() const { return false; } bool IsFalling() const { return falling; }
     Map* GetMap() const { return map; } uint32 GetMapId() const { return map->id; }
     float GetDistance(float, float, float) const { return 0; } float GetDistance(Player*) const { return 0; }
     float GetPositionX() const { return 0; } float GetPositionY() const { return 0; }
@@ -59,7 +59,7 @@ struct ExitHooks final : PlayerScript {
 #include "cq-exit-hooks.inc"
 };
 bool run(std::string_view name, uint32 release, bool expectOutside, bool confirmed = true, bool reenter = false,
-         Map* botMap = &dungeon, int group = 1, Map* source = &dungeon)
+         Map* botMap = &dungeon, int group = 1, Map* source = &dungeon, bool stuckFall = false)
 {
     g_pendingFollow.clear();
     clockNow = 0;
@@ -68,6 +68,7 @@ bool run(std::string_view name, uint32 release, bool expectOutside, bool confirm
     busy = Player{botMap};
     busy.combat = true;
     busy.group = group;
+    busy.falling = stuckFall;
     ExitHooks hooks;
     hooks.OnPlayerBeforeTeleport(&owner, 0, 0, 0, 0, 0, 0, nullptr);
     owner.inWorld = false;
@@ -105,5 +106,6 @@ int main()
     ok &= run("unconfirmed exit", 62, false, false);
     ok &= run("owner re-enters", 72, false, true, true);
     ok &= run("ordinary outdoor travel expires at 60s", 72, false, true, false, &dungeon, 1, &differentWorld);
+    ok &= run("stuck falling flag still follows", 72, true, true, false, &dungeon, 1, &dungeon, true);
     return ok ? 0 : 1;
 }
