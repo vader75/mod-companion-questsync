@@ -83,10 +83,11 @@ module, so they now live in `docs/` here.
    `"D:/Applications/VisualStudio2022BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"`
    `--build D:/Build/build --config RelWithDebInfo --target worldserver --parallel 12`, and expect
    `0` matches for `error C|error LNK|error MSB`. The `rc.exe` step dies with
-   `MSB6003 … The filename or extension is too long` at ~31 KB of include dirs: trim the four
+   `MSB6003 … The filename or extension is too long` at ~31 KB of include dirs: run
+   `python scripts/fix-resource-includes.py` (from this clone), which trims the four
    `ResourceCompile` items in the generated `D:/Build/build/src/server/apps/worldserver.vcxproj`
-   to `D:\Build\build;D:\Build\WOW_Legends_Server_Source\src\server\apps` and rebuild. No source
-   changes, and a CMake reconfigure undoes it.
+   to `D:\Build\build;D:\Build\WOW_Legends_Server_Source\src\server\apps`, and rebuild. No source
+   changes, and a CMake reconfigure undoes it - rerun the script then.
 4. **Prove it compiled**: the module `.obj` must be newer than the source it came from, and any
    change that adds a *string literal* should be checkable in
    `build/bin/RelWithDebInfo/worldserver.exe` (`python -c` over the bytes — comments and static
