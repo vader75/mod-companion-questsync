@@ -18,8 +18,10 @@ class ManagedInventory(unittest.TestCase):
         trim = SOURCE.split('uint32 SellBagSurplus(', 1)[1].split('/// ', 1)[0]
         # A healthy companion is never sold from: the trim only runs below the comfort line.
         self.assertLess(trim.index('GetFreeInventorySpace() >= CompanionBagComfort'), trim.index('HandleSellItemOpcode'))
-        # Professions survive the trim: one recipe's worth of a vendor reagent, two stacks of a material.
-        self.assertIn('IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep', trim)
+        # Professions survive the trim: one recipe's worth of a vendor reagent, two stacks of a
+        # material - and none of the raw gathering stock once no-gather mode retires it.
+        self.assertIn('IsCraftVendorReagent(entry) ? CompanionReagentKeep', trim)
+        self.assertIn('? 0 : CompanionMatKeep', trim)
         self.assertLess(trim.index('kept < keep'), trim.index('HandleSellItemOpcode'))
         # Nothing the player handed over deliberately, or anything bound, is sold.
         for guard in ('ITEM_CLASS_TRADE_GOODS', 'IsInTrade()', 'IsRefundable()', 'CanReleaseItem(bot, owner, item)'):

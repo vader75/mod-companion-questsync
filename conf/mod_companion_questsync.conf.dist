@@ -338,8 +338,11 @@ CompanionQuestSync.GatherCatchUp = 1
 #    mode 0. 2 = the professions are established at the level's own tier ceiling
 #    without walking a node: both skills are set to the cap, no gather strategy is
 #    armed, no tools are granted, and every reagent a known recipe asks is granted
-#    in small stacks at craft time - the shopping trip, stood in for entirely. A
-#    flip into mode 2 takes effect at the level each companion already is.
+#    in small stacks at craft time - the shopping trip, stood in for entirely. Raw
+#    gathering stock (herbs, ores, stones, hides) left in the bags is retired with
+#    the skill: the tidy pass keeps none of it and hands it to the vendor - or
+#    posts it home when no merchant is near - once the pack runs tight. A flip
+#    into mode 2 takes effect at the level each companion already is.
 # Default: 0
 CompanionQuestSync.ProfessionNoGather = 0
 

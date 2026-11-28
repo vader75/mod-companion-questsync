@@ -99,6 +99,16 @@ class ProfessionContract(unittest.TestCase):
         # smelted stock is the fallback rank
         self.assertRegex(priority, r"return 2;")
 
+    def test_no_gather_mode_sells_dead_gathering_stock(self):
+        # raw herbs/ores/hides keep nothing once the gathering half is retired:
+        # the tidy pass's budget hands them to the vendor (or mail) lane
+        self.assertIn("static bool IsGatheredStock(uint32 item)", SOURCE)
+        tidy = section("/// Sell the *spare* trade goods when the bags are tight.", "/// Wear upgrades even when the bags are not full.")
+        self.assertIn("professionNoGather >= 2 && IsGatheredStock(entry) ? 0 : CompanionMatKeep", tidy)
+        # the producer's grant path is unchanged by this: grants stay scoped to the craft
+        producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
+        self.assertNotIn("IsGatheredStock", producer)
+
 
 if __name__ == "__main__":
     unittest.main()

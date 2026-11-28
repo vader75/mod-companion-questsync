@@ -142,7 +142,9 @@ module, so they now live in `docs/` here.
   per-pass upkeep re-asserts the strategy toward the mode, because playerbots drops strategies on
   spec and level changes), no pick or knife is granted, the zone catch-up stands down, and every
   reagent a known recipe asks for is granted in small stacks at craft time — the vendor-only
-  scoping widens to all reagents, scoped to the craft being made, never as a stockpile. A flip
+  scoping widens to all reagents, scoped to the craft being made, never as a stockpile. Raw
+  gathering stock left in the bags is retired with the skill: the tidy pass keeps none of it
+  and hands it to the vendor (or the mail) once the pack runs tight. A flip
   into mode 2 takes effect at the level each companion already is (the per-level teach latch is
   cleared so the next pass re-teaches). Mode 1 logs what mode 2 would do (at `Debug 2`, and only
   while a raise is pending) and changes nothing of what mode 2 would change — gathering continues

@@ -4974,6 +4974,19 @@ namespace
         }
     }
 
+    /// Raw gathering stock: an herb, ore, stone or hide the gathering half of the
+    /// pair would have collected. In no-gather mode the companion will never
+    /// collect more and its crafts are supplied at craft time, so whatever it
+    /// still carries is dead weight the vendor takes off its hands.
+    static bool IsGatheredStock(uint32 item)
+    {
+        for (uint16 skill : { SKILL_HERBALISM, SKILL_MINING, SKILL_SKINNING })
+            for (uint32 gathered : GatheredReagentsOf(skill))
+                if (gathered == item)
+                    return true;
+        return false;
+    }
+
     /// Item name for the report, or "?" when the template is gone.
     static std::string ItemNameFor(uint32 item)
     {
@@ -6656,7 +6669,11 @@ namespace
         std::vector<Item*> spareGoods;
         for (auto& [entry, stacks] : carried)
         {
-            uint32 const keep = IsCraftVendorReagent(entry) ? CompanionReagentKeep : CompanionMatKeep;
+            // In no-gather mode the gathering half of the pair is retired: raw stock
+            // is dead weight, so none of it is kept - the vendor (or the mail) takes
+            // the lot when the bags get tight, like any other displaced item.
+            uint32 const keep = IsCraftVendorReagent(entry) ? CompanionReagentKeep
+                : (g_cfg.professionNoGather >= 2 && IsGatheredStock(entry) ? 0 : CompanionMatKeep);
             std::sort(stacks.begin(), stacks.end(),
                 [](Item* a, Item* b) { return a->GetCount() > b->GetCount(); });
             uint32 kept = 0;
