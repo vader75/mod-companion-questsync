@@ -5111,6 +5111,46 @@ namespace
         return CanReleaseTemplate(bot, owner, sObjectMgr->GetItemTemplate(entry)) ? bot->GetItemCount(entry) : 0;
     }
 
+    // Are all of a plan's reagents in hand - or grantable at craft time? A dry-run
+    // for readiness checks: it grants nothing, so the catalog can call it freely.
+    static bool CraftReagentsReady(Player* bot, Player* owner, SpellInfo const* spell)
+    {
+        for (auto const& [reagent, need] : CraftReagentRequirements(spell))
+        {
+            uint32 const have = UsableCraftReagentCount(bot, owner, reagent);
+            if (have >= need)
+                continue;
+            if (!CraftReagentGrantable(bot, reagent, need - have))
+                return false;
+        }
+        return true;
+    }
+
+    // Stand in for the shopping trip: grant what the craft is missing, in the same
+    // small, bag-room-checked stacks the quiet craft uses - the explicit shop
+    // supplies at any mode, every reagent once ProfessionNoGather reaches 2.
+    // Scoped to this one craft, never a stockpile.
+    static bool GrantCraftReagents(Player* bot, Player* owner, SpellInfo const* spell)
+    {
+        bool complete = true;
+        for (auto const& [item, need] : CraftReagentRequirements(spell))
+        {
+            if (!IsCraftVendorReagent(item) && g_cfg.professionNoGather < 2)
+                continue;
+            uint32 const have = UsableCraftReagentCount(bot, owner, item);
+            if (have >= need)
+                continue;
+            uint32 const give = need - have;
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
+                if (Item* bought = bot->StoreNewItem(dest, item, true))
+                    bot->SendNewItem(bought, give, true, false, true);
+            if (UsableCraftReagentCount(bot, owner, item) < need)
+                complete = false;
+        }
+        return complete;
+    }
+
     /// The quiet craft (and the manual Produce report). `maxItems` caps the items a
     /// single call may create across every product - the interval habit passes the
     /// configured budget; the manual button passes 0, an explicit ask needs no cap.
@@ -5161,21 +5201,12 @@ namespace
             // mode, every reagent the recipe asks: the shopping trip is a stand-in.
             // The core then consumes the reagents even though the craft runs
             // immediately.
+            GrantCraftReagents(bot, owner, plan.spell);
             for (auto const& [item, need] : reagents)
             {
-                if (!IsCraftVendorReagent(item) && g_cfg.professionNoGather < 2)
-                    continue;
                 uint32 const have = UsableCraftReagentCount(bot, owner, item);
-                if (have >= need)
-                    continue;
-                uint32 const give = need - have;
-                ItemPosCountVec dest;
-                if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, give) == EQUIP_ERR_OK)
-                    if (Item* bought = bot->StoreNewItem(dest, item, true))
-                        bot->SendNewItem(bought, give, true, false, true);
-                uint32 const restocked = UsableCraftReagentCount(bot, owner, item);
-                if (restocked < need)
-                    noteMissing(item, restocked, need);
+                if (have < need)
+                    noteMissing(item, have, need);
             }
             if (!missing.empty())
             {

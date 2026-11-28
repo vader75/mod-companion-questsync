@@ -51,9 +51,10 @@ class ProfessionContract(unittest.TestCase):
             self.assertIn(f'!{actor}->GetTradeData()', gate)
 
     def test_missing_materials_are_not_treated_as_vendor_stock(self):
-        producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
-        self.assertRegex(producer, r"if \(!IsCraftVendorReagent\(item\) && g_cfg\.professionNoGather < 2\)")
-        self.assertNotIn("IsGatherableReagent", producer)
+        # the scoping lives in the shared granter the quiet craft and orders use
+        granter = section("static bool GrantCraftReagents(", "/// The quiet craft (and the manual Produce report)")
+        self.assertRegex(granter, r"IsCraftVendorReagent\(item\) && g_cfg\.professionNoGather < 2")
+        self.assertNotIn("IsGatherableReagent", granter)
 
     def test_no_gather_mode_is_a_three_way_gate(self):
         # off / log / act, exactly like the other staged behaviour gates
@@ -108,6 +109,28 @@ class ProfessionContract(unittest.TestCase):
         # the producer's grant path is unchanged by this: grants stay scoped to the craft
         producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
         self.assertNotIn("IsGatheredStock", producer)
+
+    def test_supplies_stand_in_for_the_shopping_trip(self):
+        # the catalog treats a grantable shortfall as ready - and the on-demand order
+        # grants the missing reagents before its craft, the same as the quiet path
+        self.assertIn("static bool CraftReagentsReady(Player* bot, Player* owner, SpellInfo const* spell)", SOURCE)
+        self.assertIn("static bool GrantCraftReagents(Player* bot, Player* owner, SpellInfo const* spell)", SOURCE)
+        # one grant implementation, two callers: the quiet craft here, the on-demand
+        # order in the supply picker (asserted below)
+        self.assertEqual(SOURCE.count("GrantCraftReagents(bot, owner, plan.spell)"), 1)
+        producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
+        self.assertIn("GrantCraftReagents(bot, owner, plan.spell);", producer)
+        self.assertNotIn("bot->SendNewItem(bought, give, true, false, true)", producer)  # the loop lives in the helper
+        # the scoping stays: explicit shop supplies at any mode, all reagents at mode 2
+        helper = section("static bool GrantCraftReagents(", "/// The quiet craft (and the manual Produce report)")
+        self.assertIn("IsCraftVendorReagent(item) && g_cfg.professionNoGather < 2", helper)
+        # the supply picker: readiness is grant-aware, and the grant lands before the check
+        picker = (Path(__file__).resolve().parents[1] / "src/SupplyPicker.inc").read_text(encoding="utf-8")
+        self.assertIn("if (!CraftReagentsReady(bot, owner, plan.spell))", picker)
+        grant = picker.find("GrantCraftReagents(bot, owner, plan.spell);")
+        ready = picker.find("if (!SupplyCraftReady(bot, owner, plan)")
+        self.assertGreater(grant, 0)
+        self.assertLess(grant, ready)
 
 
 if __name__ == "__main__":

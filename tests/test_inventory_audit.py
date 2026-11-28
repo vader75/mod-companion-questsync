@@ -17,7 +17,11 @@ class InventoryAudit(unittest.TestCase):
         produce = section(WORLD, 'ProduceForCompanion(Player*', '/// A free bag position')
         self.assertIn('CraftReagentRequirements(plan.spell)', produce)
         self.assertIn('UsableCraftReagentCount(bot, owner, item)', produce.split('for (uint8 batch', 1)[1])
-        self.assertIn('UsableCraftReagentCount(bot, owner, reagent)', SUPPLY)
+        # the supply path counts reagents through the same quest-safe helper,
+        # via the shared readiness check in the world file
+        self.assertIn('if (!CraftReagentsReady(bot, owner, plan.spell))', SUPPLY)
+        self.assertIn('UsableCraftReagentCount(bot, owner, reagent)',
+                      section(WORLD, 'static bool CraftReagentsReady(', '/// The quiet craft'))
         self.assertIn('CanReleaseTemplate(bot, owner,', section(WORLD, 'static uint32 UsableCraftReagentCount(', 'static std::vector<std::string> ProduceForCompanion'))
 
     def test_mail_only_defers_to_an_applied_offer_and_ignores_expired_parcel_latch(self):

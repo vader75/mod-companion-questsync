@@ -55,9 +55,10 @@
             if (!focus)
                 return false;
         }
-        for (auto const& [reagent, need] : CraftReagentRequirements(plan.spell))
-            if (UsableCraftReagentCount(bot, owner, reagent) < need)
-                return false;
+        // No-gather mode: a grantable shortfall counts as ready, so the catalog can
+        // offer the craft - nothing is granted here, the order itself grants.
+        if (!CraftReagentsReady(bot, owner, plan.spell))
+            return false;
         return true;
     }
 
@@ -167,6 +168,11 @@
                 SendSupplyFailure(owner, nonce, "I don't know a recipe I can share for that item.");
                 return;
             }
+            // No-gather mode stands in for the shopping trip here too: the order
+            // grants the missing reagents exactly as the quiet craft does - scoped
+            // to this craft, never a stockpile. Readiness is checked after, on
+            // what is actually in the bags.
+            GrantCraftReagents(bot, owner, plan.spell);
             if (!SupplyCraftReady(bot, owner, plan) || bot->IsNonMeleeSpellCast(false) || bot->isMoving())
             {
                 SendSupplyFailure(owner, nonce, "I can't craft that now. Check my materials, bag space and crafting station.");
