@@ -75,6 +75,7 @@ extern DBCStorage<AreaTableEntry> sAreaTableStore;
 #include "AiFactory.h"       // which talent tree a companion is actually in
 #include "AttackAction.h"
 #include "Engine.h"
+#include "LootObjectStack.h" // strip gathering nodes from a bot's loot stack
 #include "ReachTargetActions.h"
 #include "Pet.h"             // pet autocasts: Growl and Torment are what taunt for us
 #include "SpellMgr.h"        // naming a pet ability we turn off
@@ -4986,6 +4987,34 @@ namespace
                     return true;
         return false;
     }
+
+#ifdef MOD_PLAYERBOTS
+    /// The loot lanes re-arm gathering nodes on their own clock: "add all loot"
+    /// pulls every nearby game object, and LootObject blesses a node whenever the
+    /// bot has the skill - which no-gather mode guarantees. Strategy removal alone
+    /// therefore never stops the picking. This strips node entries from a bot's
+    /// loot stack so the pursuit triggers find nothing to chase. Re-added entries
+    /// are stripped again on the next clock tick; a companion standing directly on
+    /// a node may still finish one pick in the gap.
+    static void StripGatheringLoot(Player* bot)
+    {
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai || !ai->GetAiObjectContext())
+            return;
+
+        LootObjectStack* stack = ai->GetAiObjectContext()->GetValue<LootObjectStack*>("available loot")->Get();
+        GuidVector const nearby = ai->GetAiObjectContext()->GetValue<GuidVector>("nearest game objects")->Get();
+        if (!stack || nearby.empty())
+            return;
+
+        for (ObjectGuid guid : nearby)
+        {
+            LootObject const probe(bot, guid);
+            if (probe.skillId == SKILL_HERBALISM || probe.skillId == SKILL_MINING || probe.skillId == SKILL_SKINNING)
+                stack->Remove(guid);
+        }
+    }
+#endif
 
     /// Item name for the report, or "?" when the template is gone.
     static std::string ItemNameFor(uint32 item)
@@ -10174,6 +10203,28 @@ namespace
         }
     }
 
+    /// No-gather mode's answer to the loot lanes: strip gathering entries from every
+    /// summoned companion's loot stack, on the short clock in OnUpdate.
+    void StripGatheringLootFor(Player* owner)
+    {
+        if (!owner || !owner->IsInWorld())
+            return;
+
+        std::vector<uint32> bots;
+        if (!FindCompanions(owner->GetGUID().GetCounter(), bots))
+            return;
+
+        for (uint32 const botGuid : bots)
+        {
+            Player* bot = FindCompanionPlayer(botGuid);
+            if (!bot || !bot->IsInWorld() || !IsControlledCompanion(bot, owner))
+                continue;
+#ifdef MOD_PLAYERBOTS
+            StripGatheringLoot(bot);
+#endif
+        }
+    }
+
 #include "CombatTactics.inc"
 
 class CompanionQuestSyncWorldScript : public WorldScript
@@ -10215,6 +10266,27 @@ public:
             _tacticsAccumulator = 0;
             UpdateCombatTactics();
         }
+#ifdef MOD_PLAYERBOTS
+        // No-gather mode: the loot lanes re-arm gathering nodes faster than the sync
+        // pass could catch, so the loot stacks get their own short clock.
+        if (g_cfg.enable && g_tableReady && g_cfg.professionNoGather >= 2)
+        {
+            _lootPurgeAccumulator += diff;
+            if (_lootPurgeAccumulator >= kLootPurgeMs)
+            {
+                _lootPurgeAccumulator = 0;
+                for (auto const& pair : sWorldSessionMgr->GetAllSessions())
+                {
+                    WorldSession* session = pair.second;
+                    if (!session || session->IsBot())
+                        continue;
+
+                    if (Player* player = session->GetPlayer(); player && player->IsInWorld())
+                        StripGatheringLootFor(player);
+                }
+            }
+        }
+#endif
         if (!g_cfg.enable || !g_tableReady)
             return;
 
@@ -10485,10 +10557,13 @@ private:
     uint32 _accumulator = 0;
     uint32 _gatherAccumulator = 0;
     uint32 _tacticsAccumulator = 0;
+    uint32 _lootPurgeAccumulator = 0;
 
     /// How often the gather step runs. Short enough that the companion is seen taking the
     /// object, long enough that a grid search for one spawn costs nothing.
     static constexpr uint32 kGatherTickMs = 2000;
+    /// How often no-gather mode strips gathering entries from the loot stacks.
+    static constexpr uint32 kLootPurgeMs = 2000;
     bool _announced = false;
 
     // Heartbeat window state (Debug >= 2).

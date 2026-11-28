@@ -147,7 +147,10 @@ module, so they now live in `docs/` here.
   and an order grants the missing reagents before its craft, through the same helper the quiet
   path uses. Raw
   gathering stock left in the bags is retired with the skill: the tidy pass keeps none of it
-  and hands it to the vendor (or the mail) once the pack runs tight. A flip
+  and hands it to the vendor (or the mail) once the pack runs tight. Gathering stays fully
+  reversible: a flip back to mode 0 re-arms the gather strategy within one pass, re-grants a
+  missing tool, resumes the zone catch-up, and stops stripping nodes from the loot stacks -
+  only the skill caps keep what mode 2 raised, and gathered progress is never demoted. A flip
   into mode 2 takes effect at the level each companion already is (the per-level teach latch is
   cleared so the next pass re-teaches). Mode 1 logs what mode 2 would do (at `Debug 2`, and only
   while a raise is pending) and changes nothing of what mode 2 would change — gathering continues

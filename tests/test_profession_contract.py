@@ -132,6 +132,22 @@ class ProfessionContract(unittest.TestCase):
         self.assertGreater(grant, 0)
         self.assertLess(grant, ready)
 
+    def test_flipping_gather_back_on_restores_every_piece(self):
+        # the strategy reconcile re-arms both directions from one slot
+        slot = section("// A tool that failed to land once must not wait", "// Bags first: a pack that is nearly full")
+        self.assertIn('wantGather ? "+gather" : "-gather"', slot)
+        # the loot purge only runs while the mode is on: gather on means no stripping
+        self.assertIn("g_cfg.professionNoGather >= 2", section("void OnUpdate(uint32 diff) override", "uint32 _accumulator = 0;"))
+        self.assertIn("StripGatheringLootFor(player)", SOURCE)
+        # the tool block: granted whenever the mode asks for gathering, never at mode 2
+        tool = section("no-gather mode does not pick nodes up", "// raise the ceiling only")
+        self.assertIn("g_cfg.professionNoGather < 2", tool)
+        # the zone catch-up stands down only while the mode is on, so it resumes on flip-back
+        catchup = section("static void CatchUpGatherSkill(", "/// Distance: presets")
+        self.assertIn("professionNoGather >= 2", catchup)
+        # and the teach never demotes a skill: the ceiling is raised only
+        self.assertIn("std::min<uint16>(cur, uint16(cap))", SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()
