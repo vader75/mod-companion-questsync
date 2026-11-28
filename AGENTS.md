@@ -16,7 +16,7 @@ Roles/gear/talents/strategies are described in `docs/companion-roles.md`.
 ## Tests — all must pass before a commit
 
 ```sh
-python -B -m unittest discover -s tests      # 369 tests, 13 skipped
+python -B -m unittest discover -s tests      # 386 tests, 13 skipped
 python -B addon/CompanionSync/test_parse.py  # payload parsing, 14 cases
 python -B tests/lua_sandbox.py               # both Lua files load and answer
 ```
