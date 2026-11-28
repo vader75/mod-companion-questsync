@@ -30,8 +30,8 @@
                 if (recipe.product == entry && bot->HasSpell(recipe.spell) &&
                     bot->GetPureSkillValue(lane.skill) >= recipe.requiredSkill)
                     if (SpellInfo const* spell = sSpellMgr->GetSpellInfo(recipe.spell))
-                        return { &recipe, spell };
-        return { nullptr, nullptr };
+                        return { &recipe, spell, lane.skill };
+        return { nullptr, nullptr, 0 };
     }
 
     static uint32 SupplyBatchSize(CraftPlan const& plan, ItemTemplate const* item)

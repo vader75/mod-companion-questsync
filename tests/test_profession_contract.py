@@ -39,7 +39,9 @@ class ProfessionContract(unittest.TestCase):
     def test_plan_checks_vendor_bag_space_before_choosing_a_recipe(self):
         planner = section("static std::vector<CraftPlan> PlanCrafts(", "static std::vector<std::string> ProduceForCompanion(")
         self.assertIn("CanStoreCraftOutput(bot, candidate)", planner)
-        self.assertIn("CanStoreNewItem", planner)
+        # the bag-space check lives in the grantable helper the planner consults
+        self.assertIn("CraftReagentGrantable(bot, item, need - have)", planner)
+        self.assertIn("CanStoreNewItem", section("static bool CraftReagentGrantable(", "// Prefer the best eligible recipe"))
 
     def test_auto_produce_blocks_combat_independently_of_sync_configuration(self):
         self.assertIn('if (g_cfg.autoProduce && CanManageBags(owner, bot))', SOURCE)
@@ -50,8 +52,52 @@ class ProfessionContract(unittest.TestCase):
 
     def test_missing_materials_are_not_treated_as_vendor_stock(self):
         producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
-        self.assertRegex(producer, r"if \(!IsCraftVendorReagent\(item\)\)")
+        self.assertRegex(producer, r"if \(!IsCraftVendorReagent\(item\) && g_cfg\.professionNoGather < 2\)")
         self.assertNotIn("IsGatherableReagent", producer)
+
+    def test_no_gather_mode_is_a_three_way_gate(self):
+        # off / log / act, exactly like the other staged behaviour gates
+        self.assertIn('GetOption<uint32>("CompanionQuestSync.ProfessionNoGather", 0)', SOURCE)
+        self.assertIn("if (g_cfg.professionNoGather > 2)", SOURCE)
+        teach = section("std::string TeachProfessions(", "/// Distance: presets")
+        # act: the skill is set to the cap it can already hold, and the mode takes
+        # the gather strategy off; log: the same decision spoken, nothing touched
+        self.assertIn("bot->SetSkill(skill, 0, uint16(cap), uint16(cap))", teach)
+        self.assertIn('ai->ChangeStrategy("-gather", BOT_STATE_NON_COMBAT)', teach)
+        self.assertIn("ProfessionNoGather = 1: logging only", teach)
+        # the keep-trying guarantees that only make sense for gatherers stand down
+        tools = section("static void EnsureProfessionTools(", "#endif")
+        self.assertRegex(tools, r"professionNoGather >= 2\)\s*\n\s*return")
+        catchup = section("static void CatchUpGatherSkill(", "/// A gathering profession is only as good as its tool")
+        self.assertRegex(catchup, r"professionNoGather >= 2\)\s*\n\s*return")
+
+    def test_gather_strategy_follows_the_mode_every_pass(self):
+        # playerbots drops strategies on spec/level changes, so the mode is
+        # re-asserted in the keep-trying slot, not only at teach time
+        slot = section("EnsureProfessionTools(bot);", "TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);")
+        self.assertIn('ai->HasStrategy("gather", BOT_STATE_NON_COMBAT)', slot)
+        self.assertIn('wantGather ? "+gather" : "-gather"', slot)
+
+    def test_quiet_craft_cadence_and_budget_are_configured(self):
+        self.assertIn('GetOption<uint32>("CompanionQuestSync.ProduceIntervalSeconds", 180)', SOURCE)
+        self.assertIn('GetOption<uint32>("CompanionQuestSync.ProduceMaxPerInterval", 4)', SOURCE)
+        self.assertRegex(SOURCE, r"now - lastAuto >= g_cfg\.produceInterval")
+        self.assertIn("ProduceForCompanion(bot, owner, g_cfg.produceMaxItems)", SOURCE)
+        producer = section("static std::vector<std::string> ProduceForCompanion(", "/// A free bag position")
+        self.assertRegex(producer, r"if \(maxItems && made >= maxItems\)")
+        # the manual button is an explicit ask: no cap
+        manual = section("static bool HandleProduceCommand(", "/// .companionsync learn")
+        self.assertIn("ProduceForCompanion(bot, player)", manual)
+
+    def test_combat_first_orders_the_lanes(self):
+        planner = section("static std::vector<CraftPlan> PlanCrafts(", "static std::vector<std::string> ProduceForCompanion(")
+        self.assertIn("if (g_cfg.produceCombatFirst)", planner)
+        self.assertIn("std::stable_sort(plans.begin(), plans.end()", planner)
+        priority = section("static uint8 CraftLanePriority(", "// Is a reagent the craft may be supplied")
+        self.assertIn("SKILL_ALCHEMY", priority)          # potions first
+        self.assertIn("SKILL_BLACKSMITHING || skill == SKILL_LEATHERWORKING", priority)  # then stones and kits
+        # smelted stock is the fallback rank
+        self.assertRegex(priority, r"return 2;")
 
 
 if __name__ == "__main__":

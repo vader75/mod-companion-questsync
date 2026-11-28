@@ -330,6 +330,19 @@ CompanionQuestSync.SpecMinLevel = 10
 # that minimum once, with one line in chat. Organically-gathered skill is never reduced.
 CompanionQuestSync.GatherCatchUp = 1
 
+#    How a companion's professions are established. 0 = the gathering half of the
+#    pair supplies the crafts: the companion picks up what it passes and waits for
+#    its own herbs, ore and hides (the default). 1 = log only: the module says what
+#    mode 2 would change (at Debug 2, and only while a raise is pending), and
+#    changes nothing of what mode 2 would change - gathering continues as in
+#    mode 0. 2 = the professions are established at the level's own tier ceiling
+#    without walking a node: both skills are set to the cap, no gather strategy is
+#    armed, no tools are granted, and every reagent a known recipe asks is granted
+#    in small stacks at craft time - the shopping trip, stood in for entirely. A
+#    flip into mode 2 takes effect at the level each companion already is.
+# Default: 0
+CompanionQuestSync.ProfessionNoGather = 0
+
 #    Near a trade or repair NPC the companion tops up the shop-bought reagents its
 #    known recipes ask (vials, threads, coal) to a small stock, and a repairer's
 #    hammer mends its gear at the usual price. At most once every five minutes per
@@ -341,6 +354,25 @@ CompanionQuestSync.VendorRestock = 1
 #    use in play, curated surplus delivery. The Produce button still gives the
 #    report on demand. 0 = craft only when asked.
 CompanionQuestSync.AutoProduce = 1
+
+#    Seconds between quiet crafts per companion (AutoProduce). Values below 30
+#    are raised to 30.
+# Default: 180
+CompanionQuestSync.ProduceIntervalSeconds = 180
+
+#    The most items one quiet craft may produce per companion, counted across
+#    every product in the pass. What the recipe multipliers proc on top counts
+#    as it lands; the manual Produce report is not capped. 0 = uncapped (the
+#    bag-space checks stay either way).
+# Default: 4
+CompanionQuestSync.ProduceMaxPerInterval = 4
+
+#    Fund the fight first: when the pass has more to craft than the budget
+#    allows, the combat-useful lane is planned before raw stock - the order
+#    matters where a profession splits across lanes (Blacksmithing's goods
+#    before its smelting); single-lane professions are unaffected.
+# Default: 1
+CompanionQuestSync.ProduceCombatFirst = 1
 
 #    Offer clear upgrades and requested supplies at stationary, out-of-combat
 #    town stops, at most once every ten minutes per owner. 0 = manual trade only.

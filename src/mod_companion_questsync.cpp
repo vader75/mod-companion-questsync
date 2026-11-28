@@ -159,8 +159,12 @@ namespace
         std::string formation  = "auto";    // auto | close | tight | loose | spread | lead | off
 
         bool gatherCatchUp     = true;      // the land asks a minimum of its gatherers
+        uint32 professionNoGather = 0;      // 0 gather, 1 log the change, 2 professions at the cap without gathering
         bool vendorRestock     = true;      // near a trade/repair NPC: reagents topped up, gear mended
         bool autoProduce       = true;      // crafting is its own habit; the button is for the report
+        uint32 produceInterval  = 180;      // seconds between quiet crafts
+        uint32 produceMaxItems  = 4;        // one quiet craft makes at most this many items (0 = uncapped)
+        bool produceCombatFirst = true;     // potions and weapon stones before smelted stock
         bool autoTrade         = true;      // beside you with something spare: the trade opens itself
         uint32 extraBagItem    = 20400;     // Pumpkin Bag, 16 slots, no level requirement
         uint32 extraBags       = 4;         // bag slots to fill with it (0 = off)
@@ -809,8 +813,31 @@ namespace
         g_cfg.specMinLevel = sConfigMgr->GetOption<uint32>("CompanionQuestSync.SpecMinLevel", 10);
 
         g_cfg.gatherCatchUp      = sConfigMgr->GetOption<bool>("CompanionQuestSync.GatherCatchUp", true);
+        g_cfg.professionNoGather = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ProfessionNoGather", 0);
         g_cfg.vendorRestock      = sConfigMgr->GetOption<bool>("CompanionQuestSync.VendorRestock", true);
         g_cfg.autoProduce        = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoProduce", true);
+        g_cfg.produceInterval    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ProduceIntervalSeconds", 180);
+        g_cfg.produceMaxItems    = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ProduceMaxPerInterval", 4);
+        g_cfg.produceCombatFirst = sConfigMgr->GetOption<bool>("CompanionQuestSync.ProduceCombatFirst", true);
+
+        if (g_cfg.professionNoGather > 2)
+            g_cfg.professionNoGather = 2;
+
+        if (g_cfg.produceInterval < 30)
+            g_cfg.produceInterval = 30;
+
+        // A flip into no-gather mode must take effect at the level each companion
+        // already is, not at its next one: the per-level teach latch would
+        // otherwise hold every skill below the cap until the companion dings.
+        // Clearing it makes the next pass re-teach (idempotent, and silent where
+        // nothing has to change).
+        static uint32 s_prevNoGather = g_cfg.professionNoGather;
+        if (g_cfg.professionNoGather != s_prevNoGather)
+        {
+            s_prevNoGather = g_cfg.professionNoGather;
+            if (g_cfg.professionNoGather >= 2)
+                g_taughtLevel.clear();
+        }
         g_cfg.autoTrade          = sConfigMgr->GetOption<bool>("CompanionQuestSync.AutoTrade", true);
         g_cfg.extraBagItem       = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBagItem", 20400);
         g_cfg.extraBags          = sConfigMgr->GetOption<uint32>("CompanionQuestSync.ExtraBags", 4);
@@ -4642,7 +4669,8 @@ namespace
                     tookUp += " and ";
                 tookUp += entry.name;
             }
-            if (entry.tool && !bot->GetItemCount(entry.tool))
+            // no-gather mode does not pick nodes up, so no pick or knife is owed
+            if (entry.tool && g_cfg.professionNoGather < 2 && !bot->GetItemCount(entry.tool))
             {
                 ItemPosCountVec dest;
                 if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry.tool, 1) == EQUIP_ERR_OK)
@@ -4652,11 +4680,41 @@ namespace
             // raise the ceiling only; gathered progress is never reset
             uint16 const cur = bot->GetSkillValue(skill);
             bot->SetSkill(skill, 0, std::min<uint16>(cur, uint16(cap)), uint16(cap));
+
+            // ProfessionNoGather 2: the profession is established at the level's own
+            // tier ceiling without walking a node - the current value rises to the cap
+            // it can already hold. Mode 1 says what it would do (at Debug 2) and
+            // touches nothing.
+            if (cur < cap)
+            {
+                if (g_cfg.professionNoGather == 1)
+                {
+                    if (g_cfg.debug >= 2)
+                        LOG_INFO("server.loading",
+                                 "[CompanionQuestSync] {} would set {} to {} (ProfessionNoGather = 1: logging only)",
+                                 bot->GetName(), entry.name, cap);
+                }
+                else if (g_cfg.professionNoGather >= 2)
+                {
+                    bot->SetSkill(skill, 0, uint16(cap), uint16(cap));
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] {} set {} to {} without gathering (ProfessionNoGather = 2)",
+                             bot->GetName(), entry.name, cap);
+                }
+            }
         }
         TeachCraftRecipes(bot, pair.second);
 
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-            ai->ChangeStrategy("+gather", BOT_STATE_NON_COMBAT);
+        {
+            // the strategy follows the mode: a no-gather companion is not asked to work
+            // its own nodes, and the upkeep slot re-asserts either side after playerbots
+            // drops strategies on a spec or level change
+            if (g_cfg.professionNoGather >= 2)
+                ai->ChangeStrategy("-gather", BOT_STATE_NON_COMBAT);
+            else
+                ai->ChangeStrategy("+gather", BOT_STATE_NON_COMBAT);
+        }
 
         // A body taught before the pairs existed can carry a stale gathered skill outside
         // its own pair - a shaman-smith picking herbs. With a negligible value it is
@@ -4674,7 +4732,9 @@ namespace
 
         if (!tookUp.empty())
             SayToOwner(bot, owner, "I took up " + tookUp +
-                       " - I will gather what I pass from now on.", 30);
+                       (g_cfg.professionNoGather >= 2
+                           ? " - the materials find their way to me."
+                           : " - I will gather what I pass from now on."), 30);
 
         return tookUp;
     }
@@ -4925,6 +4985,7 @@ namespace
     {
         CraftRecipe const* recipe;
         SpellInfo const* spell;
+        uint16 skill;
     };
 
     // Triggered casts skip the core's CREATE_ITEM space check. Do it before the
@@ -4947,6 +5008,30 @@ namespace
         return false;
     }
 
+    // Combat-useful crafts outrank raw stock when the interval budget can only
+    // fund one: a potion feeds the fight and a weapon stone edges it, while a
+    // smelted bar is only ever an intermediate for the next craft.
+    static uint8 CraftLanePriority(uint16 skill)
+    {
+        if (skill == SKILL_ALCHEMY)
+            return 0;
+        if (skill == SKILL_BLACKSMITHING || skill == SKILL_LEATHERWORKING)
+            return 1;
+        return 2;
+    }
+
+    // Is a reagent the craft may be supplied with beyond what the companion
+    // gathered? The shop carries only the listed stock - unless the profession
+    // mode says the shopping trip is a stand-in entirely (ProfessionNoGather 2).
+    static bool CraftReagentGrantable(Player* bot, uint32 item, uint32 missing)
+    {
+        if (g_cfg.professionNoGather < 2 && !IsCraftVendorReagent(item))
+            return false;
+
+        ItemPosCountVec dest;
+        return bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, missing) == EQUIP_ERR_OK;
+    }
+
     // Prefer the best eligible recipe with raw materials and bag room. If none
     // can run, keep the best eligible recipe so a manual request explains why.
     static std::vector<CraftPlan> PlanCrafts(Player* bot, uint16 profession)
@@ -4955,7 +5040,7 @@ namespace
         for (CraftLane const& lane : CraftLanes(profession))
         {
             uint16 const attained = bot->GetPureSkillValue(lane.skill);
-            CraftPlan chosen = { nullptr, nullptr };
+            CraftPlan chosen = { nullptr, nullptr, 0 };
             for (CraftRecipe const& recipe : lane.recipes)
             {
                 if (attained < recipe.requiredSkill || !bot->HasSpell(recipe.spell))
@@ -4963,7 +5048,7 @@ namespace
                 SpellInfo const* spell = sSpellMgr->GetSpellInfo(recipe.spell);
                 if (!spell)
                     continue;
-                CraftPlan const candidate = { &recipe, spell };
+                CraftPlan const candidate = { &recipe, spell, lane.skill };
                 if (!chosen.recipe)
                     chosen = candidate;
 
@@ -4977,9 +5062,7 @@ namespace
                     uint32 const have = bot->GetItemCount(item);
                     if (have >= need)
                         continue;
-                    ItemPosCountVec dest;
-                    ready = IsCraftVendorReagent(item) &&
-                        bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item, need - have) == EQUIP_ERR_OK;
+                    ready = CraftReagentGrantable(bot, item, need - have);
                 }
                 if (ready)
                 {
@@ -4990,6 +5073,12 @@ namespace
             if (chosen.recipe)
                 plans.push_back(chosen);
         }
+
+        if (g_cfg.produceCombatFirst)
+            std::stable_sort(plans.begin(), plans.end(), [](CraftPlan const& a, CraftPlan const& b)
+            {
+                return CraftLanePriority(a.skill) < CraftLanePriority(b.skill);
+            });
         return plans;
     }
 
@@ -5009,12 +5098,19 @@ namespace
         return CanReleaseTemplate(bot, owner, sObjectMgr->GetItemTemplate(entry)) ? bot->GetItemCount(entry) : 0;
     }
 
-    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner)
+    /// The quiet craft (and the manual Produce report). `maxItems` caps the items a
+    /// single call may create across every product - the interval habit passes the
+    /// configured budget; the manual button passes 0, an explicit ask needs no cap.
+    static std::vector<std::string> ProduceForCompanion(Player* bot, Player* owner, uint32 maxItems = 0)
     {
         std::vector<std::string> report;
         uint16 const profession = ClassProfessionPair(bot->getClass()).second;
+        uint32 made = 0;
         for (CraftPlan const& plan : PlanCrafts(bot, profession))
         {
+            if (maxItems && made >= maxItems)
+                break;
+
             uint32 const product = plan.recipe->product;
             std::string missing;
             auto noteMissing = [&](uint32 item, uint32 have, uint32 need)
@@ -5027,12 +5123,17 @@ namespace
             for (auto const& [item, need] : reagents)
             {
                 uint32 const have = UsableCraftReagentCount(bot, owner, item);
-                if (have < need && (!IsCraftVendorReagent(item) ||
+                bool const grantable = IsCraftVendorReagent(item) || g_cfg.professionNoGather >= 2;
+                if (have < need && (!grantable ||
                     !CanReleaseTemplate(bot, owner, sObjectMgr->GetItemTemplate(item))))
                     noteMissing(item, have, need);
             }
             if (!missing.empty())
             {
+                if (g_cfg.professionNoGather == 1 && g_cfg.debug >= 2)
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] {} would grant the missing reagents for {} (ProfessionNoGather = 1: logging only)",
+                             bot->GetName(), ItemNameFor(product));
                 report.push_back("I need " + missing + " for " + ItemNameFor(product));
                 continue;
             }
@@ -5043,11 +5144,13 @@ namespace
                 continue;
             }
 
-            // Only the explicit shop supplies may be topped up. The core then
-            // consumes the reagents even though the craft runs immediately.
+            // Only the explicit shop supplies may be topped up - or, in no-gather
+            // mode, every reagent the recipe asks: the shopping trip is a stand-in.
+            // The core then consumes the reagents even though the craft runs
+            // immediately.
             for (auto const& [item, need] : reagents)
             {
-                if (!IsCraftVendorReagent(item))
+                if (!IsCraftVendorReagent(item) && g_cfg.professionNoGather < 2)
                     continue;
                 uint32 const have = UsableCraftReagentCount(bot, owner, item);
                 if (have >= need)
@@ -5070,6 +5173,9 @@ namespace
             uint32 const before = bot->GetItemCount(product);
             for (uint8 batch = 0; batch < 2; ++batch)
             {
+                if (maxItems && made >= maxItems)
+                    break;
+
                 bool const ready = std::all_of(reagents.begin(), reagents.end(), [&](auto const& pair)
                 {
                     auto const& [item, need] = pair;
@@ -5081,7 +5187,9 @@ namespace
                 uint32 const prior = bot->GetItemCount(product);
                 bot->CastSpell(bot, plan.recipe->spell,
                     TriggerCastFlags(TRIGGERED_FULL_MASK & ~TRIGGERED_IGNORE_POWER_AND_REAGENT_COST));
-                if (bot->GetItemCount(product) <= prior)
+                if (bot->GetItemCount(product) > prior)
+                    made += bot->GetItemCount(product) - prior;
+                else
                     break;
             }
 
@@ -5430,6 +5538,11 @@ namespace
         if (!g_cfg.gatherCatchUp || !owner || !bot->IsInWorld() || !bot->IsAlive())
             return;
 
+        // a no-gather companion already sits at its level's cap; the land asks
+        // nothing of it and the catch-up's whisper would be a lie
+        if (g_cfg.professionNoGather >= 2)
+            return;
+
         if (owner->GetMapId() != bot->GetMapId() || !owner->GetZoneId())
             return;
 
@@ -5505,6 +5618,10 @@ namespace
         // same as the catch-up: the grant is a bag write, and a companion in a running
         // fight would never see a quiet pass
         if (!bot->IsInWorld() || !bot->IsAlive())
+            return;
+
+        // in no-gather mode nothing is ever picked up, so no tool is owed
+        if (g_cfg.professionNoGather >= 2)
             return;
 
         auto const pair = ClassProfessionPair(bot->getClass());
@@ -8027,6 +8144,16 @@ namespace
         // rides the same slot - what the land asks does not wait for a dirty pass either.
         EnsureProfessionTools(bot);
         CatchUpGatherSkill(owner, bot);
+        // the gather strategy follows the profession mode: a no-gather companion is
+        // not asked to work its own nodes. Re-asserted in this keep-trying slot
+        // because playerbots drops strategies on spec and level changes, and a stale
+        // strategy would have the mode's answer depend on which teach ran last.
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+        {
+            bool const wantGather = g_cfg.professionNoGather < 2;
+            if (ai->HasStrategy("gather", BOT_STATE_NON_COMBAT) != wantGather)
+                ai->ChangeStrategy(wantGather ? "+gather" : "-gather", BOT_STATE_NON_COMBAT);
+        }
         // Learn new supported recipes when attained skill rises, without a button.
         TeachCraftRecipes(bot, ClassProfessionPair(bot->getClass()).second);
         // Bags first: a pack that is nearly full is trimmed back to the recipe budget
@@ -8039,18 +8166,26 @@ namespace
             SellBagSurplus(owner, bot);
             RestockNearVendor(owner, bot);
         }
-        // crafting is the companion's own habit, not a request: every few minutes it
-        // turns what its gathering paid for into the useful thing, silently - the
-        // products land in bags; curated surplus may be delivered later.
+        // crafting is the companion's own habit, not a request: on the configured
+        // cadence it turns what its gathering paid for (or, in no-gather mode, what
+        // the stand-in trip supplies) into the useful thing, silently - the products
+        // land in bags; curated surplus may be delivered later.
         // The Produce button stays for the moment the report itself is wanted.
         if (g_cfg.autoProduce && CanManageBags(owner, bot))
         {
             uint32& lastAuto = g_lastAutoProduce[botGuid];
             uint32 const now = uint32(time(nullptr));
-            if (!lastAuto || now - lastAuto >= 180)
+            if (!lastAuto || now - lastAuto >= g_cfg.produceInterval)
             {
                 lastAuto = now;
-                ProduceForCompanion(bot, owner);
+                auto const crafted = ProduceForCompanion(bot, owner, g_cfg.produceMaxItems);
+                // only a made product is worth a line: the pass runs every interval,
+                // and the "I need / I couldn't" repeats would drown the log at Debug 2
+                if (g_cfg.debug >= 2)
+                    for (std::string const& line : crafted)
+                        if (line.rfind("I made", 0) == 0)
+                            LOG_INFO("server.loading", "[CompanionQuestSync] {} quiet craft: {}",
+                                     bot->GetName(), line);
             }
         }
         if (CanManageBags(owner, bot))

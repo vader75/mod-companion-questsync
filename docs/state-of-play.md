@@ -133,3 +133,29 @@ module, so they now live in `docs/` here.
 - **r124 togetherness** (`90185cd`): accept/abandon hooks walk every bound companion (abandon = the sweep's full three-call drop, so no orphan source items); death whisper once per death + `d` flag in the comp-sync payload (addon card shows "dead"); ghost-release no longer drags the living companion to a graveyard (teleport hook skips ghosts, executor holds 3 min, OnPlayerResurrect re-arms follow); taxi follow armed by zone/map change only when `!IsInFlight()`; combat-skipped follows retry for 60 s; summon RECALLS in-world companions beyond 120 yd (with dead/combat/instance guards); dungeon/raid maps excluded from follow (TeleportTo would land the bot in its own instance).
 - **r125 polish** (`3fac33e`): `.companionsync level` is raise-only (never GiveLevel downwards); gather reached-but-full now whispers why; commands print names, not guids; the grouped-gate message matches what still runs; g_multiCompanion is per owner (speaker map); CompanionSync cards keep their first slot (no reorder under the mouse), releasing expires in 25 s, clicks acknowledge with "asking the server...", notices fade after 8 s, the header subtitle shows "N companions · server answering"; CompanionPins: hand-in pins live 5 min and a g→h transition refreshes the timestamp, lifetime persists, LoadDB prunes expired pins, the legend lists "to finish", label-collision math compares label centres, AddPin dedupes by quest too, and pins draw only on their own zone's map.
 - Deferred on purpose: in-window quest log panel, window scale option, per-zone pin calibration.
+
+## The no-gather option set (28 Nov 2026)
+
+- **`ProfessionNoGather` (0/1/2, default 0)** — how a companion's professions are established.
+  Mode 0 is today's behaviour (the gathering half supplies the crafts). Mode 2 establishes both
+  skills at the level's tier ceiling without walking a node: no gather strategy is armed (the
+  per-pass upkeep re-asserts the strategy toward the mode, because playerbots drops strategies on
+  spec and level changes), no pick or knife is granted, the zone catch-up stands down, and every
+  reagent a known recipe asks for is granted in small stacks at craft time — the vendor-only
+  scoping widens to all reagents, scoped to the craft being made, never as a stockpile. A flip
+  into mode 2 takes effect at the level each companion already is (the per-level teach latch is
+  cleared so the next pass re-teaches). Mode 1 logs what mode 2 would do (at `Debug 2`, and only
+  while a raise is pending) and changes nothing of what mode 2 would change — gathering continues
+  as in mode 0.
+- **`ProduceIntervalSeconds` (180, floor 30) / `ProduceMaxPerInterval` (4, 0 = uncapped) /
+  `ProduceCombatFirst` (1)** — the quiet craft's cadence, budget and ordering. The interval
+  replaces the hardcoded 180 s; the budget counts items across every product in one pass (the
+  manual `.companionsync produce` report stays uncapped); combat-first plans the combat-useful
+  lane before raw stock where a profession splits across lanes (Blacksmithing's goods before its
+  smelting). The quiet-craft log line only reports a made product, so Debug 2 stays readable.
+  The potion ladder
+  (118/858/929/1710/3928/13446) was verified against this realm's `item_template` — required
+  levels 1/3/12/21/35/45, so the best known recipe is the tier-appropriate one.
+- The suite's `s13` scenario (realm repo, `tests/companion-sim/scenarios.py`) flips the live conf
+  to mode 2 for its own window and asserts the teach lines (`set <profession> to <cap> without
+  gathering`) and a quiet-craft product line, then restores the conf.
