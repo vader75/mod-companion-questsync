@@ -198,9 +198,16 @@ the new server build. Install CompanionSync 2.9.0 and open a warrior companion's
 On a test realm, use two grouped companions and leave a dungeon via its exit portal.
 Start with one companion ready and the other in combat. Confirm the ready companion
 arrives outside, then clear combat on the second companion after 60 seconds but before
-five minutes. Verify it arrives outside and `Server.log` records `requested delayed dungeon exit teleport`.
+five minutes. While it is still held past the one-minute mark the owner is whispered
+once, in the companion's voice, that it will follow on its own - no summon needed.
+Verify it arrives outside and `Server.log` records `requested delayed dungeon exit teleport`
+plus, when the window closes, `delayed exit follow for owner … ended after …s`; a
+companion that never catches up is named in `follow window for owner … expired after …s
+(last hold: …)`.
 Repeat from a Dungeon Finder group using **Teleport Out**. If you re-enter the dungeon
-before the straggler is ready, the old outdoor catch-up must no longer run.
+before the straggler is ready, the old outdoor catch-up must no longer run. The same
+scenarios replay without a server in `tests/worldport-probe/run.bat` (all eight must
+print PASS); the Python suite fails when the probe's source slices drift.
 
 ## What each failure means for you
 

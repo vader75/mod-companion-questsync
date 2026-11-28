@@ -36,7 +36,18 @@ class QuestSimulation(unittest.TestCase):
                         follow.index('ObjectAccessor::FindPlayer'))
         self.assertIn('bot->GetMapId() == travel.sourceMap', follow)
         self.assertIn('bot->GetInstanceId() == travel.sourceInstance', follow)
-        self.assertLess(follow.index('if (extendedOnly'), follow.index('bot->IsInCombat()'))
+        self.assertLess(follow.index('if (extendedOnly'), follow.index('anySkipped = true'),
+                        'the extended-window gate must come before a companion can be held')
+
+    def test_follow_gives_up_loudly_and_tells_the_owner_why(self):
+        follow = section('void FollowOwnerThroughTeleport(', 'void AddSkipped(')
+        self.assertIn('holdNote', follow, 'the last hold is not recorded')
+        self.assertIn('expired after', follow, 'expiry is silent')
+        self.assertIn('delayed exit follow for owner', follow, 'extended window ends silently')
+        self.assertIn('in combat', follow, 'hold reasons are not named')
+        self.assertLess(follow.index('dungeonExit && extendedOnly'),
+                        follow.index('SayToOwner(bot, owner'),
+                        'the straggler whisper is not gated to a confirmed dungeon exit past the normal window')
 
     def test_ender_hints_rerank_spawn_candidates_and_pins_follow_the_bot_log(self):
         enders = section('struct EnderSpot', 'std::string MapCoords(')

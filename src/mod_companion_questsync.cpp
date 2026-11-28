@@ -366,6 +366,7 @@ namespace
         float x = 0.0f, y = 0.0f, z = 0.0f;
         uint32 sourceMap = 0;
         uint32 sourceInstance = 0;
+        std::string holdNote;   // why a companion was last held back from following
     };
     std::map<uint32, PendingFollow> g_pendingFollow;
     std::set<uint32> g_taxiInProgress;
@@ -2640,6 +2641,10 @@ namespace
             bool const extendedOnly = age > Timing::FollowRetry;
             if (age > (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry))
             {
+                LOG_INFO("server.loading", "[CompanionQuestSync] {} for owner {} expired after {}s ({})",
+                         dungeonExit ? "dungeon-exit follow window" : "follow window", ownerGuid, age,
+                         travel.holdNote.empty() ? std::string("no companion hold recorded")
+                                                 : "last hold: " + travel.holdNote);
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
@@ -2657,6 +2662,10 @@ namespace
 
             if (!owner || !FindCompanions(ownerGuid, bots))
             {
+                if (g_cfg.debug >= 1)
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] follow intent for owner {} dropped (owner or companions not in world)",
+                             ownerGuid);
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
@@ -2670,6 +2679,9 @@ namespace
             }
             if (owner->GetMap()->Instanceable() || (dungeonExit && owner->GetMapId() != travel.map))
             {
+                LOG_INFO("server.loading", "[CompanionQuestSync] follow intent for owner {} dropped - owner {}",
+                         ownerGuid,
+                         owner->GetMap()->Instanceable() ? "entered an instanceable map" : "left the exit map");
                 itr = g_pendingFollow.erase(itr);
                 continue;
             }
@@ -2682,16 +2694,46 @@ namespace
 
             bool anySkipped = false;
 
+            auto holdReason = [](Player* bot) -> std::string
+            {
+                if (bot->IsInCombat()) return "in combat";
+                if (!bot->IsAlive()) return "dead";
+                if (bot->IsBeingTeleported()) return "teleporting";
+                if (IsOnTaxi(bot)) return "on a taxi";
+                if (bot->GetTransport()) return "on a transport";
+                if (bot->GetVehicle()) return "in a vehicle";
+                if (bot->IsFlying()) return "flying";
+                return "falling";
+            };
+
             for (uint32 const botGuid : bots)
             {
                 Player* bot = FindCompanionPlayer(botGuid);
                 if (extendedOnly && !(bot && bot->IsInWorld() &&
                     bot->GetMapId() == travel.sourceMap && bot->GetInstanceId() == travel.sourceInstance &&
                     IsControlledCompanion(bot, owner) && owner->GetGroup() && bot->GetGroup() == owner->GetGroup()))
+                {
+                    itr->second.holdNote = !bot ? std::string("a companion is not in world")
+                        : (!bot->IsInWorld() || bot->GetMapId() != travel.sourceMap || bot->GetInstanceId() != travel.sourceInstance)
+                            ? std::string(bot->GetName()) + ": left the exit dungeon"
+                        : !IsControlledCompanion(bot, owner)
+                            ? std::string(bot->GetName()) + ": no longer a controlled companion"
+                            : std::string(bot->GetName()) + ": not in the owner's party";
                     continue;
+                }
                 if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
                     IsOnTaxi(bot) || bot->GetTransport() || bot->GetVehicle() || bot->IsFlying() || bot->IsFalling())
                 {
+                    itr->second.holdNote = bot ? std::string(bot->GetName()) + ": " + holdReason(bot)
+                                               : std::string("a companion is not in world");
+                    if (g_cfg.debug >= 1)
+                        LOG_INFO("server.loading", "[CompanionQuestSync] {} is held back ({}s left to follow)",
+                                 itr->second.holdNote,
+                                 (dungeonExit ? Timing::DungeonExitRetry : Timing::FollowRetry) - age);
+                    if (dungeonExit && extendedOnly && bot)
+                        SayToOwner(bot, owner,
+                                   "I'm still tied up in here - I'll follow you out on my own, no need to summon me.",
+                                   300, 0, false);
                     anySkipped = true;   // held for the retry window, not abandoned
                     continue;
                 }
@@ -2731,7 +2773,15 @@ namespace
 
             // Unsafe or offline companions hold the entry until the retry window expires.
             if (!anySkipped)
+            {
+                if (dungeonExit)
+                    LOG_INFO("server.loading",
+                             "[CompanionQuestSync] delayed exit follow for owner {} ended after {}s ({})",
+                             ownerGuid, age,
+                             travel.holdNote.empty() ? std::string("companions caught up")
+                                                     : "gave up: " + travel.holdNote);
                 itr = g_pendingFollow.erase(itr);
+            }
             else
                 ++itr;
         }
