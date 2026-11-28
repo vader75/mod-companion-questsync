@@ -23,7 +23,9 @@ same name when the roster refreshes. The window stays compact even with four com
 
 - **Quests:** active quest count and a shortcut to the shared CompanionPins map.
 - **Professions:** gathering and crafting progress, with **Train** and **Teach skills**
-  scoped to the selected companion.
+  scoped to the selected companion. A small **auto** chip beside the gathering track
+  marks a companion that produces on its own (`ProfessionNoGather 2`): gathering is
+  retired, materials arrive at craft time, and hovering the card explains the mode.
 - **Combat:** **Tank First** waits for the tank to bring an enemy within reach;
   **Gap Closers** controls warrior Charge and Intercept (`Off` or `When safe`);
   **Guard Flanks** skips an optional rear flank near an idle hostile outdoors.
@@ -31,10 +33,12 @@ same name when the roster refreshes. The window stays compact even with four com
   them; **Unavailable** means the server build or preference migration is missing.
 - **Supplies:** use **Collect delivery** for the usual curated handoff, or click
   **Choose supply** for a specific item. **In bags** shows the amount they can
-  spare; **Can craft** means they know a supported recipe and have its materials
-  and crafting station. **Not ready** recipes cannot be ordered. Select **Take** for
-  stock or **Craft** to make one batch using the companion's carried materials. The
-  trade contains only the selected item. Use **Refresh supplies** to check again.
+  spare; **Can craft** means they know a supported recipe and can run it - carried
+  materials or, in no-gather mode, reagents granted for the craft - plus the
+  crafting station. **Not ready** recipes cannot be ordered. Select **Take** for
+  stock or **Craft** to make one batch using the companion's carried or granted
+  materials. The trade contains only the selected item. Use **Refresh supplies**
+  to check again.
   Stand nearby, both out of combat, and click **Accept** in the normal trade window.
   These one-off requests never cost trade gold and are not sent by mail.
   The picker requires a compatible server module and both
@@ -106,7 +110,8 @@ Skill sync: Healy,182,83,150,171,76,150
 ```
 
 Flags: `o` in world, `g` in your party, `s` same level, `b` behind (you carry a quest it
-has not got), `-` offline. Long payloads arrive as `Comp sync i/n:` and are joined when
+has not got), `p` produces on its own (no-gather mode; shows the **auto** chip), `d` dead
+or ghost, `-` offline. Long payloads arrive as `Comp sync i/n:` and are joined when
 every part is in. The payload is authoritative — anything not mentioned is not bound, so
 the window empties itself when companions are released.
 
