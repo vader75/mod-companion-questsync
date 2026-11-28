@@ -268,6 +268,7 @@ function G.CardState(companion)
     local releasing = G.releasing and G.releasing[companion.name]
     local state = {
         online = online, dead = dead, releasing = releasing,
+        autoProduce = online and not releasing and G.HasFlag(companion, "p") or nil,
         status = releasing and "Releasing…" or dead and "Dead" or not online and "Dismissed"
             or G.HasFlag(companion, "g") and "In party" or "Summoned",
     }
@@ -353,6 +354,14 @@ local function CreateCard()
     card.suppliesTitle = Label(card, "SUPPLIES", 440, -57)
     card.gatherTrack = SkillTrack(card, 224, -77)
     card.craftTrack = SkillTrack(card, 224, -104)
+
+    -- no-gather mode: a quiet chip at the right end of the gathering track says the
+    -- companion produces on its own instead of working nodes (server 'p' flag)
+    card.autoBadge = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    card.autoBadge:SetJustifyH("RIGHT")
+    card.autoBadge:SetPoint("TOPRIGHT", card.gatherTrack, "TOPRIGHT", 0, -4)
+    card.autoBadge:SetText(COL_WARN .. "auto" .. COL_RESET)
+    card.autoBadge:Hide()
     card.quests = Label(card, "", 16, -77, 192)
     card.bags = Label(card, "", 440, -77, 192)
     card.merchantHint = Label(card, "Stop by a merchant", 440, -132, 192)
@@ -368,6 +377,9 @@ local function CreateCard()
         GameTooltip:AddLine(self.companion.name, 1, 0.85, 0.4)
         if G.HasFlag(self.companion, "b") then
             GameTooltip:AddLine("You carry a quest this companion has not picked up yet.", 0.75, 0.75, 0.75, true)
+        end
+        if self.autoBadge and self.autoBadge:IsShown() then
+            GameTooltip:AddLine("Gathering is retired: this companion produces on its own - its skills sit at the level's cap, materials are supplied, and spare stock is sold when the pack runs tight.", 0.75, 0.75, 0.75, true)
         end
         if self.merchantHint:IsShown() then
             GameTooltip:AddLine("Stop beside a merchant and let your companion catch up. If automatic junk selling is enabled, they can sell eligible junk once both of you are out of combat and not trading.", 1, 0.82, 0.4, true)
@@ -1003,6 +1015,7 @@ function G.Refresh()
                 UpdateSkill(card.craftTrack, state.craft, "Crafting · Unavailable", 0.72, 0.62, 0.37)
                 card.gatherTrack:Show()
                 card.craftTrack:Show()
+                if state.autoProduce then card.autoBadge:Show() else card.autoBadge:Hide() end
                 local free = state.free
                 local bags = free == 0 and "Bags full" or ("%d bag slots free"):format(free)
                 card.quests:SetText(COL_MUTED .. ("%d active quest%s"):format(state.quests, state.quests == 1 and "" or "s") .. COL_RESET)

@@ -71,6 +71,14 @@ CASES = [
         "Healy,5,1,32,4,b,88",
         [{"name": "Healy", "classId": 5, "raceId": 1, "level": 32, "quests": 4, "flags": "b", "free": 88}],
     ),
+    # no-gather mode: the 'p' flag rides the flags run - the card shows the auto badge
+    (
+        "Healy,5,1,12,2,ogsp,64|Ghost,0,0,0,0,-,0",
+        [
+            {"name": "Healy", "classId": 5, "raceId": 1, "level": 12, "quests": 2, "flags": "ogsp", "free": 64},
+            {"name": "Ghost", "classId": 0, "raceId": 0, "level": 0, "quests": 0, "flags": "-", "free": 0},
+        ],
+    ),
 ]
 
 

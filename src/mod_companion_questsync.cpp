@@ -9360,6 +9360,11 @@ namespace
                 // Dead or ghost: the card in the window must not read like a healthy one.
                 if (!bot->IsAlive())
                     flags += "d";
+
+                // No-gather mode: the card marks the companion as producing on its
+                // own - the badge beside the gathering track reads this flag.
+                if (g_cfg.professionNoGather >= 2)
+                    flags += "p";
             }
             else
             {
